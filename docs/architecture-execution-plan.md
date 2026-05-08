@@ -184,6 +184,9 @@
 
 ## 11. 当前进度
 
-阶段 1 的第一部分已经完成：API 路由已从单个 `app/api/routes.py` 拆分为领域路由分包，并保留原有 HTTP path 与响应结构。
+阶段 1 已完成：
 
-下一步执行阶段 1 的第二部分：拆分 `app/cli.py`，将命令处理迁移到 `app/cli_commands/`。
+- API 路由已从单个 `app/api/routes.py` 拆分为领域路由分包，并保留原有 HTTP path 与响应结构。
+- CLI 入口已薄化，命令执行逻辑迁移到 `app/cli_commands/runner.py`，共享 CLI helper 迁移到 `app/cli_commands/`。
+
+下一步执行阶段 2：建立 Application / Domain / Infrastructure 分层骨架，并开始将 API / CLI 共同使用的用例迁入 application 层。
