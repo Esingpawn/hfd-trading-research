@@ -7,6 +7,7 @@ import time
 from typing import Sequence
 
 from app.constants import CORE_INDICATORS, REQUIRED_SCORING_INDICATORS, RESEARCH_INDICATORS, TIMEFRAMES
+from app.application.storage import get_storage_health, run_storage_maintenance
 from app.cli_commands.db_helpers import collect_once, collection_result_payload, latest_collection_run
 from app.cli_commands.utils import jsonable
 from app.db import SessionLocal, engine, init_db
@@ -18,12 +19,6 @@ from app.services.collector import SnapshotCollector
 from app.services.paper import mark_open_trades, paper_scan
 from app.services.paper_loop import paper_loop_decision
 from app.services.signal_attribution import backfill_signal_outcomes, signal_effectiveness
-from app.services.storage_health import (
-    ensure_performance_indexes,
-    sqlite_checkpoint,
-    sqlite_optimize,
-    storage_health,
-)
 from app.services.strategy import evaluate_symbol
 from app.services.telegram import TelegramClient, extract_chat_candidates
 
@@ -515,24 +510,20 @@ async def run(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "storage-health":
         async with SessionLocal() as session:
-            result = await storage_health(session)
+            result = await get_storage_health(session)
         print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
         await engine.dispose()
         return 0
 
     if args.command == "storage-maintain":
-        result: dict[str, object] = {"actions": {}}
         async with SessionLocal() as session:
-            if args.indexes:
-                result["actions"]["indexes"] = await ensure_performance_indexes(session)
-            if args.checkpoint:
-                result["actions"]["checkpoint"] = await sqlite_checkpoint(
-                    session,
-                    truncate=not args.passive_checkpoint,
-                )
-            if args.optimize:
-                result["actions"]["optimize"] = await sqlite_optimize(session)
-            result["storage"] = await storage_health(session)
+            result = await run_storage_maintenance(
+                session,
+                indexes=args.indexes,
+                checkpoint=args.checkpoint,
+                passive_checkpoint=args.passive_checkpoint,
+                optimize=args.optimize,
+            )
         print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
         await engine.dispose()
         return 0

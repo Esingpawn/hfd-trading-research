@@ -189,4 +189,6 @@
 - API 路由已从单个 `app/api/routes.py` 拆分为领域路由分包，并保留原有 HTTP path 与响应结构。
 - CLI 入口已薄化，命令执行逻辑迁移到 `app/cli_commands/runner.py`，共享 CLI helper 迁移到 `app/cli_commands/`。
 
-下一步执行阶段 2：建立 Application / Domain / Infrastructure 分层骨架，并开始将 API / CLI 共同使用的用例迁入 application 层。
+阶段 2 已启动：已建立 Application / Domain / Infrastructure 分层骨架，并将存储健康/维护作为第一条 application 用例迁入 `app/application/storage.py`。
+
+下一步继续阶段 2：将采集、纸上交易、信号实验等 API / CLI 共同使用的业务动作逐步迁入 application 层。

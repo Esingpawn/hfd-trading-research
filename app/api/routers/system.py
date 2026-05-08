@@ -22,10 +22,10 @@ from app.api.shared import (
     _runtime_interval_seconds,
     _runtime_process_payload,
 )
+from app.application.storage import get_storage_health, run_storage_maintenance
 from app.constants import ASSETS, CORE_INDICATORS, TIMEFRAMES
 from app.models import PaperTrade, PriceSnapshot, SignalSnapshot, StrategyDecision
 from app.services.diagnostics import build_diagnostics
-from app.services.storage_health import ensure_performance_indexes, sqlite_checkpoint, sqlite_optimize, storage_health
 from app.services.telegram import TelegramClient
 
 router = APIRouter()
@@ -129,12 +129,13 @@ async def system_runtime(session: SessionDep) -> dict[str, object]:
 
 @router.get("/system/storage")
 async def system_storage(session: SessionDep) -> dict[str, object]:
-    return await storage_health(session)
+    return await get_storage_health(session)
 
 
 @router.post("/system/storage/indexes")
 async def system_storage_indexes(session: SessionDep) -> dict[str, object]:
-    return await ensure_performance_indexes(session)
+    result = await run_storage_maintenance(session, indexes=True)
+    return result["actions"]["indexes"]
 
 
 @router.post("/system/storage/checkpoint")
@@ -142,12 +143,18 @@ async def system_storage_checkpoint(
     session: SessionDep,
     truncate: bool = Query(default=True),
 ) -> dict[str, object]:
-    return await sqlite_checkpoint(session, truncate=truncate)
+    result = await run_storage_maintenance(
+        session,
+        checkpoint=True,
+        passive_checkpoint=not truncate,
+    )
+    return result["actions"]["checkpoint"]
 
 
 @router.post("/system/storage/optimize")
 async def system_storage_optimize(session: SessionDep) -> dict[str, object]:
-    return await sqlite_optimize(session)
+    result = await run_storage_maintenance(session, optimize=True)
+    return result["actions"]["optimize"]
 
 
 @router.get("/data/completeness")
