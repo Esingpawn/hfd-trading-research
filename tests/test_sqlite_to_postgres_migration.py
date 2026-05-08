@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
 from app.models import CollectionRun
-from scripts.migrate_sqlite_to_postgres import migrate_table
+from scripts.migrate_sqlite_to_postgres import _table_names, migrate_table
 
 
 @pytest.mark.asyncio
@@ -49,3 +49,18 @@ async def test_migrate_table_dry_run_counts_rows(tmp_path) -> None:
     finally:
         await source_engine.dispose()
         await target_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_table_names_supports_missing_new_tables(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'legacy.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql("CREATE TABLE collection_runs (id TEXT PRIMARY KEY)")
+
+        tables = await _table_names(engine)
+
+        assert "collection_runs" in tables
+        assert "trade_orders" not in tables
+    finally:
+        await engine.dispose()

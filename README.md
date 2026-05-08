@@ -86,6 +86,11 @@ $env:DATABASE_URL="postgresql+psycopg://user:password@localhost:5432/hfd"
 - `GET /telegram/status`
 - `GET /telegram/updates`
 - `POST /telegram/send`
+- `GET /trading/safety`
+- `PATCH /trading/safety`
+- `POST /trading/orders`
+- `GET /trading/orders`
+- `GET /trading/audit`
 - `GET /dashboard`
 
 ## Telegram 接入
@@ -197,6 +202,6 @@ Get-Content -Raw -Encoding UTF8 README.md
 
 ## 重要边界
 
-当前系统只做研究和纸上交易准备，不做实盘下单。历史数据回测只能用于策略初筛，最终必须依赖实时快照验证。
+当前系统只做研究、纸上交易和交易安全网关准备。`LIVE_TRADING_ENABLED=false` 且 `TRADING_GATEWAY=disabled` 是默认配置，真实交易所网关未接入前，实盘订单会被拒绝或阻断并写入审计日志。历史数据回测只能用于策略初筛，最终必须依赖实时快照验证。
 
 

@@ -197,3 +197,57 @@ class WeightVersion(Base):
     evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
+class TradingSafetyState(Base):
+    __tablename__ = "trading_safety_states"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    scope: Mapped[str] = mapped_column(String(64), unique=True, index=True, default="global")
+    live_trading_enabled: Mapped[bool] = mapped_column(default=False)
+    kill_switch_active: Mapped[bool] = mapped_column(default=True)
+    manual_confirmation_required: Mapped[bool] = mapped_column(default=True)
+    max_order_notional: Mapped[float] = mapped_column(Float, default=0.0)
+    max_daily_notional: Mapped[float] = mapped_column(Float, default=0.0)
+    max_daily_orders: Mapped[int] = mapped_column(Integer, default=0)
+    allowed_symbols: Mapped[list[str]] = mapped_column(JSON, default=list)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
+class TradeOrder(Base):
+    __tablename__ = "trade_orders"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    mode: Mapped[str] = mapped_column(String(16), index=True)
+    symbol: Mapped[str] = mapped_column(String(24), index=True)
+    side: Mapped[str] = mapped_column(String(16), index=True)
+    order_type: Mapped[str] = mapped_column(String(24), index=True, default="market")
+    status: Mapped[str] = mapped_column(String(32), index=True, default="requested")
+    quantity: Mapped[float] = mapped_column(Float)
+    requested_price: Mapped[float | None] = mapped_column(Float)
+    notional: Mapped[float | None] = mapped_column(Float)
+    strategy_decision_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(120), unique=True, index=True)
+    client_order_id: Mapped[str | None] = mapped_column(String(120), index=True)
+    request_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    safety_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    result_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    rejection_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    canceled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TradingAuditLog(Base):
+    __tablename__ = "trading_audit_logs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    event_type: Mapped[str] = mapped_column(String(80), index=True)
+    actor: Mapped[str] = mapped_column(String(80), index=True, default="system")
+    order_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    safety_state_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)

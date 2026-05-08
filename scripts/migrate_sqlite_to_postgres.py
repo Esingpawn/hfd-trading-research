@@ -5,7 +5,7 @@ import asyncio
 import os
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.models import (
@@ -16,6 +16,9 @@ from app.models import (
     SignalObservation,
     SignalSnapshot,
     StrategyDecision,
+    TradeOrder,
+    TradingAuditLog,
+    TradingSafetyState,
 )
 
 
@@ -27,6 +30,9 @@ MODELS = (
     PaperTrade,
     BacktestRun,
     SignalObservation,
+    TradingSafetyState,
+    TradeOrder,
+    TradingAuditLog,
 )
 
 
@@ -51,8 +57,12 @@ async def main(argv: Sequence[str] | None = None) -> int:
     selected = set(args.only or [])
     try:
         async with source_sessionmaker() as source, target_sessionmaker() as target:
+            source_tables = await _table_names(source_engine)
             for model in MODELS:
                 if selected and model.__tablename__ not in selected:
+                    continue
+                if model.__tablename__ not in source_tables:
+                    print({"table": model.__tablename__, "rows": 0, "skipped": "missing_source_table", "dry_run": args.dry_run}, flush=True)
                     continue
                 count = await migrate_table(
                     source,
@@ -83,6 +93,11 @@ async def migrate_table(source, target, model, *, batch_size: int, dry_run: bool
             await target.commit()
         offset += batch_size
     return migrated
+
+
+async def _table_names(engine) -> set[str]:
+    async with engine.begin() as conn:
+        return await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
 
 
 def _clone_model(item, model):

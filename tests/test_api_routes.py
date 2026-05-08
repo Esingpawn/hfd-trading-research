@@ -20,6 +20,11 @@ def test_expected_api_routes_are_registered() -> None:
         ("POST", "/backtests/batch"),
         ("GET", "/tasks"),
         ("POST", "/tasks/enqueue"),
+        ("GET", "/trading/safety"),
+        ("PATCH", "/trading/safety"),
+        ("GET", "/trading/orders"),
+        ("POST", "/trading/orders"),
+        ("GET", "/trading/audit"),
         ("GET", "/telegram/status"),
         ("GET", "/dashboard"),
     }

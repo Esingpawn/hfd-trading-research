@@ -8,6 +8,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
       EXTERNALIZE_RAW_PAYLOADS: "true"
+      LIVE_TRADING_ENABLED: "false"
+      TRADING_GATEWAY: disabled
     ports:
       - "8000:8000"
     volumes:
@@ -35,6 +37,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
       EXTERNALIZE_RAW_PAYLOADS: "true"
+      LIVE_TRADING_ENABLED: "false"
+      TRADING_GATEWAY: disabled
     command:
       - python
       - -m
@@ -78,6 +82,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
       REDIS_URL: redis://redis:6379/0
+      LIVE_TRADING_ENABLED: "false"
+      TRADING_GATEWAY: disabled
     command:
       - python
       - -m
@@ -110,6 +116,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
       REDIS_URL: redis://redis:6379/0
+      LIVE_TRADING_ENABLED: "false"
+      TRADING_GATEWAY: disabled
     command:
       - python
       - -m

@@ -11,21 +11,25 @@
 - `collector-worker`、`paper-worker`、`experiment-worker` 容器入口。
 - 跨平台 CLI 维护命令：`storage-health`、`storage-maintain`、`experiment-loop`。
 - 架构升级规划文档。
+- API 路由分包。
+- CLI 分包。
+- Application / Domain / Infrastructure 分层骨架。
+- Alembic migration baseline 与增量迁移。
+- SQLite 到 PostgreSQL 的数据迁移脚本。
+- raw payload 外置压缩存储基础版。
+- Redis queue 适配器与任务记录 API 基础版。
+- 实验治理和权重版本化基础版。
+- 前端 Vite React 工程化骨架。
+- 模拟盘 / 实盘安全网关基础模型。
 
 未完成：
 
-- API 路由分包。
-- CLI 分包。
-- Application / Domain / Infrastructure 分层。
-- Alembic migration。
-- SQLite 到 PostgreSQL 的数据迁移脚本。
-- raw payload 外置压缩存储。
-- Redis cache / queue 实际接入。
-- RQ / Celery / Arq / APScheduler 任务系统。
+- Redis cache 与 worker 消费循环深化。
+- RQ / Celery / Arq / APScheduler 之一的完整任务执行系统。
 - PostgreSQL 分区与大表治理。
-- 前端 Vite React 工程化。
 - 结构化日志、监控指标和完整 Telegram 告警规则。
-- 模拟盘 / 实盘安全网关。
+- 真实交易所 live gateway、仓位同步和成交回报处理。
+- React 面板完整替换旧单文件 dashboard。
 
 ## 2. 执行原则
 
@@ -224,4 +228,13 @@
 - 已保留旧版 FastAPI dashboard 作为当前主面板。
 - 已新增前端迁移说明。
 
-下一步执行阶段 8：模拟盘 / 实盘安全网关基础模型与安全边界。
+阶段 8 已完成基础版：
+
+- 已增加 `trading_safety_states`、`trade_orders`、`trading_audit_logs` 表和 Alembic 迁移。
+- 已增加交易安全领域规则：实盘环境开关、安全状态开关、kill switch、人工确认、单笔限额、日内订单数、日内名义金额、symbol allowlist。
+- 已增加 paper gateway 与禁用态 live gateway；未配置真实交易网关时，live 订单即使通过风控也会被阻断并审计。
+- 已增加 `/trading/safety`、`/trading/orders`、`/trading/audit` API。
+- 已增加幂等键支持，重复请求返回同一订单。
+- 已新增测试覆盖默认阻断实盘、纸上订单、真实网关缺失阻断、symbol allowlist 拒绝。
+
+下一步执行阶段 9：生产运行深化。优先补完整任务 worker 消费循环、PostgreSQL 大表治理、结构化日志/指标/Telegram 告警，再逐步替换 React 面板和设计真实交易所网关。
