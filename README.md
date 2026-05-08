@@ -177,6 +177,7 @@ http://127.0.0.1:8000/dashboard
 ```text
 docs/project-handoff.md
 docs/data-quality-plan.md
+docs/architecture-upgrade-plan.md
 ```
 
 项目文件按 UTF-8 保存。Windows PowerShell 默认编码有时会把中文显示成乱码，读取中文文件时优先使用：
