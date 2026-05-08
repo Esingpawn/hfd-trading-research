@@ -1,0 +1,2339 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HFD 暗流交易研究台</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg-root: #080b0e;
+      --bg-depth: #0d1115;
+      --panel: rgba(17, 23, 27, .90);
+      --panel-strong: rgba(23, 31, 36, .96);
+      --surface-card: rgba(22, 30, 35, .96);
+      --surface-muted: rgba(14, 19, 23, .88);
+      --surface-hover: rgba(31, 43, 48, .98);
+      --line: rgba(203, 224, 218, .13);
+      --line-soft: rgba(203, 224, 218, .09);
+      --line-strong: rgba(203, 224, 218, .24);
+      --text: #edf4f1;
+      --muted: #a5b3af;
+      --muted-2: #6f7d7a;
+      --signal: #43d6c4;
+      --rose: #d66f94;
+      --green: #5ee0a0;
+      --green-soft: rgba(94, 224, 160, .11);
+      --red: #f0657f;
+      --red-soft: rgba(240, 101, 127, .12);
+      --amber: #d7a84f;
+      --amber-soft: rgba(215, 168, 79, .12);
+      --blue: #75a7ff;
+      --cyan: var(--signal);
+      --shadow: 0 16px 40px rgba(0, 0, 0, .28);
+      --shadow-soft: 0 10px 26px rgba(0, 0, 0, .20);
+      --inner: inset 0 1px 0 rgba(255, 255, 255, .045);
+      --radius: 8px;
+      --radius-sm: 4px;
+      --radius-md: 6px;
+      --font-display: "Sora", "Aptos Display", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+      --font-ui: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", system-ui, sans-serif;
+      --font-data: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { min-height: 100%; }
+
+    html { scroll-behavior: smooth; }
+
+    [id] { scroll-margin-top: 82px; }
+
+    body {
+      margin: 0;
+      background:
+        linear-gradient(90deg, rgba(203, 224, 218, .026) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(203, 224, 218, .018) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(18, 25, 29, .96), var(--bg-root) 300px),
+        var(--bg-root);
+      background-size: 56px 56px, 56px 56px, auto, auto;
+      color: var(--text);
+      font-family: var(--font-ui);
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0;
+      overflow-x: hidden;
+    }
+
+    a { color: inherit; }
+
+    button, input { font: inherit; }
+
+    button {
+      height: 32px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-md);
+      background: var(--surface-card);
+      color: var(--text);
+      padding: 0 11px;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      white-space: nowrap;
+      box-shadow: var(--inner);
+      transition: background .16s ease, border-color .16s ease, color .16s ease, transform .16s ease;
+    }
+
+    button:hover {
+      background: var(--surface-hover);
+      border-color: rgba(67, 214, 196, .36);
+      transform: translateY(-1px);
+    }
+
+    button:focus-visible,
+    a:focus-visible {
+      outline: 2px solid rgba(67, 214, 196, .72);
+      outline-offset: 2px;
+    }
+
+    button.primary {
+      color: #06110f;
+      background: linear-gradient(180deg, #5ee0d1, var(--signal));
+      border-color: rgba(67, 214, 196, .72);
+    }
+
+    button.danger {
+      color: #ffd9e2;
+      border-color: rgba(240, 101, 127, .42);
+      background: rgba(240, 101, 127, .06);
+    }
+
+    .topbar {
+      min-height: 64px;
+      display: grid;
+      grid-template-columns: auto minmax(360px, 1fr) auto;
+      align-items: center;
+      gap: 18px;
+      padding: 0 24px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(8, 11, 14, .94);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      box-shadow: 0 12px 34px rgba(0, 0, 0, .26);
+      backdrop-filter: blur(16px) saturate(1.02);
+      -webkit-backdrop-filter: blur(16px) saturate(1.02);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 282px;
+    }
+
+    .brandMark {
+      min-width: 58px;
+      height: 34px;
+      display: inline-grid;
+      place-items: center;
+      border: 1px solid rgba(67, 214, 196, .32);
+      border-radius: var(--radius-md);
+      background: linear-gradient(135deg, rgba(67, 214, 196, .13), rgba(214, 111, 148, .08));
+      color: var(--signal);
+      font: 800 18px/1 var(--font-display);
+      box-shadow: var(--inner);
+    }
+
+    .brandTitle {
+      color: var(--text);
+      font: 800 20px/1 var(--font-display);
+    }
+
+    .nav {
+      display: flex;
+      justify-content: center;
+      align-items: stretch;
+      gap: 18px;
+      min-width: 0;
+      height: 64px;
+    }
+
+    .nav a {
+      display: flex;
+      align-items: center;
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 800;
+      border-bottom: 2px solid transparent;
+      padding: 0 3px;
+      transition: color .16s ease, border-color .16s ease;
+    }
+
+    .nav a:hover { color: var(--text); }
+
+    .nav a.active {
+      color: var(--signal);
+      border-bottom-color: var(--signal);
+    }
+
+    .topStatus {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      min-width: 360px;
+    }
+
+    .chip {
+      min-height: 30px;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 11px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface-muted);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+      box-shadow: var(--inner);
+    }
+
+    .chip b { color: var(--text); }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--muted-2);
+      box-shadow: 0 0 0 4px rgba(165, 179, 175, .08);
+      flex: 0 0 auto;
+    }
+
+    .dot.ok { background: var(--green); box-shadow: 0 0 0 4px rgba(94, 224, 160, .10); }
+    .dot.warn { background: var(--amber); box-shadow: 0 0 0 4px rgba(215, 168, 79, .11); }
+    .dot.bad { background: var(--red); box-shadow: 0 0 0 4px rgba(240, 101, 127, .12); }
+
+    .chip.systemHealth { max-width: 320px; }
+    .chip.systemHealth b {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .avatar {
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(214, 111, 148, .30);
+      background: rgba(214, 111, 148, .09);
+      color: #f2c7d6;
+      font-weight: 900;
+    }
+
+    .shell {
+      max-width: 1860px;
+      margin: 0 auto;
+      padding: 18px 24px 30px;
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 14px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(17, 23, 27, .72);
+      box-shadow: var(--inner);
+    }
+
+    .toolbarMeta {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      min-width: 0;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .toolbarMeta span {
+      min-height: 28px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 10px;
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius-md);
+      background: var(--surface-muted);
+    }
+
+    .toolbarMeta strong { color: var(--text); }
+
+    .actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .kpiGrid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .card,
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: var(--shadow), var(--inner);
+      overflow: hidden;
+    }
+
+    .card {
+      background:
+        linear-gradient(180deg, rgba(29, 39, 45, .92), rgba(17, 23, 27, .96));
+    }
+
+    .panel {
+      background:
+        linear-gradient(180deg, rgba(21, 29, 34, .94), rgba(13, 18, 22, .96));
+    }
+
+    .metric {
+      min-height: 170px;
+      padding: 15px 16px;
+      position: relative;
+    }
+
+    .metric::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: linear-gradient(180deg, var(--signal), rgba(214, 111, 148, .42), transparent);
+      opacity: .65;
+    }
+
+    .metricHead {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 900;
+      margin-bottom: 18px;
+    }
+
+    .metricHead small {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      text-align: right;
+    }
+
+    .metricValue {
+      font-family: var(--font-display);
+      font-size: 31px;
+      line-height: 1;
+      font-weight: 800;
+      color: var(--green);
+      margin-bottom: 10px;
+    }
+
+    .metricSub {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 20px;
+    }
+
+    .metricFoot {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .metricFoot span {
+      padding: 8px 9px;
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius-md);
+      background: var(--surface-muted);
+    }
+
+    .metricFoot b {
+      display: block;
+      color: var(--text);
+      margin-top: 4px;
+      font-family: var(--font-data);
+      font-size: 13px;
+    }
+
+    .spark {
+      position: absolute;
+      right: 14px;
+      bottom: 54px;
+      width: 180px;
+      height: 50px;
+      opacity: .34;
+      pointer-events: none;
+    }
+
+    .spark path.line { fill: none; stroke: currentColor; stroke-width: 2.2; }
+    .spark path.area { opacity: .10; }
+
+    .mainGrid,
+    .bottomGrid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, .98fr);
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .bottomGrid { margin-bottom: 0; }
+
+    .singleGrid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .panelHeader {
+      min-height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel-strong);
+    }
+
+    .panelHeader h2 {
+      margin: 0;
+      color: var(--text);
+      font-family: var(--font-display);
+      font-size: 15px;
+      line-height: 1;
+      font-weight: 800;
+    }
+
+    .panelHeader small {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-align: right;
+    }
+
+    .panelBody {
+      padding: 12px 14px 14px;
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    th, td {
+      height: 34px;
+      border-bottom: 1px solid var(--line-soft);
+      padding: 6px 8px;
+      text-align: left;
+      vertical-align: middle;
+    }
+
+    th {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      background: var(--surface-muted);
+    }
+
+    td {
+      color: var(--text);
+      font-weight: 650;
+    }
+
+    tbody tr { transition: background .14s ease; }
+    tbody tr:hover { background: rgba(203, 224, 218, .045); }
+    tbody tr.clickableRow { cursor: pointer; }
+    tbody tr.clickableRow.selected { background: rgba(67, 214, 196, .10); }
+    tbody tr.clickableRow.selected td { border-bottom-color: rgba(67, 214, 196, .22); }
+    tr:last-child td { border-bottom: 0; }
+
+    .coinCell {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text);
+      font-weight: 900;
+    }
+
+    .coinIcon {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      display: inline-grid;
+      place-items: center;
+      color: #07100f;
+      font-size: 11px;
+      font-weight: 1000;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.25), 0 0 0 1px rgba(0,0,0,.24);
+    }
+
+    .watch {
+      color: var(--muted-2);
+      font-size: 17px;
+      line-height: 1;
+    }
+
+    .score {
+      color: var(--green);
+      font-family: var(--font-data);
+      font-weight: 900;
+    }
+
+    .score.mid { color: var(--amber); }
+    .score.low { color: var(--red); }
+
+    .dir {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 900;
+    }
+
+    .dir.long, .dir.short.up { color: var(--green); }
+    .dir.short, .dir.down { color: var(--red); }
+    .dir.none, .dir.observe { color: var(--muted); }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 24px;
+      padding: 0 8px;
+      border-radius: 5px;
+      border: 1px solid var(--line-strong);
+      color: var(--muted);
+      background: var(--surface-muted);
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .tag.long, .tag.open, .tag.ok {
+      color: var(--green);
+      border-color: rgba(94, 224, 160, .34);
+      background: var(--green-soft);
+    }
+
+    .tag.short, .tag.bad {
+      color: var(--red);
+      border-color: rgba(240, 101, 127, .34);
+      background: var(--red-soft);
+    }
+
+    .tag.mid, .tag.warn, .tag.neutral {
+      color: var(--amber);
+      border-color: rgba(215, 168, 79, .34);
+      background: var(--amber-soft);
+    }
+
+    .oppPanel { min-height: 348px; }
+
+    .oppTop {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: start;
+      padding: 16px;
+      border-bottom: 1px solid var(--line);
+      background:
+        linear-gradient(90deg, rgba(214, 111, 148, .075), rgba(67, 214, 196, .05) 52%, rgba(14, 19, 23, .34));
+    }
+
+    .oppSymbol {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .oppSymbol strong {
+      font-family: var(--font-display);
+      font-size: 22px;
+      line-height: 1;
+      font-weight: 800;
+    }
+
+    .oppScore {
+      text-align: right;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .oppScore b {
+      color: var(--green);
+      font-family: var(--font-display);
+      font-size: 28px;
+      line-height: 1;
+      font-weight: 800;
+    }
+
+    .oppGrid {
+      display: grid;
+      grid-template-columns: 1.05fr .9fr 1.25fr .9fr;
+      gap: 8px;
+      padding: 14px;
+    }
+
+    .level {
+      min-height: 112px;
+      padding: 12px;
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius-md);
+      background: var(--surface-muted);
+    }
+
+    .level span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      margin-bottom: 10px;
+    }
+
+    .level b {
+      display: block;
+      font-family: var(--font-data);
+      font-size: 18px;
+      line-height: 1.2;
+      margin-bottom: 10px;
+      overflow-wrap: anywhere;
+    }
+
+    .level small {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+      font-weight: 700;
+    }
+
+    .reason {
+      padding: 12px 16px 16px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      background: rgba(14, 19, 23, .52);
+      font-size: 12px;
+      line-height: 1.65;
+      font-weight: 700;
+    }
+
+    .sectionGrid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .detailStack {
+      display: grid;
+      gap: 10px;
+      padding: 0 14px 14px;
+    }
+
+    .detailGrid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .detailGrid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+    .detailBlock {
+      min-width: 0;
+      padding: 11px 12px;
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius-md);
+      background: rgba(14, 19, 23, .62);
+      box-shadow: var(--inner);
+    }
+
+    .detailBlock h3 {
+      margin: 0 0 9px;
+      color: var(--text);
+      font-size: 12px;
+      line-height: 1.2;
+      font-weight: 900;
+    }
+
+    .detailBlock p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+      font-weight: 700;
+    }
+
+    .kvList {
+      display: grid;
+      gap: 7px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+      font-weight: 750;
+    }
+
+    .kvList div {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .kvList b {
+      color: var(--text);
+      text-align: right;
+      overflow-wrap: anywhere;
+    }
+
+    .pillBar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .plainList {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.62;
+      font-weight: 700;
+    }
+
+    .plainList li + li { margin-top: 4px; }
+
+    .miniTable {
+      overflow-x: auto;
+    }
+
+    .miniTable table { font-size: 12px; }
+    .miniTable th,
+    .miniTable td { height: 30px; }
+
+    .opLog {
+      margin: 12px 14px 0;
+    }
+
+    .rankBadge {
+      width: 22px;
+      height: 22px;
+      display: inline-grid;
+      place-items: center;
+      border-radius: 50%;
+      color: #07100f;
+      background: var(--muted);
+      font-size: 12px;
+      font-weight: 1000;
+    }
+
+    .rankBadge.top { background: var(--amber); }
+    .green { color: var(--green); }
+    .red { color: var(--red); }
+    .amber { color: var(--amber); }
+    .blue { color: var(--blue); }
+    .muted { color: var(--muted); }
+
+    .empty {
+      min-height: 94px;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      border: 1px dashed var(--line-strong);
+      border-radius: var(--radius-md);
+      background: var(--surface-muted);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .logbar {
+      min-height: 38px;
+      margin-top: 14px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-left-color: rgba(214, 111, 148, .38);
+      border-radius: var(--radius);
+      background: rgba(14, 19, 23, .90);
+      color: var(--muted);
+      font-family: var(--font-data);
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      box-shadow: var(--inner);
+    }
+
+    @media (max-width: 1260px) {
+      .topbar {
+        grid-template-columns: 1fr;
+        height: auto;
+        padding: 14px 16px;
+        gap: 12px;
+      }
+      .brand { min-width: 0; }
+      .nav { justify-content: flex-start; height: auto; overflow-x: auto; padding-bottom: 2px; }
+      .topStatus { justify-content: flex-start; min-width: 0; flex-wrap: wrap; }
+      .kpiGrid, .mainGrid, .bottomGrid, .singleGrid, .sectionGrid { grid-template-columns: 1fr; }
+      .oppGrid { grid-template-columns: 1fr 1fr; }
+      .detailGrid { grid-template-columns: 1fr; }
+      .detailGrid.two { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 720px) {
+      .topbar { padding: 12px; }
+      .brandTitle { font-size: 18px; }
+      .nav { gap: 14px; }
+      .nav a { font-size: 12px; }
+      .topStatus { gap: 6px; }
+      .chip { min-height: 28px; padding: 0 9px; font-size: 11px; }
+      .avatar { display: none; }
+      .shell { padding: 12px 12px 24px; }
+      .toolbar { grid-template-columns: 1fr; padding: 10px; }
+      .toolbarMeta span { width: calc(50% - 4px); justify-content: space-between; }
+      .actions { justify-content: flex-start; }
+      .actions button { flex: 1 1 calc(33.333% - 8px); min-width: 96px; }
+      .kpiGrid { gap: 12px; }
+      .metric { min-height: 158px; padding: 14px; }
+      .metricValue { font-size: 28px; }
+      .metricFoot { grid-template-columns: 1fr; }
+      .spark { width: 128px; right: 12px; bottom: 72px; }
+      .panelHeader { align-items: flex-start; flex-direction: column; padding: 12px; }
+      .panelHeader small { text-align: left; }
+      .panelBody { padding: 10px; }
+      .oppTop { grid-template-columns: 1fr; padding: 14px; }
+      .oppScore { text-align: left; }
+      .oppGrid { grid-template-columns: 1fr; padding: 10px; }
+      .level { min-height: 0; }
+    }
+
+    @media (max-width: 460px) {
+      .toolbarMeta span { width: 100%; }
+      .actions button { flex-basis: calc(50% - 8px); }
+      .brand { align-items: flex-start; flex-direction: column; gap: 8px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brandMark">HFD</div>
+      <div class="brandTitle">暗流交易研究台</div>
+    </div>
+    <nav class="nav" aria-label="主导航">
+      <a class="active" href="#dashboard">仪表盘</a>
+      <a href="#market">市场</a>
+      <a href="#signals">信号</a>
+      <a href="#effectiveness">有效性</a>
+      <a href="#backtest">回测</a>
+      <a href="#strategy">策略</a>
+      <a href="#positions">持仓</a>
+      <a href="#logs">日志</a>
+      <a href="#settings">设置</a>
+    </nav>
+    <div class="topStatus">
+      <span class="chip systemHealth" title="系统诊断"><span id="healthDot" class="dot warn"></span>系统 <b id="healthStatus">检测中</b></span>
+      <span class="chip"><span id="tgDot" class="dot warn"></span>Telegram <b id="tgStatus">检测中</b></span>
+      <span class="chip"><span id="collectorDot" class="dot warn"></span>实时采集 <b id="collectorStatus">检测中</b></span>
+      <span class="chip">北京时间 <b id="clock">--:--:--</b></span>
+      <span class="avatar">H</span>
+    </div>
+  </header>
+
+  <main id="dashboard" class="shell">
+    <section class="toolbar">
+      <div class="toolbarMeta">
+        <span>监控币种 <strong id="coinCount">--</strong></span>
+        <span>评分核心 <strong id="coreCoverage">--</strong></span>
+        <span>全量研究 <strong id="researchCoverage">--</strong></span>
+        <span>最近采集 <strong id="lastCollect">--</strong></span>
+      </div>
+      <div class="actions">
+        <button class="primary" onclick="refreshAll()" title="重新读取面板数据，不触发采集或交易">刷新面板</button>
+        <button onclick="collectCore(false)" title="立即采集评分必需的核心指标，会写入数据库">采集核心</button>
+        <button onclick="collectFull(false)" title="立即采集研究指标，会写入数据库">采集研究</button>
+        <button onclick="collectExperiments(false)" title="采集实验指标，只进入研究矩阵，不影响开仓或权重">采集实验</button>
+        <button onclick="paperScan(true)" title="只预演纸上扫描，不写入新交易">扫描预演</button>
+        <button onclick="paperScan(false)" title="执行纸上扫描，满足条件时写入模拟交易，不接实盘">执行纸上</button>
+        <button onclick="markTrades()" title="用最新价格更新模拟持仓，并顺带回填归因标签">更新持仓</button>
+        <button onclick="backfillSignals()" title="把历史决策和后续价格转成信号有效性样本">回填归因</button>
+        <button onclick="runBacktest()" title="运行批量回测并刷新排行榜">运行回测</button>
+        <button class="danger" onclick="sendTelegram()" title="发送一条 Telegram 测试消息">TG 测试</button>
+      </div>
+    </section>
+
+    <section class="kpiGrid" aria-label="关键指标">
+      <article class="card metric">
+        <div class="metricHead"><span>实时快照</span><small id="snapshotUpdated">--</small></div>
+        <div id="snapshotValue" class="metricValue">--</div>
+        <div class="metricSub">信号快照总数</div>
+        <div class="metricFoot">
+          <span>价格快照 <b id="priceCount">--</b></span>
+          <span>活跃币种 <b id="activeCoins">--</b></span>
+        </div>
+        <svg class="spark green" viewBox="0 0 210 60" aria-hidden="true">
+          <path class="area" fill="currentColor" d="M0 52 L20 48 L40 50 L62 42 L84 38 L104 25 L126 33 L145 17 L165 29 L184 14 L210 20 L210 60 L0 60 Z" />
+          <path class="line" d="M0 52 L20 48 L40 50 L62 42 L84 38 L104 25 L126 33 L145 17 L165 29 L184 14 L210 20" />
+        </svg>
+      </article>
+
+      <article class="card metric">
+        <div class="metricHead"><span>纸上持仓</span><small id="paperMode">仅模拟</small></div>
+        <div id="paperValue" class="metricValue">--</div>
+        <div id="paperSample" class="metricSub">当前未接真实交易所</div>
+        <div class="metricFoot">
+          <span>胜率 <b id="paperWinRate">--</b></span>
+          <span>收益因子 <b id="paperProfitFactor">--</b></span>
+        </div>
+        <svg class="spark green" viewBox="0 0 210 60" aria-hidden="true">
+          <path class="area" fill="currentColor" d="M0 50 L24 46 L48 44 L72 33 L96 31 L120 24 L144 27 L168 18 L192 22 L210 15 L210 60 L0 60 Z" />
+          <path class="line" d="M0 50 L24 46 L48 44 L72 33 L96 31 L120 24 L144 27 L168 18 L192 22 L210 15" />
+        </svg>
+      </article>
+
+      <article class="card metric">
+        <div class="metricHead"><span>今日信号</span><small><a class="blue" href="#signals">查看全部</a></small></div>
+        <div id="signalValue" class="metricValue">--</div>
+        <div class="metricSub">可开仓 / 高分候选</div>
+        <div class="metricFoot">
+          <span>做多 <b id="longCount">--</b></span>
+          <span>做空 <b id="shortCount">--</b></span>
+        </div>
+        <svg class="spark amber" viewBox="0 0 210 60" aria-hidden="true">
+          <path class="area" fill="currentColor" d="M0 48 L22 44 L44 45 L66 28 L88 30 L110 18 L132 36 L154 24 L176 26 L198 16 L210 18 L210 60 L0 60 Z" />
+          <path class="line" d="M0 48 L22 44 L44 45 L66 28 L88 30 L110 18 L132 36 L154 24 L176 26 L198 16 L210 18" />
+        </svg>
+      </article>
+
+      <article class="card metric">
+        <div class="metricHead"><span>回测评分</span><small>最近批次</small></div>
+        <div id="backtestScore" class="metricValue red">--</div>
+        <div class="metricSub">综合评分 / 100</div>
+        <div class="metricFoot">
+          <span>收益因子 <b id="profitFactor">--</b></span>
+          <span>最大回撤 <b id="maxDrawdown">--</b></span>
+        </div>
+        <svg class="spark red" viewBox="0 0 210 60" aria-hidden="true">
+          <path class="area" fill="currentColor" d="M0 42 L18 31 L36 36 L54 27 L72 34 L90 45 L108 30 L126 22 L144 32 L162 18 L180 26 L198 13 L210 23 L210 60 L0 60 Z" />
+          <path class="line" d="M0 42 L18 31 L36 36 L54 27 L72 34 L90 45 L108 30 L126 22 L144 32 L162 18 L180 26 L198 13 L210 23" />
+        </svg>
+      </article>
+    </section>
+
+    <section class="mainGrid">
+      <article id="market" class="panel">
+        <div class="panelHeader">
+          <h2>市场观察</h2>
+          <small>短期 30m / 中期 1h / 长期 4h</small>
+        </div>
+        <div id="marketTable" class="panelBody"><div class="empty">正在加载市场数据</div></div>
+      </article>
+
+      <article id="signals" class="panel oppPanel">
+        <div class="panelHeader">
+          <h2 id="oppTitle">当前机会</h2>
+          <small id="oppUpdated">按高置信度排序</small>
+        </div>
+        <div class="oppTop">
+          <div>
+            <div class="oppSymbol">
+              <span id="oppIcon" class="coinIcon" style="background:#43d6c4">-</span>
+              <strong id="oppSymbol">暂无机会</strong>
+              <span id="oppDirection" class="tag">观察</span>
+              <span id="oppStage" class="tag warn">等待数据</span>
+            </div>
+            <div id="oppSource" class="muted">等待数据加载</div>
+          </div>
+          <div class="oppScore">评分 <b id="oppScore">--</b> /100</div>
+        </div>
+        <div class="oppGrid">
+          <div class="level">
+            <span>入场区间 (USDT)</span>
+            <b id="oppEntry" class="green">--</b>
+            <small id="oppCurrent">当前价格 --</small>
+          </div>
+          <div class="level">
+            <span>止损 (USDT)</span>
+            <b id="oppStop" class="red">--</b>
+            <small id="oppStopMeta">--</small>
+          </div>
+          <div class="level">
+            <span>止盈 (USDT)</span>
+            <b id="oppTp1" class="green">--</b>
+            <small id="oppTargets">TP2 -- / TP3 --</small>
+          </div>
+          <div class="level">
+            <span>风险/收益比</span>
+            <b id="oppR" class="green">--</b>
+            <small id="oppWin">胜率参考 --</small>
+          </div>
+        </div>
+        <div id="oppReason" class="reason">信号理由加载中。</div>
+        <div class="detailStack">
+          <div class="detailGrid">
+            <div class="detailBlock">
+              <h3>评分拆解</h3>
+              <div id="signalScores" class="kvList"></div>
+            </div>
+            <div class="detailBlock">
+              <h3>执行门槛</h3>
+              <div id="signalGate" class="kvList"></div>
+            </div>
+            <div class="detailBlock">
+              <h3>数据状态</h3>
+              <div id="signalData" class="kvList"></div>
+            </div>
+          </div>
+          <div class="detailGrid two">
+            <div class="detailBlock">
+              <h3>周期状态</h3>
+              <div id="stateTable" class="miniTable"><div class="empty">等待市场数据</div></div>
+            </div>
+            <div class="detailBlock">
+              <h3>模块得分</h3>
+              <div id="moduleTable" class="miniTable"><div class="empty">等待评分模块</div></div>
+            </div>
+          </div>
+          <div class="detailGrid two">
+            <div class="detailBlock">
+              <h3>明确理由</h3>
+              <ul id="signalExplanations" class="plainList"></ul>
+            </div>
+            <div class="detailBlock">
+              <h3>风险与未满足条件</h3>
+              <ul id="signalWarnings" class="plainList"></ul>
+            </div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section class="sectionGrid">
+      <article id="effectiveness" class="panel">
+        <div class="panelHeader">
+          <h2>信号有效性</h2>
+          <small id="effectivenessSubtitle">等待归因样本</small>
+        </div>
+        <div class="panelBody">
+          <div class="detailGrid two">
+            <div class="detailBlock">
+              <h3>样本状态</h3>
+              <div id="effectivenessSummary" class="kvList"></div>
+            </div>
+            <div class="detailBlock">
+              <h3>信号角色</h3>
+              <div id="roleEffectiveness" class="miniTable"><div class="empty">等待归因数据</div></div>
+            </div>
+          </div>
+          <div class="detailBlock" style="margin-top:10px">
+            <h3>单信号排行榜</h3>
+            <div id="signalEffectiveness" class="miniTable"><div class="empty">等待归因数据</div></div>
+          </div>
+          <div class="detailBlock" style="margin-top:10px">
+            <h3>权重治理</h3>
+            <div id="signalWeights" class="miniTable"><div class="empty">等待权重治理数据</div></div>
+          </div>
+          <div class="detailBlock">
+            <h3>实验来源</h3>
+            <div id="experimentSources" class="miniTable"><div class="empty">等待实验来源</div></div>
+          </div>
+          <div class="detailBlock" style="margin-top:10px">
+            <h3>指标实验矩阵</h3>
+            <div id="experimentMatrix" class="miniTable"><div class="empty">等待实验矩阵</div></div>
+          </div>
+          <div class="detailBlock" style="margin-top:10px">
+            <h3>实验特征检验</h3>
+            <div id="experimentEffectiveness" class="miniTable"><div class="empty">等待实验特征检验</div></div>
+          </div>
+          <div class="detailBlock">
+            <h3>暗流指标映射</h3>
+            <div id="indicatorCatalog" class="miniTable"><div class="empty">等待指标映射</div></div>
+          </div>
+        </div>
+      </article>
+
+      <article id="strategy" class="panel">
+        <div class="panelHeader">
+          <h2>策略规则</h2>
+          <small id="strategySubtitle">随选中币种更新</small>
+        </div>
+        <div class="panelBody">
+          <div class="detailGrid two">
+            <div class="detailBlock">
+              <h3>当前结论</h3>
+              <div id="strategyDecision" class="kvList"></div>
+            </div>
+            <div class="detailBlock">
+              <h3>触发规则</h3>
+              <div id="strategyRules" class="pillBar"></div>
+            </div>
+          </div>
+          <div class="opLog logbar" id="strategyNarrative">等待市场数据。</div>
+        </div>
+      </article>
+
+      <article id="settings" class="panel">
+        <div class="panelHeader">
+          <h2>系统设置与运行状态</h2>
+          <small>采集、纸上交易、通知链路</small>
+        </div>
+        <div class="panelBody">
+          <div class="detailGrid two">
+            <div class="detailBlock">
+              <h3>采集循环</h3>
+              <div id="collectorDetail" class="kvList"></div>
+            </div>
+            <div class="detailBlock">
+              <h3>纸上交易循环</h3>
+              <div id="paperLoopDetail" class="kvList"></div>
+            </div>
+          </div>
+          <div class="detailBlock" style="margin-top:10px">
+            <h3>通知与覆盖</h3>
+            <div id="settingsDetail" class="kvList"></div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section class="bottomGrid">
+      <article id="positions" class="panel">
+        <div class="panelHeader">
+          <h2>纸上交易记录</h2>
+          <small>点击记录查看复盘</small>
+        </div>
+        <div id="tradesTable" class="panelBody"><div class="empty">正在加载纸上交易</div></div>
+      </article>
+
+      <article id="backtest" class="panel">
+        <div class="panelHeader">
+          <h2>回测排行榜</h2>
+          <small>最近批次</small>
+        </div>
+        <div id="backtestTable" class="panelBody"><div class="empty">正在加载回测排行</div></div>
+      </article>
+    </section>
+
+    <section class="singleGrid">
+      <article id="paper-review" class="panel">
+        <div class="panelHeader">
+          <h2>纸上交易复盘</h2>
+          <small id="paperReviewSubtitle">选择一笔交易</small>
+        </div>
+        <div class="panelBody">
+          <div class="detailGrid">
+            <div class="detailBlock">
+              <h3>交易结果</h3>
+              <div id="paperReviewTrade" class="kvList"></div>
+            </div>
+            <div class="detailBlock">
+              <h3>开仓判断</h3>
+              <div id="paperReviewDecision" class="kvList"></div>
+            </div>
+            <div class="detailBlock">
+              <h3>复盘结论</h3>
+              <div id="paperReviewVerdict" class="kvList"></div>
+            </div>
+          </div>
+          <div class="detailGrid two" style="margin-top:10px">
+            <div class="detailBlock">
+              <h3>信号贡献</h3>
+              <div id="paperReviewSignals" class="miniTable"><div class="empty">等待复盘数据</div></div>
+            </div>
+            <div class="detailBlock">
+              <h3>下一步动作</h3>
+              <ul id="paperReviewActions" class="plainList"><li>选择一笔纸上交易。</li></ul>
+            </div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <div id="logs" class="logbar">系统就绪。</div>
+  </main>
+
+  <script>
+    const DEFAULT_COINS = ["BTC", "ETH", "SOL", "BNB", "LINK", "TON", "DOGE", "HYPE", "ZEC"];
+    const COLORS = {
+      BTC:"#f7931a", ETH:"#aeb8c8", SOL:"#21d4a8", BNB:"#f3ba2f", LINK:"#2a5ada",
+      TON:"#29a9ea", DOGE:"#c2a633", HYPE:"#54e0c3", ZEC:"#f4b728"
+    };
+    const state = {
+      summary: null,
+      runtime: null,
+      completeness: null,
+      market: [],
+      trades: [],
+      paperStats: null,
+      backtests: { results: [] },
+      telegram: null,
+      effectiveness: null,
+      weights: null,
+      experiments: null,
+      experimentEffectiveness: null,
+      selectedSymbol: null,
+      selectedTradeId: null,
+      paperReview: null
+    };
+
+    const $ = id => document.getElementById(id);
+
+    function esc(value) {
+      return fixText(value ?? "").replace(/[&<>"]/g, char => ({
+        "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;"
+      }[char]));
+    }
+
+    function fixText(value) {
+      if (value === null || value === undefined) return "";
+      const text = String(value);
+      if (!/[\u0080-\u00ff]|脙|脗|茅|忙|莽|猫|氓|盲|茂/.test(text)) return text;
+      try {
+        const bytes = new Uint8Array(Array.from(text, ch => ch.charCodeAt(0) & 255));
+        const decoded = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+        return /[\u4e00-\u9fff]/.test(decoded) ? decoded : text;
+      } catch {
+        return text;
+      }
+    }
+
+    function fmt(value, digits = 2) {
+      if (value === null || value === undefined || value === "") return "--";
+      if (typeof value === "number") {
+        if (!Number.isFinite(value)) return "--";
+        const abs = Math.abs(value);
+        const maxDigits = abs >= 100 ? 2 : abs >= 1 ? digits : 6;
+        return value.toLocaleString("zh-CN", { maximumFractionDigits: maxDigits });
+      }
+      return fixText(value);
+    }
+
+    function pct(value, digits = 1) {
+      if (value === null || value === undefined || !Number.isFinite(Number(value))) return "--";
+      return (Number(value) * 100).toFixed(digits) + "%";
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(path, options);
+      if (!res.ok) throw new Error(path + " -> " + res.status + " " + await res.text());
+      return await res.json();
+    }
+
+    function withTimeout(promise, ms, fallback) {
+      let timer;
+      const timeout = new Promise(resolve => {
+        timer = setTimeout(() => resolve(fallback), ms);
+      });
+      return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+    }
+
+    function coinQuery() {
+      return DEFAULT_COINS.map(coin => "coins=" + encodeURIComponent(coin)).join("&");
+    }
+
+    function repeated(name, values) {
+      return values.map(value => `${name}=${encodeURIComponent(value)}`).join("&");
+    }
+
+    function log(value) {
+      $("logs").textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    }
+
+    function actionSummary(action, data) {
+      if (action === "collect") {
+        return `采集完成：快照 ${data.snapshots_written || 0}，价格 ${data.prices_written || 0}，错误 ${(data.errors || []).length}。`;
+      }
+      if (action === "paper") {
+        return `纸上扫描完成：新开 ${data.opened?.length || 0}，观察 ${data.observed?.length || 0}，跳过 ${data.skipped?.length || 0}。`;
+      }
+      if (action === "mark") {
+        const attribution = data.attribution || {};
+        return `持仓更新完成：平仓 ${data.closed?.length || 0}，更新 ${data.updated?.length || 0}；归因回填 ${attribution.updated || 0}，导入 ${attribution.imported || 0}。`;
+      }
+      if (action === "backfill") {
+        return `归因回填完成：导入 ${data.imported || 0}，完整标注 ${data.updated || 0}，等待 ${data.pending || 0}，跳过 ${data.skipped || 0}。`;
+      }
+      if (action === "backtest") {
+        return `回测完成：状态 ${data.status || "--"}，结果 ${(data.results || []).length}，错误 ${(data.errors || []).length}。`;
+      }
+      return typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    }
+
+    function coinBadge(symbol) {
+      const coin = (symbol || "").replace("USDT", "");
+      const color = COLORS[coin] || "#a5b3af";
+      return `<span class="coinCell"><span class="coinIcon" style="background:${color}">${coin.slice(0, 1) || "-"}</span>${coin || "--"}</span>`;
+    }
+
+    function directionText(value) {
+      return { long:"做多", short:"做空", none:"观察", neutral:"中性", missing:"缺失", stale:"过期" }[value] || fmt(value);
+    }
+
+    function biasText(value) {
+      return { long:"多", short:"空", none:"中性", neutral:"中性", missing:"缺失", stale:"过期" }[value] || fmt(value);
+    }
+
+    function decisionText(value) {
+      return { open:"可开仓", observe:"观察", skip:"跳过", missing:"缺失" }[value] || fmt(value);
+    }
+
+    function dotClassForStatus(status) {
+      if (status === "ok") return "ok";
+      if (status === "error") return "bad";
+      return "warn";
+    }
+
+    function stageLabel(item) {
+      const stage = item && item.risk && item.risk.opportunity_stage;
+      return fixText((stage && stage.label) || {
+        paper_ready:"可纸上开仓",
+        waiting_entry:"等待入场",
+        risk_incomplete:"风控不足",
+        data_incomplete:"数据未满",
+        structure_watch:"结构观察"
+      }[(stage && stage.key) || ""] || "结构观察");
+    }
+
+    function scoreClass(score) {
+      const n = Number(score || 0);
+      if (n >= 70) return "score";
+      if (n >= 55) return "score mid";
+      return "score low";
+    }
+
+    function tag(value, label) {
+      return `<span class="tag ${value || ""}">${label || directionText(value)}</span>`;
+    }
+
+    function scoreCell(score) {
+      return `<span class="${scoreClass(score)}">${fmt(Number(score || 0), 0)}</span>`;
+    }
+
+    function trendCell(direction) {
+      if (direction === "long") return `<span class="dir long">↑ 上涨</span>`;
+      if (direction === "short") return `<span class="dir short">↓ 下跌</span>`;
+      return `<span class="dir none">- 观察</span>`;
+    }
+
+    function zoneText(zone, fallback) {
+      if (zone && zone.valid && zone.lower !== null && zone.upper !== null) {
+        return `${fmt(zone.lower, 6)} ~ ${fmt(zone.upper, 6)}`;
+      }
+      if (fallback !== null && fallback !== undefined) return fmt(fallback, 6);
+      return "--";
+    }
+
+    function deriveTargets(item) {
+      const risk = item.risk || {};
+      const entry = Number(risk.entry_price || item.price || 0);
+      const target = Number(risk.take_profit || 0);
+      if (!entry || !target) return ["--", "--", "--"];
+      const delta = Math.abs(target - entry);
+      const sign = target >= entry ? 1 : -1;
+      return [
+        target,
+        entry + sign * delta * 1.5,
+        entry + sign * delta * 2
+      ].map(v => fmt(v, 6));
+    }
+
+    function riskReward(item) {
+      const risk = item.risk || {};
+      const entry = Number(risk.entry_price || item.price || 0);
+      const stop = Number(risk.stop_loss || 0);
+      const target = Number(risk.take_profit || 0);
+      if (!entry || !stop || !target || entry === stop) return "--";
+      return "1 : " + fmt(Math.abs(target - entry) / Math.abs(entry - stop), 2);
+    }
+
+    function timeLabel(value) {
+      if (!value) return "--";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "--";
+      return date.toLocaleString("zh-CN", {
+        month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", hour12:false
+      });
+    }
+
+    function timeAgo(value) {
+      if (!value) return "--";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "--";
+      const seconds = Math.max(Math.floor((Date.now() - date.getTime()) / 1000), 0);
+      if (seconds < 60) return "刚刚";
+      if (seconds < 3600) return Math.floor(seconds / 60) + " 分钟前";
+      if (seconds < 86400) return Math.floor(seconds / 3600) + " 小时前";
+      return Math.floor(seconds / 86400) + " 天前";
+    }
+
+    function table(rows, columns, emptyText) {
+      if (!rows || rows.length === 0) return `<div class="empty">${emptyText || "暂无数据"}</div>`;
+      return `<table><thead><tr>${columns.map(col => `<th>${col.label}</th>`).join("")}</tr></thead><tbody>` +
+        rows.map((row, index) => `<tr>${columns.map(col => `<td>${col.render(row, index)}</td>`).join("")}</tr>`).join("") +
+        "</tbody></table>";
+    }
+
+    function marketSymbol(row) {
+      return row ? (row.symbol || `${row.coin || ""}USDT`) : null;
+    }
+
+    function primaryMarketItem() {
+      const market = (state.market || []).slice().sort(sortOpportunities);
+      return market.find(row => row.decision === "open") || market[0] || null;
+    }
+
+    function selectedMarketItem() {
+      const market = state.market || [];
+      const current = market.find(row => marketSymbol(row) === state.selectedSymbol);
+      if (current) return current;
+      const fallback = primaryMarketItem();
+      state.selectedSymbol = marketSymbol(fallback);
+      return fallback;
+    }
+
+    function selectSymbol(symbol) {
+      state.selectedSymbol = symbol;
+      renderMarket();
+      renderOpportunity();
+      renderStrategy();
+      log(`已选择 ${symbol}，信号详情和策略规则已更新。`);
+    }
+
+    async function selectTrade(tradeId) {
+      state.selectedTradeId = tradeId;
+      renderTrades();
+      renderPaperReviewLoading();
+      try {
+        state.paperReview = await api(`/paper/trades/${encodeURIComponent(tradeId)}/review`);
+        renderPaperReview();
+        const trade = state.paperReview.trade || {};
+        log(`已载入 ${trade.symbol || "--"} 纸上交易复盘。`);
+      } catch (error) {
+        state.paperReview = null;
+        renderPaperReviewError(error.message);
+        log("交易复盘加载失败：" + error.message);
+      }
+    }
+
+    function setHtml(id, html) {
+      const node = $(id);
+      if (node) node.innerHTML = html;
+    }
+
+    function kvRows(rows) {
+      return rows.map(([label, value]) => `<div><span>${esc(label)}</span><b>${value}</b></div>`).join("") || `<p>--</p>`;
+    }
+
+    function listHtml(items, emptyText = "暂无") {
+      const values = (items || []).map(fixText).filter(Boolean);
+      if (!values.length) return `<li>${esc(emptyText)}</li>`;
+      return values.map(item => `<li>${esc(item)}</li>`).join("");
+    }
+
+    function unique(items) {
+      return Array.from(new Set((items || []).map(fixText).filter(Boolean)));
+    }
+
+    function yesNo(value) {
+      return value ? `<span class="green">通过</span>` : `<span class="amber">未通过</span>`;
+    }
+
+    function statusTag(status) {
+      const normalized = status || "neutral";
+      const label = { ok:"通过", warn:"警告", missing:"缺失", error:"异常", neutral:"中性" }[normalized] || fixText(normalized);
+      return tag(normalized === "missing" ? "bad" : normalized, label);
+    }
+
+    function timeframeText(value) {
+      return { short:"短期", mid:"中期", long:"长期" }[value] || fmt(value);
+    }
+
+    function ruleText(value) {
+      return {
+        long_term_direction:"长期方向",
+        mid_term_aligned:"中期同向",
+        short_term_aligned:"短期触发",
+        mid_term_near_cost:"中期靠近成本",
+        short_term_near_cost:"短期靠近成本",
+        liquidity_context_present:"清算流动性",
+        orderflow_present:"订单流确认",
+        exhaustion_present:"趋势耗竭",
+        risk_reward_template_available:"盈亏比模板"
+      }[value] || fmt(value);
+    }
+
+    function indicatorText(value) {
+      return {
+        smart_money_cost:"主力成本带",
+        liq_heatmap:"清算热力图",
+        liquidation_fuel:"清算燃料",
+        liquidity_sweep:"流动性扫损",
+        cross_exchange_resonance:"跨所大单共振",
+        imbalance:"多空失衡",
+        trend_exhaustion:"趋势耗竭",
+        trend_price:"趋势价格",
+        inst_vwap:"机构 VWAP",
+        inst_volume_profile:"机构成交分布",
+        hvn_nodes:"高成交节点",
+        micro_poc:"微型 POC"
+      }[value] || fmt(value);
+    }
+
+    function roleText(value) {
+      return {
+        direction:"方向",
+        structure:"结构",
+        trigger:"触发",
+        position:"位置",
+        risk:"风控",
+        risk_filter:"过滤",
+        data_quality:"数据质量",
+        research:"研究"
+      }[value] || fmt(value);
+    }
+
+    function signalStatusText(value) {
+      return {
+        observing:"观察中",
+        promising:"表现较好",
+        noise_candidate:"噪音候选",
+        mixed:"表现混合"
+      }[value] || fmt(value);
+    }
+
+    function weightStatusText(value) {
+      return {
+        boost:"上调",
+        reduce:"下调",
+        neutral:"中性",
+        observing:"观察中",
+        baseline:"基础"
+      }[value] || fmt(value);
+    }
+
+    function outcomeStatusText(value) {
+      return {
+        closed_win:"已止盈/盈利",
+        closed_loss:"已止损/亏损",
+        closed_flat:"已平仓/持平",
+        open_profitable:"持仓盈利",
+        open_drawdown:"持仓回撤",
+        open_flat:"持仓持平",
+        open_unknown:"持仓待标记"
+      }[value] || fmt(value);
+    }
+
+    function entryQualityText(value) {
+      return {
+        resolved:"已结束",
+        working:"入场有效",
+        under_pressure:"承压中",
+        flat:"未拉开",
+        stop_reached:"触及止损",
+        target_reached:"触及止盈",
+        unknown:"待标记"
+      }[value] || fmt(value);
+    }
+
+    function decisionQualityText(value) {
+      return {
+        supported:"信号支持",
+        review_required:"需要复审",
+        unresolved:"待验证",
+        missing_decision:"缺少决策"
+      }[value] || fmt(value);
+    }
+
+    function actionText(value) {
+      return {
+        accumulate_samples:"继续积累纸上交易样本，未达到最低统计样本前不进入实盘判断。",
+        backfill_attribution:"运行回填归因，让该笔交易的 4h/24h 信号结果完整标注。",
+        mark_open_trade:"继续用最新价格更新持仓，观察是否触及止盈或止损。",
+        review_harmful_signals:"复查负贡献信号，确认是否需要降权或增加过滤条件。",
+        keep_monitoring:"保持监控，等待更多样本验证稳定性。"
+      }[value] || fmt(value);
+    }
+
+    function signalEffectText(value) {
+      return {
+        helpful:"正贡献",
+        harmful:"负贡献",
+        pending:"待标注",
+        flat:"持平"
+      }[value] || fmt(value);
+    }
+
+    function indicatorStatusText(value) {
+      return {
+        scoring:"评分中",
+        research:"已采集",
+        experiment:"实验矩阵",
+        catalog_only:"目录待接入"
+      }[value] || fmt(value);
+    }
+
+    function experimentStatusText(value) {
+      return {
+        not_collected:"未采集",
+        collecting:"采集中",
+        ready_for_feature_test:"可做特征检验",
+        candidate_for_strategy:"策略候选"
+      }[value] || fmt(value);
+    }
+
+    function experimentFeatureStatusText(value) {
+      return {
+        candidate:"候选有效",
+        noise_candidate:"噪音候选",
+        mixed:"混合",
+        insufficient:"样本不足"
+      }[value] || fmt(value);
+    }
+
+    function noiseRiskText(value) {
+      return {
+        high_sample_risk:"样本风险",
+        shared_payload_risk:"共用结构",
+        low_edge_risk:"边际很弱",
+        coin_flip_risk:"接近随机",
+        normal:"正常"
+      }[value] || fmt(value);
+    }
+
+    function evidenceText(value) {
+      return {
+        live_weight_ready:"实时权重样本",
+        live_observing:"实时观察中",
+        backtest_screened:"回测初筛",
+        collected_unmodeled:"已采集未建模",
+        catalog_only:"仅目录"
+      }[value] || fmt(value);
+    }
+
+    function sortOpportunities(a, b) {
+      const stageRank = { paper_ready: 4, waiting_entry: 3, risk_incomplete: 2, structure_watch: 1, data_incomplete: 0 };
+      const aStage = a.risk && a.risk.opportunity_stage && a.risk.opportunity_stage.key;
+      const bStage = b.risk && b.risk.opportunity_stage && b.risk.opportunity_stage.key;
+      return ((b.decision === "open") - (a.decision === "open"))
+        || ((stageRank[bStage] || 0) - (stageRank[aStage] || 0))
+        || ((b.score || 0) - (a.score || 0));
+    }
+
+    function renderStatus() {
+      const summary = state.summary || {};
+      const runtime = state.runtime || {};
+      const completeness = state.completeness || {};
+      const scoring = (completeness.summary && completeness.summary.scoring) || {};
+      const research = (completeness.summary && completeness.summary.research) || {};
+      const market = state.market || [];
+      const telegram = state.telegram || {};
+      const collector = runtime.collector || {};
+      const diagnostics = runtime.diagnostics || {};
+      const latestCollection = (runtime.collection && runtime.collection.latest) || (summary.latest && summary.latest.collection) || {};
+
+      const healthStatus = diagnostics.overall_status || (runtime.error ? "error" : "warning");
+      $("healthStatus").textContent = diagnostics.label || (runtime.error ? "异常" : "检测中");
+      $("healthDot").className = "dot " + dotClassForStatus(healthStatus);
+      $("healthStatus").parentElement.title = diagnostics.summary || runtime.error || "系统诊断";
+      $("tgStatus").textContent = telegram.error ? "异常" : (telegram.configured ? (telegram.bot_username ? "@" + telegram.bot_username : "已配置") : "未配置");
+      $("tgDot").className = "dot " + (telegram.configured && !telegram.error ? "ok" : "warn");
+      $("collectorStatus").textContent = collector.running ? "运行中" : "未运行";
+      $("collectorDot").className = "dot " + (collector.running ? "ok" : "bad");
+      $("coinCount").textContent = `${market.length || DEFAULT_COINS.length} / ${DEFAULT_COINS.length}`;
+      $("coreCoverage").textContent = pct(scoring.coverage_pct || 0, 0);
+      $("researchCoverage").textContent = pct(research.coverage_pct || 0, 0);
+      $("lastCollect").textContent = timeAgo(latestCollection.finished_at);
+      $("snapshotUpdated").textContent = "更新于 " + timeLabel(summary.latest && summary.latest.signal_snapshot_at);
+      $("snapshotValue").textContent = fmt(summary.snapshots || 0, 0);
+      $("priceCount").textContent = fmt(summary.prices || 0, 0);
+      $("activeCoins").textContent = `${market.length || 0} / ${DEFAULT_COINS.length}`;
+    }
+
+    function renderKpis() {
+      const market = state.market || [];
+      const trades = state.trades || [];
+      const backtests = (state.backtests && state.backtests.results) || [];
+      const openSignals = market.filter(item => item.decision === "open");
+      const highScores = market.filter(item => Number(item.score || 0) >= 75);
+      const longCount = market.filter(item => item.direction === "long").length;
+      const shortCount = market.filter(item => item.direction === "short").length;
+      const openTrades = trades.filter(item => item.status === "open");
+      const paperStats = state.paperStats || {};
+      const best = backtests[0] || {};
+
+      $("paperValue").textContent = openTrades.length ? `${openTrades.length} 笔` : "0 笔";
+      $("paperSample").textContent = `已平仓 ${paperStats.closed_trades || 0}/${paperStats.sample_target || 200}，样本${paperStats.sample_ready ? "达标" : "未达标"}`;
+      $("paperWinRate").textContent = paperStats.win_rate === null || paperStats.win_rate === undefined ? "--" : pct(paperStats.win_rate, 1);
+      $("paperProfitFactor").textContent = paperStats.profit_factor === null || paperStats.profit_factor === undefined ? "--" : fmt(paperStats.profit_factor, 2);
+      $("signalValue").textContent = `${openSignals.length} / ${highScores.length}`;
+      $("longCount").textContent = longCount;
+      $("shortCount").textContent = shortCount;
+      $("backtestScore").textContent = best.score !== undefined ? fmt(best.score, 1) : "--";
+      $("profitFactor").textContent = best.profit_factor !== undefined ? fmt(best.profit_factor, 2) : "--";
+      $("maxDrawdown").textContent = best.max_drawdown_pct !== undefined ? pct(best.max_drawdown_pct, 2) : "--";
+    }
+
+    function renderMarket() {
+      const rows = (state.market || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
+      if (!rows.length) {
+        $("marketTable").innerHTML = `<div class="empty">暂无市场数据</div>`;
+        return;
+      }
+      const columns = [
+        { label:"-", render: row => marketSymbol(row) === state.selectedSymbol ? '<span class="watch green">●</span>' : '<span class="watch">○</span>' },
+        { label:"币种", render: row => coinBadge(row.coin || row.symbol) },
+        { label:"价格 (USDT)", render: row => fmt(row.price, 6) },
+        { label:"趋势方向", render: row => trendCell(row.direction) },
+        { label:"短期", render: row => tag(row.short, biasText(row.short)) },
+        { label:"中期", render: row => tag(row.mid, biasText(row.mid)) },
+        { label:"长期", render: row => tag(row.long, biasText(row.long)) },
+        { label:"结构分", render: row => scoreCell(row.structure_score ?? row.score) },
+        { label:"执行分", render: row => scoreCell(row.execution_score) },
+        { label:"状态", render: row => tag(row.decision === "open" ? "open" : "warn", decisionText(row.decision)) }
+      ];
+      $("marketTable").innerHTML = `<table><thead><tr>${columns.map(col => `<th>${col.label}</th>`).join("")}</tr></thead><tbody>` +
+        rows.map((row, index) => {
+          const symbol = marketSymbol(row);
+          const selected = symbol === state.selectedSymbol ? " selected" : "";
+          return `<tr class="clickableRow${selected}" data-symbol="${esc(symbol)}" tabindex="0" aria-label="查看 ${esc(symbol)} 信号详情">${columns.map(col => `<td>${col.render(row, index)}</td>`).join("")}</tr>`;
+        }).join("") +
+        "</tbody></table>";
+      $("marketTable").querySelectorAll("tr[data-symbol]").forEach(row => {
+        row.addEventListener("click", () => selectSymbol(row.dataset.symbol));
+        row.addEventListener("keydown", event => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            selectSymbol(row.dataset.symbol);
+          }
+        });
+      });
+    }
+
+    function renderOpportunity() {
+      const market = (state.market || []).slice().sort(sortOpportunities);
+      const backtests = (state.backtests && state.backtests.results) || [];
+      const item = selectedMarketItem();
+      if (!item) {
+        $("oppTitle").textContent = "信号详情";
+        $("oppUpdated").textContent = "等待市场数据";
+        setHtml("signalScores", kvRows([["状态", "--"]]));
+        setHtml("signalGate", kvRows([["状态", "--"]]));
+        setHtml("signalData", kvRows([["状态", "--"]]));
+        setHtml("stateTable", `<div class="empty">等待市场数据</div>`);
+        setHtml("moduleTable", `<div class="empty">等待评分模块</div>`);
+        setHtml("signalExplanations", listHtml([], "等待信号解释"));
+        setHtml("signalWarnings", listHtml([], "暂无风险提示"));
+        return;
+      }
+      const coin = item.coin || (item.symbol || "").replace("USDT", "");
+      const risk = item.risk || {};
+      const reason = item.reason || {};
+      const scoreBreakdown = risk.score_breakdown || {};
+      const gate = risk.execution_gate || {};
+      const entryZone = risk.entry_zone || {};
+      const executionZone = risk.execution_zone || {};
+      const confirmation = risk.confirmation || {};
+      const targets = deriveTargets(item);
+      const similar = backtests.find(row => row.coin === coin);
+      const explanations = ((reason && reason.explanation) || []).map(fixText).filter(Boolean);
+      const warnings = unique([...(reason.warnings || []), ...(item.warnings || []), ...(gate.warnings || [])]);
+      const missing = unique([...(reason.required_missing_indicators || []), ...(item.required_missing_indicators || [])]);
+      const stale = unique([...(reason.stale_indicators || []), ...(item.stale_indicators || [])]);
+      const openableCount = market.filter(row => row.decision === "open").length;
+
+      $("oppTitle").textContent = item.decision === "open" ? "当前机会" : "信号详情";
+      $("oppUpdated").textContent = `${item.symbol || "--"}，${openableCount} 个可开仓候选`;
+      $("oppIcon").textContent = coin.slice(0, 1) || "-";
+      $("oppIcon").style.background = COLORS[coin] || "#43d6c4";
+      $("oppSymbol").textContent = item.symbol || "--";
+      $("oppDirection").className = "tag " + (item.direction || "");
+      $("oppDirection").textContent = directionText(item.direction);
+      $("oppStage").className = "tag " + (item.decision === "open" ? "open" : "warn");
+      $("oppStage").textContent = stageLabel(item);
+      $("oppScore").textContent = fmt(item.score || 0, 0);
+      $("oppSource").textContent = item.decision === "open" ? "信号来源：多因子共振" : "信号来源：结构观察，暂不追价";
+      $("oppEntry").textContent = zoneText(risk.execution_zone, risk.entry_price || item.price);
+      $("oppCurrent").textContent = `当前价格 ${fmt(item.price, 6)}`;
+      $("oppStop").textContent = fmt(risk.stop_loss, 6);
+      $("oppStopMeta").textContent = `${fixText(risk.stop_source || "暗流止损")} / 幅度 ${pct(risk.stop_pct || 0, 2)}`;
+      $("oppTp1").textContent = "TP1 " + targets[0];
+      $("oppTargets").textContent = `TP2 ${targets[1]} / TP3 ${targets[2]}`;
+      $("oppR").textContent = riskReward(item);
+      $("oppWin").textContent = `胜率参考 ${similar ? pct(similar.win_rate, 1) : "--"}`;
+      $("oppReason").textContent = [
+        `结论：${directionText(item.direction)}，${decisionText(item.decision)}，${stageLabel(item)}。`,
+        explanations.length ? "信号理由：" + explanations.slice(0, 3).join(" / ") : "信号理由：暂无完整解释。",
+        warnings.length ? "风险提示：" + warnings.slice(0, 3).join(" / ") : "风险提示：暂无额外提示。"
+      ].join(" ");
+
+      setHtml("signalScores", kvRows([
+        ["总评分", `<span class="${scoreClass(item.score)}">${fmt(item.score || 0, 0)} / 100</span>`],
+        ["最低开仓线", fmt(scoreBreakdown.min_score || risk.min_score, 0)],
+        ["结构分", scoreCell(scoreBreakdown.structure_score ?? item.structure_score ?? item.score)],
+        ["执行分", scoreCell(scoreBreakdown.execution_score ?? item.execution_score)],
+        ["连续确认", confirmation.required ? `${fmt(confirmation.streak || 0, 0)} / ${fmt(confirmation.required, 0)}` : "--"]
+      ]));
+      setHtml("signalGate", kvRows([
+        ["执行门", gate.ready ? `<span class="green">通过</span>` : `<span class="amber">等待</span>`],
+        ["成本带", entryZone.inside ? `<span class="green">价格在区间内</span>` : `<span class="amber">价格未到位</span>`],
+        ["可执行区", executionZone.valid ? zoneText(executionZone, null) : `<span class="amber">无有效区间</span>`],
+        ["最低 R", fmt(executionZone.min_r, 2)],
+        ["阶段原因", esc((risk.opportunity_stage && risk.opportunity_stage.reason) || "--")]
+      ]));
+      setHtml("signalData", kvRows([
+        ["核心缺失", missing.length ? `<span class="amber">${missing.map(indicatorText).join("、")}</span>` : `<span class="green">无</span>`],
+        ["过期指标", stale.length ? `<span class="amber">${stale.map(indicatorText).join("、")}</span>` : `<span class="green">无</span>`],
+        ["止损来源", esc(risk.stop_source || "--")],
+        ["止盈来源", esc(risk.target_source || "--")]
+      ]));
+      const explanationItems = unique([...explanations, ...(gate.reasons || [])]);
+      renderStateTable(reason.states || []);
+      renderModuleTable(item.modules || risk.modules || []);
+      setHtml("signalExplanations", listHtml(explanationItems, "暂无明确理由"));
+      setHtml("signalWarnings", listHtml(warnings, "暂无风险提示"));
+    }
+
+    function renderStateTable(states) {
+      const rows = (states || []).map(state => ({
+        timeframe: timeframeText(state.timeframe),
+        interval: state.interval || "--",
+        bias: state.bias,
+        avg_price: state.avg_price,
+        distance_pct: state.distance_pct,
+        age_minutes: state.age_minutes,
+        status: state.is_stale ? "stale" : (state.status || "ok")
+      }));
+      setHtml("stateTable", table(rows, [
+        { label:"周期", render: row => esc(row.timeframe) },
+        { label:"K线", render: row => esc(row.interval) },
+        { label:"方向", render: row => tag(row.bias, biasText(row.bias)) },
+        { label:"成本均价", render: row => fmt(row.avg_price, 6) },
+        { label:"距离", render: row => pct(row.distance_pct, 2) },
+        { label:"状态", render: row => row.status === "stale" ? tag("warn", "过期") : tag("ok", fixText(row.status || "正常")) }
+      ], "暂无周期状态"));
+    }
+
+    function renderModuleTable(modules) {
+      setHtml("moduleTable", table(modules || [], [
+        { label:"模块", render: row => esc(row.name || "--") },
+        { label:"得分", render: row => scoreCell(row.points || 0) },
+        { label:"状态", render: row => statusTag(row.status) },
+        { label:"依据", render: row => esc(row.detail || "--") }
+      ], "暂无模块评分"));
+    }
+
+    function renderStrategy() {
+      const item = selectedMarketItem();
+      if (!item) {
+        setHtml("strategyDecision", kvRows([["状态", "--"]]));
+        setHtml("strategyRules", `<span class="tag neutral">等待数据</span>`);
+        $("strategyNarrative").textContent = "等待市场数据。";
+        return;
+      }
+      const risk = item.risk || {};
+      const reason = item.reason || {};
+      const rules = (reason.rules || []).map(ruleText);
+      $("strategySubtitle").textContent = `${item.symbol || "--"} 的当前策略判断`;
+      setHtml("strategyDecision", kvRows([
+        ["方向", tag(item.direction, directionText(item.direction))],
+        ["动作", tag(item.decision === "open" ? "open" : "warn", decisionText(item.decision))],
+        ["阶段", tag(item.decision === "open" ? "open" : "warn", stageLabel(item))],
+        ["评分", scoreCell(item.score)],
+        ["入场", esc(zoneText(risk.execution_zone, risk.entry_price || item.price))],
+        ["止损", esc(fmt(risk.stop_loss, 6))],
+        ["止盈", esc(fmt(risk.take_profit, 6))]
+      ]));
+      setHtml("strategyRules", rules.length
+        ? rules.map(rule => `<span class="tag ok">${esc(rule)}</span>`).join("")
+        : `<span class="tag warn">暂无触发规则</span>`);
+      const modules = (item.modules || risk.modules || []).map(module => `${module.name}: ${module.points} 分，${module.detail}`);
+      const gate = risk.execution_gate || {};
+      const narrative = [
+        `策略名称：multi_timeframe_cost_stack。`,
+        `判断逻辑：长期成本带决定主方向，中期结构和短期触发要求同向；随后检查价格是否靠近短期成本带，以及清算流动性、订单流、趋势耗竭、数据覆盖和盈亏比模板。`,
+        `当前 ${item.symbol} 的结论是 ${directionText(item.direction)}，动作是 ${decisionText(item.decision)}。`,
+        modules.length ? `模块依据：${modules.join(" / ")}` : `模块依据：暂无。`,
+        gate.ready ? `执行门通过：${(gate.reasons || ["满足开仓条件"]).join(" / ")}` : `执行门未通过：${(gate.warnings || ["仍需等待下一次扫描确认"]).join(" / ")}`
+      ].join("\n");
+      $("strategyNarrative").textContent = narrative;
+    }
+
+    function renderSettings() {
+      const runtime = state.runtime || {};
+      const collector = runtime.collector || {};
+      const paperLoop = runtime.paper_loop || {};
+      const collection = runtime.collection || {};
+      const latest = collection.latest || {};
+      const completeness = state.completeness || {};
+      const scoring = (completeness.summary && completeness.summary.scoring) || {};
+      const research = (completeness.summary && completeness.summary.research) || {};
+      const telegram = state.telegram || {};
+      setHtml("collectorDetail", kvRows([
+        ["状态", collector.running ? `<span class="green">运行中</span>` : `<span class="red">未运行</span>`],
+        ["PID", esc(collector.pid || "--")],
+        ["模式", esc(collector.mode || collector.name || "--")],
+        ["间隔", collection.interval_seconds ? `${fmt(collection.interval_seconds / 60, 0)} 分钟` : "--"],
+        ["下一次", timeLabel(collection.next_collect_at)],
+        ["最近完成", timeAgo(latest.finished_at)],
+        ["币种", esc((collector.coins || DEFAULT_COINS).join ? (collector.coins || DEFAULT_COINS).join("、") : "--")]
+      ]));
+      setHtml("paperLoopDetail", kvRows([
+        ["状态", paperLoop.running ? `<span class="green">运行中</span>` : `<span class="red">未运行</span>`],
+        ["PID", esc(paperLoop.pid || "--")],
+        ["间隔", paperLoop.interval_seconds ? `${fmt(paperLoop.interval_seconds / 60, 0)} 分钟` : "--"],
+        ["最近日志", esc(paperLoop.last_log_line || "--")],
+        ["最近错误", paperLoop.last_error_line ? `<span class="amber">${esc(paperLoop.last_error_line)}</span>` : `<span class="green">无</span>`]
+      ]));
+      setHtml("settingsDetail", kvRows([
+        ["Telegram", telegram.error ? `<span class="amber">异常：${esc(telegram.error)}</span>` : (telegram.configured ? `<span class="green">已配置 ${esc(telegram.bot_username || "")}</span>` : `<span class="amber">未配置</span>`) ],
+        ["评分核心覆盖", pct(scoring.coverage_pct || 0, 0)],
+        ["全量研究覆盖", pct(research.coverage_pct || 0, 0)],
+        ["市场缓存", runtime.market_cache && runtime.market_cache.cached ? `命中，剩余 ${fmt(runtime.market_cache.remaining_seconds, 0)} 秒` : "未命中"],
+        ["完整性缓存", runtime.completeness_cache && runtime.completeness_cache.cached ? `命中，剩余 ${fmt(runtime.completeness_cache.remaining_seconds, 0)} 秒` : "未命中"],
+        ["服务运行", runtime.server && runtime.server.running ? `<span class="green">运行中 ${fmt((runtime.server.uptime_seconds || 0) / 60, 0)} 分钟</span>` : `<span class="amber">未知</span>`]
+      ]));
+    }
+
+    function renderEffectiveness() {
+      const data = state.effectiveness || {};
+      const weightData = state.weights || {};
+      const experiments = state.experiments || {};
+      const experimentEffectiveness = state.experimentEffectiveness || {};
+      const signals = data.signals || [];
+      const roles = data.roles || [];
+      const weights = weightData.weights || [];
+      const sources = experiments.weight_sources || [];
+      const experimentMatrix = experiments.experiment_matrix || [];
+      const featureRows = experimentEffectiveness.indicators || [];
+      const catalog = experiments.indicator_catalog || [];
+      $("effectivenessSubtitle").textContent = data.sample_count !== undefined
+        ? `${data.horizon || "4h"} 观察窗，${fmt(data.labeled_count || 0, 0)} 个已标注样本`
+        : "等待归因样本";
+      setHtml("effectivenessSummary", kvRows([
+        ["总观察", fmt(data.sample_count || 0, 0)],
+        ["已标注", fmt(data.labeled_count || 0, 0)],
+        ["待回填", fmt(data.pending_count || 0, 0)],
+        ["观察窗", esc(data.horizon || "4h")],
+        ["当前结论", (data.labeled_count || 0) >= 30 ? `<span class="green">可初步参考</span>` : `<span class="amber">样本不足</span>`]
+      ]));
+      setHtml("signalEffectiveness", table(signals.slice(0, 8), [
+        { label:"信号", render: row => esc(row.name) },
+        { label:"角色", render: row => esc(roleText(row.role)) },
+        { label:"样本", render: row => fmt(row.sample_count, 0) },
+        { label:"胜率", render: row => pct(row.win_rate, 1) },
+        { label:"平均收益", render: row => `<span class="${row.avg_return >= 0 ? "green" : "red"}">${pct(row.avg_return, 2)}</span>` },
+        { label:"收益因子", render: row => row.profit_factor === null || row.profit_factor === undefined ? "--" : fmt(row.profit_factor, 2) },
+        { label:"状态", render: row => tag(row.status === "promising" ? "ok" : row.status === "noise_candidate" ? "bad" : "warn", signalStatusText(row.status)) }
+      ], "暂无已标注信号样本"));
+      setHtml("roleEffectiveness", table(roles.slice(0, 6), [
+        { label:"角色", render: row => esc(roleText(row.name)) },
+        { label:"样本", render: row => fmt(row.sample_count, 0) },
+        { label:"胜率", render: row => pct(row.win_rate, 1) },
+        { label:"平均收益", render: row => `<span class="${row.avg_return >= 0 ? "green" : "red"}">${pct(row.avg_return, 2)}</span>` }
+      ], "暂无角色归因样本"));
+      setHtml("signalWeights", table(weights.slice(0, 8), [
+        { label:"信号", render: row => esc(row.signal_name) },
+        { label:"样本", render: row => fmt(row.sample_count, 0) },
+        { label:"系数", render: row => `<span class="${row.multiplier > 1 ? "green" : row.multiplier < 1 ? "red" : "muted"}">${fmt(row.multiplier, 3)}x</span>` },
+        { label:"状态", render: row => tag(row.status === "boost" ? "ok" : row.status === "reduce" ? "bad" : "warn", weightStatusText(row.status)) },
+        { label:"原因", render: row => esc(row.reason) }
+      ], "暂无权重治理数据"));
+      setHtml("experimentSources", table(sources, [
+        { label:"来源", render: row => esc(row.label) },
+        { label:"样本", render: row => fmt(row.sample_count, 0) },
+        { label:"已标注/结果", render: row => fmt(row.labeled_count, 0) },
+        { label:"进入权重", render: row => row.used_for_execution_weights ? tag("ok", "是") : tag("warn", "否") },
+        { label:"说明", render: row => esc(row.reason) }
+      ], "暂无实验来源数据"));
+      setHtml("experimentMatrix", table(experimentMatrix, [
+        { label:"实验指标", render: row => esc(row.hfd_name) },
+        { label:"参数", render: row => `<span class="muted">${esc(row.key)}</span>` },
+        { label:"族群", render: row => esc(row.family) },
+        { label:"覆盖", render: row => `${fmt(row.coverage_slots || 0, 0)} / ${fmt(row.expected_coverage_slots || 0, 0)}` },
+        { label:"快照", render: row => row.snapshot_count ? `<span class="green">${fmt(row.snapshot_count, 0)}</span>` : `<span class="amber">0</span>` },
+        { label:"策略样本", render: row => `${fmt(row.live_labeled_count || 0, 0)} / ${fmt(row.live_observation_count || 0, 0)}` },
+        { label:"状态", render: row => tag(row.experiment_status === "candidate_for_strategy" ? "ok" : row.experiment_status === "ready_for_feature_test" ? "neutral" : "warn", experimentStatusText(row.experiment_status)) },
+        { label:"下一步", render: row => esc(row.recommended_next_action) }
+      ], "暂无实验矩阵数据"));
+      setHtml("experimentEffectiveness", table(featureRows, [
+        { label:"实验指标", render: row => esc(row.hfd_name) },
+        { label:"参数", render: row => `<span class="muted">${esc(row.key)}</span>` },
+        { label:"样本", render: row => fmt(row.sample_count, 0) },
+        { label:"胜率", render: row => pct(row.win_rate, 1) },
+        { label:"平均收益", render: row => row.avg_return === null || row.avg_return === undefined ? "--" : `<span class="${row.avg_return >= 0 ? "green" : "red"}">${pct(row.avg_return, 2)}</span>` },
+        { label:"MFE/MAE", render: row => `${coloredPct(row.avg_mfe)} / ${coloredPct(row.avg_mae)}` },
+        { label:"状态", render: row => tag(row.status === "candidate" ? "ok" : row.status === "noise_candidate" ? "bad" : "warn", experimentFeatureStatusText(row.status)) },
+        { label:"噪音风险", render: row => esc(noiseRiskText(row.noise_risk)) },
+        { label:"建议", render: row => esc(row.recommendation) }
+      ], "暂无实验特征检验数据"));
+      setHtml("indicatorCatalog", table(catalog, [
+        { label:"暗流指标", render: row => esc(row.hfd_name) },
+        { label:"参数", render: row => `<span class="muted">${esc(row.key)}</span>` },
+        { label:"状态", render: row => tag(row.status === "scoring" ? "ok" : row.status === "research" || row.status === "experiment" ? "neutral" : "warn", indicatorStatusText(row.status)) },
+        { label:"采集", render: row => row.collected ? `<span class="green">${fmt(row.snapshot_count, 0)}</span>` : `<span class="amber">未采集</span>` },
+        { label:"策略样本", render: row => fmt(row.live_labeled_count || row.live_observation_count || 0, 0) },
+        { label:"回测", render: row => row.used_in_backtest ? `<span class="green">已覆盖</span>` : `<span class="muted">未覆盖</span>` },
+        { label:"证据", render: row => esc(evidenceText(row.evidence_level)) }
+      ], "暂无指标目录"));
+    }
+
+    function renderTrades() {
+      const rows = state.trades || [];
+      if (rows.length && (!state.selectedTradeId || !rows.some(row => row.id === state.selectedTradeId))) {
+        state.selectedTradeId = rows[0].id;
+      }
+      if (!rows.length) {
+        $("tradesTable").innerHTML = `<div class="empty">暂无纸上交易记录</div>`;
+        renderPaperReview();
+        return;
+      }
+      const columns = [
+        { label:"时间", render: row => timeLabel(row.opened_at) },
+        { label:"币种", render: row => coinBadge(row.symbol) },
+        { label:"方向", render: row => tag(row.direction, directionText(row.direction)) },
+        { label:"入场价", render: row => fmt(row.entry_price, 6) },
+        { label:"止盈/止损", render: row => `<span class="green">${fmt(row.take_profit, 6)}</span> / <span class="red">${fmt(row.stop_loss, 6)}</span>` },
+        { label:"MFE/MAE", render: row => `<span class="green">${pct(row.mfe || 0, 2)}</span> / <span class="red">${pct(row.mae || 0, 2)}</span>` },
+        { label:"盈亏", render: row => row.pnl === null || row.pnl === undefined ? "--" : `<span class="${row.pnl >= 0 ? "green" : "red"}">${pct(row.pnl, 2)}</span>` },
+        { label:"状态", render: row => tag(row.status === "open" ? "open" : "neutral", row.status === "open" ? "持仓中" : "已平仓") }
+      ];
+      $("tradesTable").innerHTML = `<table><thead><tr>${columns.map(col => `<th>${col.label}</th>`).join("")}</tr></thead><tbody>` +
+        rows.map((row, index) => {
+          const selected = row.id === state.selectedTradeId ? " selected" : "";
+          return `<tr class="clickableRow${selected}" data-trade-id="${esc(row.id)}" tabindex="0" aria-label="查看 ${esc(row.symbol)} 交易复盘">${columns.map(col => `<td>${col.render(row, index)}</td>`).join("")}</tr>`;
+        }).join("") +
+        "</tbody></table>";
+      $("tradesTable").querySelectorAll("tr[data-trade-id]").forEach(row => {
+        row.addEventListener("click", () => selectTrade(row.dataset.tradeId));
+        row.addEventListener("keydown", event => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            selectTrade(row.dataset.tradeId);
+          }
+        });
+      });
+    }
+
+    function renderPaperReviewLoading() {
+      $("paperReviewSubtitle").textContent = "正在加载复盘";
+      setHtml("paperReviewTrade", kvRows([["状态", "加载中"]]));
+      setHtml("paperReviewDecision", kvRows([["状态", "加载中"]]));
+      setHtml("paperReviewVerdict", kvRows([["状态", "加载中"]]));
+      setHtml("paperReviewSignals", `<div class="empty">正在加载信号贡献</div>`);
+      setHtml("paperReviewActions", listHtml(["正在读取该笔交易的开仓判断和归因样本。"]));
+    }
+
+    function renderPaperReviewError(message) {
+      $("paperReviewSubtitle").textContent = "复盘加载失败";
+      setHtml("paperReviewTrade", kvRows([["错误", esc(message)]]));
+      setHtml("paperReviewDecision", kvRows([["状态", "--"]]));
+      setHtml("paperReviewVerdict", kvRows([["状态", "--"]]));
+      setHtml("paperReviewSignals", `<div class="empty">暂无信号贡献</div>`);
+      setHtml("paperReviewActions", listHtml(["刷新面板后重试。"]));
+    }
+
+    function renderPaperReview() {
+      const data = state.paperReview || {};
+      const trade = data.trade || null;
+      const decision = data.decision || null;
+      const current = data.current || {};
+      const review = data.review || {};
+      const sample = data.sample_context || {};
+      const signals = data.signals || [];
+      if (!trade) {
+        $("paperReviewSubtitle").textContent = "选择一笔交易";
+        setHtml("paperReviewTrade", kvRows([["状态", state.trades.length ? "等待加载" : "暂无交易"]]));
+        setHtml("paperReviewDecision", kvRows([["状态", "--"]]));
+        setHtml("paperReviewVerdict", kvRows([["状态", "--"]]));
+        setHtml("paperReviewSignals", `<div class="empty">等待复盘数据</div>`);
+        setHtml("paperReviewActions", listHtml([state.trades.length ? "点击一笔纸上交易记录。" : "先继续执行纸上扫描并积累样本。"]));
+        return;
+      }
+      $("paperReviewSubtitle").textContent = `${trade.symbol} ${directionText(trade.direction)}，${outcomeStatusText(current.outcome_status)}`;
+      setHtml("paperReviewTrade", kvRows([
+        ["币种", coinBadge(trade.symbol)],
+        ["方向", tag(trade.direction, directionText(trade.direction))],
+        ["状态", tag(trade.status === "open" ? "open" : "neutral", trade.status === "open" ? "持仓中" : "已平仓")],
+        ["入场", fmt(trade.entry_price, 6)],
+        ["现价/出场", fmt(current.mark_price, 6)],
+        ["收益", current.return_pct === null || current.return_pct === undefined ? "--" : `<span class="${current.return_pct >= 0 ? "green" : "red"}">${pct(current.return_pct, 2)}</span>`],
+        ["止损距离", pct(current.distance_to_stop_pct, 2)],
+        ["止盈距离", pct(current.distance_to_target_pct, 2)]
+      ]));
+      setHtml("paperReviewDecision", kvRows([
+        ["策略", esc((decision && decision.strategy) || trade.strategy_name || "--")],
+        ["基础分", decision ? scoreCell(decision.score) : "--"],
+        ["治理分", decision && decision.score_breakdown ? scoreCell(decision.score_breakdown.weighted_score) : "--"],
+        ["权重模式", esc(review.weight_mode || "baseline")],
+        ["开仓线", decision && decision.score_breakdown ? fmt(decision.score_breakdown.min_score, 0) : "--"],
+        ["开仓时间", timeLabel(trade.opened_at)]
+      ]));
+      const counts = review.signal_counts || {};
+      setHtml("paperReviewVerdict", kvRows([
+        ["结果", tag(current.outcome_status && current.outcome_status.includes("loss") ? "bad" : current.outcome_status && current.outcome_status.includes("win") ? "ok" : "warn", outcomeStatusText(current.outcome_status))],
+        ["入场质量", esc(entryQualityText(review.entry_quality))],
+        ["决策质量", esc(decisionQualityText(review.decision_quality))],
+        ["4h 正/负/待", `${fmt(counts.helpful_4h || 0, 0)} / ${fmt(counts.harmful_4h || 0, 0)} / ${fmt(counts.pending_4h || 0, 0)}`],
+        ["样本进度", `${fmt(sample.closed_trades || 0, 0)} / ${fmt(sample.sample_target || 200, 0)}`],
+        ["统计状态", sample.sample_ready ? `<span class="green">达标</span>` : `<span class="amber">样本不足</span>`]
+      ]));
+      setHtml("paperReviewSignals", table(signals, [
+        { label:"信号", render: row => esc(row.signal_name) },
+        { label:"角色", render: row => esc(roleText(row.signal_role)) },
+        { label:"得分", render: row => scoreCell(row.strength) },
+        { label:"30m", render: row => coloredPct(row.returns && row.returns["30m"]) },
+        { label:"4h", render: row => coloredPct(row.returns && row.returns["4h"]) },
+        { label:"24h", render: row => coloredPct(row.returns && row.returns["24h"]) },
+        { label:"结论", render: row => tag(row.effect_4h === "helpful" ? "ok" : row.effect_4h === "harmful" ? "bad" : "warn", signalEffectText(row.effect_4h)) }
+      ], "暂无信号贡献数据"));
+      setHtml("paperReviewActions", listHtml((review.next_actions || []).map(actionText), "暂无后续动作"));
+    }
+
+    function coloredPct(value) {
+      if (value === null || value === undefined || !Number.isFinite(Number(value))) return "--";
+      return `<span class="${Number(value) >= 0 ? "green" : "red"}">${pct(Number(value), 2)}</span>`;
+    }
+
+    function renderBacktests() {
+      const rows = ((state.backtests && state.backtests.results) || []).slice(0, 8);
+      $("backtestTable").innerHTML = table(rows, [
+        { label:"排名", render: (_, index) => `<span class="rankBadge ${index < 3 ? "top" : ""}">${index + 1}</span>` },
+        { label:"策略名称", render: row => `${coinBadge(row.coin || row.symbol)} <span class="muted">${row.timeframe || row.interval || ""}</span>` },
+        { label:"收益率", render: row => `<span class="green">${pct(row.total_pnl_pct)}</span>` },
+        { label:"最大回撤", render: row => `<span class="red">${pct(row.max_drawdown_pct, 2)}</span>` },
+        { label:"收益因子", render: row => fmt(row.profit_factor, 2) },
+        { label:"胜率", render: row => pct(row.win_rate, 1) },
+        { label:"评分", render: row => scoreCell(row.score) }
+      ], "暂无回测结果");
+    }
+
+    async function refreshAll() {
+      try {
+        log("正在刷新交易研究台...");
+      const [summary, runtime, trades, paperStats, backtests, effectiveness, weights, experiments, experimentEffectiveness, telegram] = await Promise.all([
+          api("/system/summary"),
+          api("/system/runtime").catch(error => ({ error: error.message })),
+          api("/paper/trades?limit=12"),
+          api("/paper/stats").catch(() => ({})),
+          api("/backtests/latest").catch(() => ({ results: [] })),
+          api("/signals/effectiveness?horizon=4h&min_samples=1").catch(error => ({ error: error.message, signals: [], roles: [] })),
+          api("/signals/weights?horizon=4h&min_samples=30").catch(error => ({ error: error.message, weights: [] })),
+          api("/signals/experiments").catch(error => ({ error: error.message, weight_sources: [], indicator_catalog: [] })),
+          api("/signals/experiment-effectiveness?horizon=4h&min_samples=5").catch(error => ({ error: error.message, indicators: [] })),
+          withTimeout(
+            api("/telegram/status").catch(error => ({ configured:false, error: error.message })),
+            6500,
+            { configured:false, error:"Telegram 状态检查超时" }
+          )
+        ]);
+        state.summary = summary;
+        state.runtime = runtime;
+        state.trades = trades;
+        state.paperStats = paperStats;
+        state.backtests = backtests;
+        state.telegram = telegram;
+        state.effectiveness = effectiveness;
+        state.weights = weights;
+        state.experiments = experiments;
+        state.experimentEffectiveness = experimentEffectiveness;
+        if (trades.length && (!state.selectedTradeId || !trades.some(trade => trade.id === state.selectedTradeId))) {
+          state.selectedTradeId = trades[0].id;
+        }
+        state.paperReview = state.selectedTradeId
+          ? await api(`/paper/trades/${encodeURIComponent(state.selectedTradeId)}/review`).catch(error => ({ error: error.message }))
+          : null;
+
+        const [completeness, market] = await Promise.all([
+          api("/data/completeness"),
+          api("/market/overview")
+        ]);
+        state.completeness = completeness;
+        state.market = market;
+        selectedMarketItem();
+
+        renderStatus();
+        renderKpis();
+        renderMarket();
+        renderOpportunity();
+        renderStrategy();
+        renderSettings();
+        renderEffectiveness();
+        renderTrades();
+        if (state.paperReview && state.paperReview.error) {
+          renderPaperReviewError(state.paperReview.error);
+        } else {
+          renderPaperReview();
+        }
+        renderBacktests();
+        const diagnostics = runtime.diagnostics || {};
+        const firstAction = diagnostics.actions && diagnostics.actions[0];
+        log(`刷新完成：${market.length} 个币种，评分核心 ${pct(((completeness.summary || {}).scoring || {}).coverage_pct || 0, 0)}。${diagnostics.summary ? "\n诊断：" + diagnostics.summary : ""}${firstAction ? "\n建议：" + firstAction : ""}`);
+      } catch (error) {
+        log("刷新失败：" + error.message);
+      }
+    }
+
+    async function collectCore(dryRun) {
+      try {
+        log(dryRun ? "正在预检核心采集..." : "正在补齐核心数据...");
+        const params = `${coinQuery()}&timeframes=short&timeframes=mid&timeframes=long`;
+        const data = await api(`/collect/scoring-core?dry_run=${dryRun}&${params}`, { method:"POST" });
+        log(actionSummary("collect", data));
+        await refreshAll();
+      } catch (error) {
+        log("核心采集失败：" + error.message);
+      }
+    }
+
+    async function collectFull(dryRun) {
+      try {
+        log(dryRun ? "正在预检全量研究采集..." : "正在补齐全量研究数据...");
+        const indicators = ["trend_price", "inst_vwap", "liquidation_fuel", "liquidity_sweep", "inst_volume_profile", "hvn_nodes", "micro_poc"];
+        const params = `${coinQuery()}&${repeated("timeframes", ["short", "mid", "long"])}&${repeated("indicators", indicators)}`;
+        const data = await api(`/collect/run?dry_run=${dryRun}&${params}`, { method:"POST" });
+        log(actionSummary("collect", data));
+        await refreshAll();
+      } catch (error) {
+        log("全量研究采集失败：" + error.message);
+      }
+    }
+
+    async function collectExperiments(dryRun) {
+      try {
+        log(dryRun ? "正在预检实验指标采集..." : "正在采集实验指标，结果只进入实验矩阵...");
+        const params = `${coinQuery()}&${repeated("timeframes", ["short", "mid", "long"])}`;
+        const data = await api(`/collect/experiments?dry_run=${dryRun}&${params}`, { method:"POST" });
+        log(actionSummary("collect", data));
+        await refreshAll();
+      } catch (error) {
+        log("实验指标采集失败：" + error.message);
+      }
+    }
+
+    async function paperScan(dryRun) {
+      try {
+        log(dryRun ? "正在执行纸上扫描预演，不会写入交易..." : "正在执行纸上扫描，满足条件会写入模拟交易...");
+        const data = await api(`/paper/scan?dry_run=${dryRun}&notify=${!dryRun}&${coinQuery()}`, { method:"POST" });
+        log(actionSummary("paper", data));
+        await refreshAll();
+      } catch (error) {
+        log("纸上扫描失败：" + error.message);
+      }
+    }
+
+    async function markTrades() {
+      try {
+        log("正在标记纸上持仓...");
+        const data = await api("/paper/mark", { method:"POST" });
+        log(actionSummary("mark", data));
+        await refreshAll();
+      } catch (error) {
+        log("标记持仓失败：" + error.message);
+      }
+    }
+
+    async function backfillSignals() {
+      try {
+        log("正在回填信号归因标签...");
+        const data = await api("/signals/backfill?limit=1000", { method:"POST" });
+        log(actionSummary("backfill", data));
+        await refreshAll();
+      } catch (error) {
+        log("信号归因回填失败：" + error.message);
+      }
+    }
+
+    async function runBacktest() {
+      try {
+        log("正在运行批量回测...");
+        const params = `${coinQuery()}&timeframes=short&timeframes=mid&timeframes=long&limit_zones=100`;
+        const data = await api(`/backtests/batch?${params}`, { method:"POST" });
+        log(actionSummary("backtest", data));
+        await refreshAll();
+      } catch (error) {
+        log("回测失败：" + error.message);
+      }
+    }
+
+    async function sendTelegram() {
+      try {
+        const text = "HFD 面板测试消息：Telegram 通知链路正常，当前仍处于纸上交易模式。";
+        const data = await api("/telegram/send?text=" + encodeURIComponent(text), { method:"POST" });
+        log(data);
+      } catch (error) {
+        log("Telegram 发送失败：" + error.message);
+      }
+    }
+
+    function setClock() {
+      $("clock").textContent = new Date().toLocaleTimeString("zh-CN", { hour12:false });
+    }
+
+    function setupNavigation() {
+      const links = Array.from(document.querySelectorAll(".nav a[href^='#']"));
+      const targets = links
+        .map(link => document.querySelector(link.getAttribute("href")))
+        .filter(Boolean);
+      function activate(id) {
+        links.forEach(link => link.classList.toggle("active", link.getAttribute("href") === `#${id}`));
+      }
+      links.forEach(link => {
+        link.addEventListener("click", () => activate(link.getAttribute("href").slice(1)));
+      });
+      if (!targets.length || !("IntersectionObserver" in window)) return;
+      const observer = new IntersectionObserver(entries => {
+        const visible = entries
+          .filter(entry => entry.isIntersecting)
+          .sort((a, b) => Math.abs(a.boundingClientRect.top) - Math.abs(b.boundingClientRect.top))[0];
+        if (visible && visible.target.id) activate(visible.target.id);
+      }, { rootMargin:"-90px 0px -72% 0px", threshold:0.01 });
+      targets.forEach(target => observer.observe(target));
+    }
+
+    setupNavigation();
+    setInterval(setClock, 1000);
+    setClock();
+    refreshAll();
+  </script>
+</body>
+</html>

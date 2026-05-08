@@ -1,0 +1,625 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import time
+from typing import Sequence
+
+from sqlalchemy import select
+
+from app.constants import CORE_INDICATORS, REQUIRED_SCORING_INDICATORS, RESEARCH_INDICATORS, TIMEFRAMES
+from app.db import SessionLocal, engine, init_db
+from app.hfd.client import HfdClient
+from app.models import CollectionRun
+from app.services.backtest_batch import run_backtest_batch
+from app.services.backtest import run_cost_band_retest_backtest
+from app.services.collection_schedule import research_due_timeframes, research_intervals
+from app.services.collector import SnapshotCollector
+from app.services.paper import mark_open_trades, paper_scan
+from app.services.paper_loop import paper_loop_decision
+from app.services.signal_attribution import backfill_signal_outcomes, signal_effectiveness
+from app.services.strategy import evaluate_symbol
+from app.services.telegram import TelegramClient, extract_chat_candidates
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="HFD research system CLI")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("init-db", help="Create database tables")
+
+    collect = subparsers.add_parser("collect", help="Collect HFD signal snapshots")
+    collect.add_argument("--coins", nargs="*", help="Coin symbols, e.g. BTC ETH")
+    collect.add_argument(
+        "--timeframes",
+        nargs="*",
+        choices=["short", "mid", "long"],
+        help="Timeframe names",
+    )
+    collect.add_argument(
+        "--indicators",
+        nargs="*",
+        choices=list(CORE_INDICATORS),
+        help="Indicator names",
+    )
+    collect.add_argument("--dry-run", action="store_true", help="Fetch but do not write")
+
+    collect_core = subparsers.add_parser("collect-scoring-core", help="Collect indicators required by scoring")
+    collect_core.add_argument("--coins", nargs="*", help="Coin symbols, e.g. BTC ETH")
+    collect_core.add_argument(
+        "--timeframes",
+        nargs="*",
+        choices=["short", "mid", "long"],
+        help="Timeframe names",
+    )
+    collect_core.add_argument("--dry-run", action="store_true", help="Fetch but do not write")
+
+    loop = subparsers.add_parser("collect-loop", help="Run collection repeatedly")
+    loop.add_argument("--coins", nargs="*", help="Coin symbols, e.g. BTC ETH")
+    loop.add_argument(
+        "--timeframes",
+        nargs="*",
+        choices=["short", "mid", "long"],
+        help="Timeframe names",
+    )
+    loop.add_argument(
+        "--indicators",
+        nargs="*",
+        choices=list(CORE_INDICATORS),
+        help="Indicator names",
+    )
+    loop.add_argument("--dry-run", action="store_true", help="Fetch but do not write")
+    loop.add_argument(
+        "--interval-seconds",
+        type=int,
+        default=1800,
+        help="Seconds between collection runs",
+    )
+    loop.add_argument(
+        "--max-runs",
+        type=int,
+        default=0,
+        help="Stop after N runs. 0 means run until interrupted",
+    )
+
+    tiered_loop = subparsers.add_parser(
+        "collect-tiered-loop",
+        help="Run high-frequency scoring collection and lower-frequency research collection",
+    )
+    tiered_loop.add_argument("--coins", nargs="*", help="Coin symbols, e.g. BTC ETH")
+    tiered_loop.add_argument(
+        "--timeframes",
+        nargs="*",
+        choices=["short", "mid", "long"],
+        help="Timeframe names",
+    )
+    tiered_loop.add_argument("--dry-run", action="store_true", help="Fetch but do not write")
+    tiered_loop.add_argument(
+        "--core-interval-seconds",
+        type=int,
+        default=1800,
+        help="Seconds between scoring core collection runs",
+    )
+    tiered_loop.add_argument(
+        "--research-short-interval-seconds",
+        type=int,
+        default=1800,
+        help="Seconds between short timeframe research refreshes",
+    )
+    tiered_loop.add_argument(
+        "--research-mid-interval-seconds",
+        type=int,
+        default=3600,
+        help="Seconds between mid timeframe research refreshes",
+    )
+    tiered_loop.add_argument(
+        "--research-long-interval-seconds",
+        type=int,
+        default=14400,
+        help="Seconds between long timeframe research refreshes",
+    )
+    tiered_loop.add_argument(
+        "--max-runs",
+        type=int,
+        default=0,
+        help="Stop after N core runs. 0 means run until interrupted",
+    )
+
+    backtest = subparsers.add_parser("backtest", help="Run static historical backtest")
+    backtest.add_argument("--coin", required=True, help="Coin symbol, e.g. BTC")
+    backtest.add_argument(
+        "--timeframe",
+        default="short",
+        choices=["short", "mid", "long"],
+        help="Timeframe name",
+    )
+    backtest.add_argument("--stop-pct", type=float, default=0.01)
+    backtest.add_argument("--target-pct", type=float, default=0.02)
+    backtest.add_argument("--max-hold-bars", type=int, default=24)
+    backtest.add_argument("--limit-zones", type=int, default=100)
+    backtest.add_argument("--show-trades", type=int, default=5)
+
+    batch = subparsers.add_parser("backtest-batch", help="Run batch historical screening")
+    batch.add_argument("--coins", nargs="*", help="Coin symbols")
+    batch.add_argument(
+        "--timeframes",
+        nargs="*",
+        choices=["short", "mid", "long"],
+        help="Timeframe names",
+    )
+    batch.add_argument("--stop-pct", type=float, default=0.01)
+    batch.add_argument("--target-pct", type=float, default=0.02)
+    batch.add_argument("--max-hold-bars", type=int, default=24)
+    batch.add_argument("--limit-zones", type=int, default=100)
+    batch.add_argument("--top", type=int, default=20)
+    batch.add_argument("--no-persist", action="store_true")
+
+    scan = subparsers.add_parser("paper-scan", help="Evaluate latest snapshots and open paper trades")
+    scan.add_argument("--coins", nargs="*", help="Coin symbols")
+    scan.add_argument("--dry-run", action="store_true")
+    scan.add_argument("--notify", action="store_true", help="Send Telegram notifications for opened trades")
+
+    subparsers.add_parser("paper-mark", help="Mark open paper trades against latest prices")
+
+    signal_backfill = subparsers.add_parser("signals-backfill", help="Backfill signal attribution outcome labels")
+    signal_backfill.add_argument("--limit", type=int, default=500)
+
+    signal_report = subparsers.add_parser("signals-report", help="Show signal effectiveness rankings")
+    signal_report.add_argument("--min-samples", type=int, default=1)
+    signal_report.add_argument("--horizon", choices=["30m", "1h", "4h", "24h"], default="4h")
+
+    paper_loop = subparsers.add_parser("paper-loop", help="Run paper mark/scan after new collection runs")
+    paper_loop.add_argument("--coins", nargs="*", help="Coin symbols")
+    paper_loop.add_argument("--notify", action="store_true", help="Send Telegram notifications")
+    paper_loop.add_argument(
+        "--interval-seconds",
+        type=int,
+        default=60,
+        help="Seconds between checks for new collection runs",
+    )
+    paper_loop.add_argument(
+        "--max-runs",
+        type=int,
+        default=0,
+        help="Stop after N processed collection runs. 0 means run until interrupted",
+    )
+    paper_loop.add_argument(
+        "--process-existing",
+        action="store_true",
+        help="Process the latest existing collection immediately instead of waiting for the next one",
+    )
+
+    eval_cmd = subparsers.add_parser("evaluate", help="Evaluate latest strategy score")
+    eval_cmd.add_argument("--coin", required=True)
+    eval_cmd.add_argument("--dry-run", action="store_true")
+
+    tg = subparsers.add_parser("telegram", help="Telegram bot utilities")
+    tg_sub = tg.add_subparsers(dest="telegram_command", required=True)
+    tg_sub.add_parser("status", help="Check bot status")
+    tg_sub.add_parser("updates", help="Show recent chat candidates")
+    tg_send = tg_sub.add_parser("send", help="Send a Telegram message")
+    tg_send.add_argument("--text", required=True)
+    tg_send.add_argument("--chat-id")
+    return parser
+
+
+async def run(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.command == "init-db":
+        try:
+            await init_db()
+            print("database initialized")
+            return 0
+        finally:
+            await engine.dispose()
+
+    if args.command == "collect":
+        async with SessionLocal() as session:
+            collector = SnapshotCollector(session)
+            try:
+                result = await collector.collect(
+                    assets=args.coins,
+                    timeframes=args.timeframes,
+                    indicators=args.indicators,
+                    dry_run=args.dry_run,
+                )
+            finally:
+                await collector.close()
+        print(
+            {
+                "status": result.status,
+                "dry_run": result.dry_run,
+                "assets": result.assets,
+                "timeframes": result.timeframes,
+                "indicators": result.indicators,
+                "snapshots_written": result.snapshots_written,
+                "prices_written": result.prices_written,
+                "errors": result.errors,
+            }
+        )
+        await engine.dispose()
+        return 0 if not result.errors else 2
+
+    if args.command == "collect-scoring-core":
+        async with SessionLocal() as session:
+            collector = SnapshotCollector(session)
+            try:
+                result = await collector.collect(
+                    assets=args.coins,
+                    timeframes=args.timeframes,
+                    indicators=list(REQUIRED_SCORING_INDICATORS),
+                    dry_run=args.dry_run,
+                )
+            finally:
+                await collector.close()
+        print(
+            {
+                "status": result.status,
+                "dry_run": result.dry_run,
+                "assets": result.assets,
+                "timeframes": result.timeframes,
+                "indicators": result.indicators,
+                "snapshots_written": result.snapshots_written,
+                "prices_written": result.prices_written,
+                "errors": result.errors,
+            }
+        )
+        await engine.dispose()
+        return 0 if not result.errors else 2
+
+    if args.command == "collect-loop":
+        run_number = 0
+        try:
+            while True:
+                run_number += 1
+                async with SessionLocal() as session:
+                    collector = SnapshotCollector(session)
+                    try:
+                        result = await collector.collect(
+                            assets=args.coins,
+                            timeframes=args.timeframes,
+                            indicators=args.indicators,
+                            dry_run=args.dry_run,
+                        )
+                    finally:
+                        await collector.close()
+                print(
+                    {
+                        "run": run_number,
+                        "status": result.status,
+                        "snapshots_written": result.snapshots_written,
+                        "prices_written": result.prices_written,
+                        "errors": result.errors,
+                    }
+                )
+                if args.max_runs and run_number >= args.max_runs:
+                    break
+                await asyncio.sleep(args.interval_seconds)
+        except KeyboardInterrupt:
+            print("collection loop interrupted")
+        finally:
+            await engine.dispose()
+        return 0
+
+    if args.command == "collect-tiered-loop":
+        selected_timeframes = args.timeframes or list(TIMEFRAMES.keys())
+        intervals = research_intervals(
+            short=args.research_short_interval_seconds,
+            mid=args.research_mid_interval_seconds,
+            long=args.research_long_interval_seconds,
+        )
+        last_research_completed_at: dict[str, float] = {}
+        run_number = 0
+        try:
+            while True:
+                run_number += 1
+                core_result = await _collect_once(
+                    assets=args.coins,
+                    timeframes=selected_timeframes,
+                    indicators=list(REQUIRED_SCORING_INDICATORS),
+                    dry_run=args.dry_run,
+                )
+                payload: dict[str, object] = {
+                    "run": run_number,
+                    "mode": "tiered",
+                    "core": _collection_result_payload(core_result),
+                    "research": [],
+                }
+
+                now = time.monotonic()
+                due_timeframes = research_due_timeframes(
+                    selected_timeframes,
+                    last_research_completed_at,
+                    now,
+                    intervals,
+                )
+                for timeframe in due_timeframes:
+                    research_result = await _collect_once(
+                        assets=args.coins,
+                        timeframes=[timeframe],
+                        indicators=list(RESEARCH_INDICATORS),
+                        dry_run=args.dry_run,
+                    )
+                    payload["research"].append(
+                        {"timeframe": timeframe, **_collection_result_payload(research_result)}
+                    )
+                    if not research_result.errors:
+                        last_research_completed_at[timeframe] = time.monotonic()
+
+                print(json.dumps(_jsonable(payload), ensure_ascii=False), flush=True)
+                if args.max_runs and run_number >= args.max_runs:
+                    break
+                await asyncio.sleep(args.core_interval_seconds)
+        except KeyboardInterrupt:
+            print("tiered collection loop interrupted")
+        finally:
+            await engine.dispose()
+        return 0
+
+    if args.command == "backtest":
+        coin = args.coin.upper()
+        interval = TIMEFRAMES[args.timeframe].interval
+        async with HfdClient() as client:
+            payload = await client.fetch_pro_data(coin, interval, "smart_money_cost")
+        result = run_cost_band_retest_backtest(
+            payload=payload,
+            symbol=f"{coin}USDT",
+            interval=interval,
+            stop_pct=args.stop_pct,
+            target_pct=args.target_pct,
+            max_hold_bars=args.max_hold_bars,
+            limit_zones=args.limit_zones,
+        )
+        print(
+            json.dumps(
+                {
+                    "summary": {
+                        "strategy": result.summary.strategy,
+                        "symbol": result.summary.symbol,
+                        "interval": result.summary.interval,
+                        "trade_count": result.summary.trade_count,
+                        "win_rate": round(result.summary.win_rate, 4),
+                        "avg_pnl_pct": round(result.summary.avg_pnl_pct, 6),
+                        "total_pnl_pct": round(result.summary.total_pnl_pct, 6),
+                        "profit_factor": (
+                            round(result.summary.profit_factor, 4)
+                            if result.summary.profit_factor is not None
+                            else None
+                        ),
+                        "max_drawdown_pct": round(result.summary.max_drawdown_pct, 6),
+                        "notes": result.summary.notes,
+                    },
+                    "trades": [
+                        {
+                            "direction": trade.direction,
+                            "entry_ts": trade.entry_ts,
+                            "entry_price": trade.entry_price,
+                            "exit_ts": trade.exit_ts,
+                            "exit_price": trade.exit_price,
+                            "exit_reason": trade.exit_reason,
+                            "pnl_pct": round(trade.pnl_pct, 6),
+                            "r_multiple": round(trade.r_multiple, 4),
+                        }
+                        for trade in result.trades[: args.show_trades]
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        await engine.dispose()
+        return 0
+
+    if args.command == "backtest-batch":
+        async with SessionLocal() as session:
+            result = await run_backtest_batch(
+                session=session,
+                coins=args.coins,
+                timeframes=args.timeframes,
+                stop_pct=args.stop_pct,
+                target_pct=args.target_pct,
+                max_hold_bars=args.max_hold_bars,
+                limit_zones=args.limit_zones,
+                persist=not args.no_persist,
+            )
+        print(
+            json.dumps(
+                {
+                    "strategy": result["strategy"],
+                    "status": result["status"],
+                    "top": result["results"][: args.top],
+                    "errors": result["errors"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        await engine.dispose()
+        return 0 if not result["errors"] else 2
+
+    if args.command == "evaluate":
+        async with SessionLocal() as session:
+            result = await evaluate_symbol(session, args.coin, dry_run=args.dry_run)
+        print(json.dumps(_jsonable(result.__dict__), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "paper-scan":
+        async with SessionLocal() as session:
+            coins = [c.upper() for c in args.coins] if args.coins else ["BTC", "ETH"]
+            result = await paper_scan(
+                session,
+                coins=coins,
+                dry_run=args.dry_run,
+                notify=args.notify,
+            )
+        print(json.dumps(_jsonable(result.__dict__), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "paper-mark":
+        async with SessionLocal() as session:
+            result = await mark_open_trades(session)
+        print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "signals-backfill":
+        async with SessionLocal() as session:
+            result = await backfill_signal_outcomes(session, limit=args.limit)
+        print(json.dumps(_jsonable(result.__dict__), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "signals-report":
+        async with SessionLocal() as session:
+            result = await signal_effectiveness(
+                session,
+                min_samples=args.min_samples,
+                horizon=args.horizon,
+            )
+        print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "paper-loop":
+        coins = [c.upper() for c in args.coins] if args.coins else ["BTC", "ETH"]
+        processed_runs = 0
+        last_seen_run_id = None
+        if not args.process_existing:
+            async with SessionLocal() as session:
+                latest = await _latest_collection_run(session)
+                last_seen_run_id = str(latest.id) if latest else None
+        try:
+            while True:
+                try:
+                    async with SessionLocal() as session:
+                        latest = await _latest_collection_run(session)
+                        decision = paper_loop_decision(latest, last_seen_run_id)
+                        payload: dict[str, object] = {
+                            "status": "waiting" if not decision.process else "processing",
+                            "reason": decision.reason,
+                            "collection_run_id": decision.run_id,
+                        }
+                        if decision.process:
+                            marked = await mark_open_trades(session)
+                            scanned = await paper_scan(
+                                session,
+                                coins=coins,
+                                dry_run=False,
+                                notify=args.notify,
+                            )
+                            processed_runs += 1
+                            payload.update(
+                                {
+                                    "status": "processed",
+                                    "processed_runs": processed_runs,
+                                    "marked": marked,
+                                    "scan": scanned.__dict__,
+                                }
+                            )
+                        if decision.mark_seen:
+                            last_seen_run_id = decision.run_id
+                        print(json.dumps(_jsonable(payload), ensure_ascii=False), flush=True)
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        json.dumps(
+                            {
+                                "status": "error",
+                                "reason": "paper_loop_iteration_failed",
+                                "error": str(exc),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+                if args.max_runs and processed_runs >= args.max_runs:
+                    break
+                await asyncio.sleep(args.interval_seconds)
+        except KeyboardInterrupt:
+            print("paper loop interrupted")
+        finally:
+            await engine.dispose()
+        return 0
+
+    if args.command == "telegram":
+        client = TelegramClient()
+        if args.telegram_command == "status":
+            result = await client.status()
+            print(json.dumps(_jsonable(result.__dict__), ensure_ascii=False, indent=2))
+            return 0 if result.configured and not result.error else 2
+        if args.telegram_command == "updates":
+            updates = await client.get_updates()
+            print(
+                json.dumps(
+                    {"chats": extract_chat_candidates(updates), "update_count": len(updates)},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
+        if args.telegram_command == "send":
+            result = await client.send_message(args.text, chat_id=args.chat_id)
+            print(json.dumps({"message_id": result.get("message_id")}, ensure_ascii=False, indent=2))
+            return 0
+
+    raise ValueError(f"Unsupported command: {args.command}")
+
+
+def main() -> None:
+    raise SystemExit(asyncio.run(run()))
+
+
+def _jsonable(value):
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if hasattr(value, "__dict__"):
+        return _jsonable(value.__dict__)
+    return value
+
+
+async def _latest_collection_run(session):
+    rows = await session.execute(
+        select(CollectionRun).order_by(CollectionRun.started_at.desc()).limit(1)
+    )
+    return rows.scalar_one_or_none()
+
+
+async def _collect_once(
+    *,
+    assets,
+    timeframes,
+    indicators,
+    dry_run: bool,
+):
+    async with SessionLocal() as session:
+        collector = SnapshotCollector(session)
+        try:
+            return await collector.collect(
+                assets=assets,
+                timeframes=timeframes,
+                indicators=indicators,
+                dry_run=dry_run,
+            )
+        finally:
+            await collector.close()
+
+
+def _collection_result_payload(result) -> dict[str, object]:
+    return {
+        "status": result.status,
+        "dry_run": result.dry_run,
+        "assets": result.assets,
+        "timeframes": result.timeframes,
+        "indicators": result.indicators,
+        "snapshots_written": result.snapshots_written,
+        "prices_written": result.prices_written,
+        "errors": result.errors,
+    }
+
+
+if __name__ == "__main__":
+    main()

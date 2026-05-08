@@ -1,0 +1,18 @@
+[project]
+name = "hfd-trading-research"
+version = "0.1.0"
+description = "HFD Pro signal snapshot and paper trading research system"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "httpx",
+    "sqlalchemy",
+    "aiosqlite",
+    "psycopg",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["."]

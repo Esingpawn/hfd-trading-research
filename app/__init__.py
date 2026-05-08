@@ -1,0 +1,1 @@
+"""HFD trading research application."""
