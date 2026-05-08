@@ -7,6 +7,7 @@ services:
       DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
       REDIS_URL: redis://redis:6379/0
       RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
+      EXTERNALIZE_RAW_PAYLOADS: "true"
     ports:
       - "8000:8000"
     volumes:
@@ -33,6 +34,7 @@ services:
       DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
       REDIS_URL: redis://redis:6379/0
       RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
+      EXTERNALIZE_RAW_PAYLOADS: "true"
     command:
       - python
       - -m

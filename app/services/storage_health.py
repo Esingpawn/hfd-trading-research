@@ -185,7 +185,9 @@ async def _raw_payload_estimate(session: AsyncSession) -> dict[str, Any]:
               COUNT(*) AS rows,
               COALESCE(SUM(LENGTH(CAST(raw_payload AS TEXT))), 0) AS raw_bytes,
               COALESCE(SUM(LENGTH(CAST(summary_payload AS TEXT))), 0) AS summary_bytes,
-              COALESCE(AVG(LENGTH(CAST(raw_payload AS TEXT))), 0) AS avg_raw_bytes
+              COALESCE(AVG(LENGTH(CAST(raw_payload AS TEXT))), 0) AS avg_raw_bytes,
+              COALESCE(SUM(raw_payload_bytes), 0) AS external_raw_bytes,
+              COUNT(raw_payload_uri) AS external_rows
             FROM signal_snapshots
             """
         )
@@ -197,6 +199,9 @@ async def _raw_payload_estimate(session: AsyncSession) -> dict[str, Any]:
         "rows": int(row.rows or 0) if row else 0,
         "raw_bytes": raw_bytes,
         "raw_gb": round(raw_bytes / 1024**3, 3),
+        "external_rows": int(row.external_rows or 0) if row else 0,
+        "external_raw_bytes": int(row.external_raw_bytes or 0) if row else 0,
+        "external_raw_gb": round(int(row.external_raw_bytes or 0) / 1024**3, 3) if row else 0,
         "summary_bytes": summary_bytes,
         "summary_mb": round(summary_bytes / 1024**2, 2),
         "avg_raw_kb": round(float(row.avg_raw_bytes or 0) / 1024, 2) if row else 0,

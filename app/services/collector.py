@@ -6,8 +6,10 @@ from typing import Any, Iterable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.constants import ASSETS, COLLECTABLE_INDICATORS, CORE_INDICATORS, TIMEFRAMES
 from app.hfd.client import HfdClient
+from app.infrastructure.raw_store import LocalRawPayloadStore
 from app.models import CollectionRun, PriceSnapshot, SignalSnapshot
 from app.services.features import summarize_signal_payload
 
@@ -54,6 +56,8 @@ class SnapshotCollector:
         self.session = session
         self.client = client or HfdClient()
         self._owns_client = client is None
+        self.settings = get_settings()
+        self.raw_store = LocalRawPayloadStore(self.settings.raw_payload_dir)
 
     async def close(self) -> None:
         if self._owns_client:
@@ -161,18 +165,41 @@ class SnapshotCollector:
                 f"/api/pro/pro_data?coin={coin}&interval={interval}"
                 f"&indicator={indicator}"
             )
-            self.session.add(
-                SignalSnapshot(
+            raw_payload = payload
+            raw_ref = None
+            snapshot_id = None
+            if self.settings.externalize_raw_payloads:
+                from app.models import uuid_str
+
+                snapshot_id = uuid_str()
+                raw_ref = self.raw_store.write_json(
+                    payload=payload,
                     symbol=f"{coin}USDT",
-                    asset_tier=ASSETS[coin].tier,
                     timeframe=timeframe_name,
-                    interval=interval,
                     indicator=indicator,
-                    endpoint=endpoint,
-                    raw_payload=payload,
-                    summary_payload=summarize_signal_payload(payload, indicator),
+                    snapshot_id=snapshot_id,
                     collected_at=collected_at,
                 )
+                raw_payload = {}
+            snapshot_values = {
+                "symbol": f"{coin}USDT",
+                "asset_tier": ASSETS[coin].tier,
+                "timeframe": timeframe_name,
+                "interval": interval,
+                "indicator": indicator,
+                "endpoint": endpoint,
+                "raw_payload": raw_payload,
+                "raw_payload_uri": raw_ref.uri if raw_ref else None,
+                "raw_payload_sha256": raw_ref.sha256 if raw_ref else None,
+                "raw_payload_bytes": raw_ref.bytes if raw_ref else None,
+                "raw_payload_compression": raw_ref.compression if raw_ref else None,
+                "summary_payload": summarize_signal_payload(payload, indicator),
+                "collected_at": collected_at,
+            }
+            if snapshot_id:
+                snapshot_values["id"] = snapshot_id
+            self.session.add(
+                SignalSnapshot(**snapshot_values)
             )
             result.snapshots_written += 1
         except Exception as exc:  # noqa: BLE001

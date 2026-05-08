@@ -21,6 +21,8 @@ def load_local_env(path: str = ".env") -> None:
 class Settings:
     hfd_base_url: str = "https://dash.hfd.fund"
     database_url: str = "sqlite+aiosqlite:///./data/hfd.db"
+    raw_payload_dir: str = "./data/raw_payloads"
+    externalize_raw_payloads: bool = False
     http_timeout_seconds: float = 20.0
     collector_user_agent: str = "HFDResearchBot/0.1"
     telegram_bot_token: str = ""
@@ -32,6 +34,8 @@ def get_settings() -> Settings:
     return Settings(
         hfd_base_url=os.getenv("HFD_BASE_URL", Settings.hfd_base_url).rstrip("/"),
         database_url=os.getenv("DATABASE_URL", Settings.database_url),
+        raw_payload_dir=os.getenv("RAW_PAYLOAD_DIR", Settings.raw_payload_dir),
+        externalize_raw_payloads=os.getenv("EXTERNALIZE_RAW_PAYLOADS", "false").lower() in {"1", "true", "yes", "on"},
         http_timeout_seconds=float(
             os.getenv("HTTP_TIMEOUT_SECONDS", str(Settings.http_timeout_seconds))
         ),

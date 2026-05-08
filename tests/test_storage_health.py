@@ -47,6 +47,10 @@ async def test_storage_health_reports_counts_indexes_and_raw_payload(session) ->
             indicator="smart_money_cost",
             endpoint="/api/pro/pro_data",
             raw_payload={"payload": "x" * 128},
+            raw_payload_uri="local://sample.json.gz",
+            raw_payload_sha256="a" * 64,
+            raw_payload_bytes=256,
+            raw_payload_compression="gzip",
             summary_payload={"bias": "long"},
             collected_at=now,
         )
@@ -62,6 +66,8 @@ async def test_storage_health_reports_counts_indexes_and_raw_payload(session) ->
     assert counts["signal_snapshots"] == 1
     assert after_indexes["raw_payload"]["rows"] == 1
     assert after_indexes["raw_payload"]["raw_bytes"] >= 128
+    assert after_indexes["raw_payload"]["external_rows"] == 1
+    assert after_indexes["raw_payload"]["external_raw_bytes"] == 256
     assert before_indexes["indexes"]["missing_required"]
     assert after_indexes["indexes"]["missing_required"] == []
     assert after_indexes["sqlite"]["total_bytes"] > 0

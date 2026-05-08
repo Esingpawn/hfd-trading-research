@@ -197,4 +197,11 @@
 - Docker 初始化改为 `alembic upgrade head`。
 - 已新增 SQLite 到 PostgreSQL 的批量迁移脚本与迁移说明。
 
-下一步执行阶段 4：raw payload 外置压缩。
+阶段 4 已完成基础版：
+
+- `signal_snapshots` 已增加 raw payload 外置引用字段。
+- 新增本地 gzip raw payload store。
+- 采集器支持通过 `EXTERNALIZE_RAW_PAYLOADS=true` 将新采集的 signal raw payload 外置压缩保存。
+- 存储健康接口已能统计外置 payload 引用和体积。
+
+下一步执行阶段 5：Redis 与任务系统基础接入。
