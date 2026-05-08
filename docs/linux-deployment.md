@@ -90,7 +90,7 @@ bash scripts/linux/backup-postgres.sh
 cd /opt/hfd
 git pull
 docker compose build
-docker compose run --rm api python -m app.cli init-db
+docker compose run --rm api alembic upgrade head
 docker compose up -d
 ```
 

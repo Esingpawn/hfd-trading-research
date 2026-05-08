@@ -11,7 +11,7 @@ fi
 
 docker compose build
 docker compose up -d postgres redis
-docker compose run --rm api python -m app.cli init-db
+docker compose run --rm api alembic upgrade head
 docker compose up -d api collector-worker paper-worker experiment-worker
 
 echo "HFD stack is starting."

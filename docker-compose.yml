@@ -130,7 +130,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
-    command: ["python", "-m", "app.cli", "init-db"]
+    command: ["alembic", "upgrade", "head"]
     depends_on:
       postgres:
         condition: service_healthy
