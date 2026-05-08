@@ -37,11 +37,13 @@ cd D:\OneDrive\桌面\HFD
 .\scripts\start-system.ps1
 .\scripts\update-data.ps1
 .\scripts\status.ps1
+.\scripts\maintain-db.ps1 -Indexes -Checkpoint -Optimize
 ```
 
 - `start-system.ps1`：初始化数据库，启动 FastAPI 面板，启动分层采集循环，并写入 PID 状态。分层采集会每轮刷新评分核心，并按周期补齐全量暗流研究指标。
 - `update-data.ps1`：手动补齐 9 个币种、3 个周期的评分核心和全量研究数据。
 - `status.ps1`：查看服务、采集循环、最近采集、下次采集、数据覆盖和 Telegram 状态。
+- `maintain-db.ps1`：查看数据库体积、原始 payload 体积、缺失索引，并可执行 SQLite checkpoint / optimize。
 
 面板地址：
 
@@ -66,6 +68,10 @@ $env:DATABASE_URL="postgresql+psycopg://user:password@localhost:5432/hfd"
 - `GET /health`
 - `GET /system/summary`
 - `GET /system/runtime`
+- `GET /system/storage`
+- `POST /system/storage/indexes`
+- `POST /system/storage/checkpoint?truncate=true`
+- `POST /system/storage/optimize`
 - `GET /config/universe`
 - `GET /snapshots?limit=20`
 - `GET /data/completeness`

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 from sqlalchemy.orm import DeclarativeBase
 
 from app.config import get_settings
+from app.db_indexes import SQLITE_INDEX_SPECS
 
 
 class Base(DeclarativeBase):
@@ -55,3 +56,6 @@ async def init_db() -> None:
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        if get_settings().database_url.startswith("sqlite+"):
+            for spec in SQLITE_INDEX_SPECS:
+                await conn.exec_driver_sql(spec.create_sql)

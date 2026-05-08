@@ -40,6 +40,12 @@ from app.services.paper_review import paper_trade_review
 from app.services.paper_stats import paper_trade_stats
 from app.services.signal_attribution import backfill_signal_outcomes, signal_effectiveness
 from app.services.signal_weights import signal_weight_governance, build_signal_weight_map
+from app.services.storage_health import (
+    ensure_performance_indexes,
+    sqlite_checkpoint,
+    sqlite_optimize,
+    storage_health,
+)
 from app.services.strategy import _score_states, _snapshot_is_fresh, _state_from_snapshot, evaluate_symbol
 from app.services.telegram import TelegramClient, extract_chat_candidates
 
@@ -183,6 +189,29 @@ async def system_runtime(session: SessionDep) -> dict[str, object]:
         completeness_payload,
     )
     return payload
+
+
+@router.get("/system/storage")
+async def system_storage(session: SessionDep) -> dict[str, object]:
+    return await storage_health(session)
+
+
+@router.post("/system/storage/indexes")
+async def system_storage_indexes(session: SessionDep) -> dict[str, object]:
+    return await ensure_performance_indexes(session)
+
+
+@router.post("/system/storage/checkpoint")
+async def system_storage_checkpoint(
+    session: SessionDep,
+    truncate: bool = Query(default=True),
+) -> dict[str, object]:
+    return await sqlite_checkpoint(session, truncate=truncate)
+
+
+@router.post("/system/storage/optimize")
+async def system_storage_optimize(session: SessionDep) -> dict[str, object]:
+    return await sqlite_optimize(session)
 
 
 @router.get("/data/completeness")

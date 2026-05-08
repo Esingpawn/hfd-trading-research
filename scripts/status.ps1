@@ -26,6 +26,7 @@ function Invoke-JsonUtf8 {
 try {
   $runtime = Invoke-JsonUtf8 "$base/system/runtime" 10
   $coverage = Invoke-JsonUtf8 "$base/data/completeness" 120
+  $storage = Invoke-JsonUtf8 "$base/system/storage" 120
 } catch {
   Write-Host "无法连接 HFD 系统：$($_.Exception.Message)"
   Write-Host "可以运行：.\scripts\start-system.ps1"
@@ -60,6 +61,9 @@ Write-Host "最近采集: $($runtime.collection.latest.finished_at)"
 Write-Host "下次采集: $($runtime.collection.next_collect_at)"
 Write-Host ("评分核心: 历史 {0:P1}, 新鲜 {1:P1}, 缺失 {2}, 过期 {3}" -f $scoring.coverage_pct, $scoring.fresh_coverage_pct, $scoring.missing_slots, $scoring.stale_slots)
 Write-Host ("全量研究: 历史 {0:P1}, 新鲜 {1:P1}, 缺失 {2}, 过期 {3}" -f $research.coverage_pct, $research.fresh_coverage_pct, $research.missing_slots, $research.stale_slots)
+if ($storage) {
+  Write-Host "DB storage: total=$($storage.sqlite.total_gb) GB, raw_payload=$($storage.raw_payload.raw_gb) GB, missing_indexes=$($storage.indexes.missing_required.Count)"
+}
 if ($diagnostics -and $diagnostics.issues.Count -gt 0) {
   Write-Host ""
   Write-Host "诊断问题:"
