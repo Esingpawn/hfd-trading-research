@@ -211,4 +211,10 @@
 - 已增加 Redis queue / Null queue 适配器。
 - 无 Redis 时任务可记录为 `recorded`，有 Redis 时可推入 Redis list。
 
-下一步执行阶段 6：实验治理和权重版本化基础表与接口。
+阶段 6 已完成基础版：
+
+- 已增加 `experiment_runs` 和 `weight_versions` 基础表。
+- 已增加实验治理和权重版本 application 用例。
+- 已增加 `/governance/experiments` 与 `/governance/weights` API。
+
+下一步执行阶段 7：前端工程化基础。完整 Vite React 迁移会单独推进，当前先建立前端目录与构建边界。

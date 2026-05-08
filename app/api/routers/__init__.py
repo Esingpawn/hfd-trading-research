@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.routers import backtests, collection, dashboard, market, paper, signals, system, tasks, telegram
+from app.api.routers import backtests, collection, dashboard, governance, market, paper, signals, system, tasks, telegram
 
 
 def build_api_router() -> APIRouter:
@@ -12,6 +12,7 @@ def build_api_router() -> APIRouter:
     router.include_router(collection.router)
     router.include_router(paper.router)
     router.include_router(signals.router)
+    router.include_router(governance.router)
     router.include_router(backtests.router)
     router.include_router(tasks.router)
     router.include_router(telegram.router)
