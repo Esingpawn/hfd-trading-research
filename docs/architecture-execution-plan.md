@@ -191,6 +191,10 @@
 
 阶段 2 已启动：已建立 Application / Domain / Infrastructure 分层骨架，并将存储健康/维护作为第一条 application 用例迁入 `app/application/storage.py`。
 
-阶段 3 已启动：已加入 Alembic 配置和当前 schema 的 baseline migration，Docker 初始化改为 `alembic upgrade head`。
+阶段 3 已完成基础版：
 
-下一步继续阶段 3：编写 SQLite 到 PostgreSQL 的数据迁移脚本和迁移验证流程。
+- 已加入 Alembic 配置和当前 schema 的 baseline migration。
+- Docker 初始化改为 `alembic upgrade head`。
+- 已新增 SQLite 到 PostgreSQL 的批量迁移脚本与迁移说明。
+
+下一步执行阶段 4：raw payload 外置压缩。
