@@ -217,4 +217,11 @@
 - 已增加实验治理和权重版本 application 用例。
 - 已增加 `/governance/experiments` 与 `/governance/weights` API。
 
-下一步执行阶段 7：前端工程化基础。完整 Vite React 迁移会单独推进，当前先建立前端目录与构建边界。
+阶段 7 已完成基础版：
+
+- 已新增 `web/` Vite React TypeScript 前端工程骨架。
+- 已加入 ECharts / Lightweight Charts / lucide-react 依赖声明。
+- 已保留旧版 FastAPI dashboard 作为当前主面板。
+- 已新增前端迁移说明。
+
+下一步执行阶段 8：模拟盘 / 实盘安全网关基础模型与安全边界。

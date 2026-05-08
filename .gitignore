@@ -17,3 +17,6 @@ data/
 *.egg-info/
 *_d.png
 .DS_Store
+web/node_modules/
+web/dist/
+web/tsconfig.tsbuildinfo
