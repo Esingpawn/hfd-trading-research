@@ -158,3 +158,17 @@ class SignalObservation(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, index=True
     )
+
+
+class TaskRun(Base):
+    __tablename__ = "task_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    task_name: Mapped[str] = mapped_column(String(80), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="queued")
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text)
+    queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

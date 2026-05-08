@@ -14,6 +14,8 @@ def test_expected_api_routes_are_registered() -> None:
         ("POST", "/signals/backfill"),
         ("GET", "/signals/weights"),
         ("POST", "/backtests/batch"),
+        ("GET", "/tasks"),
+        ("POST", "/tasks/enqueue"),
         ("GET", "/telegram/status"),
         ("GET", "/dashboard"),
     }

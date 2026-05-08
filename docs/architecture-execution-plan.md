@@ -204,4 +204,11 @@
 - 采集器支持通过 `EXTERNALIZE_RAW_PAYLOADS=true` 将新采集的 signal raw payload 外置压缩保存。
 - 存储健康接口已能统计外置 payload 引用和体积。
 
-下一步执行阶段 5：Redis 与任务系统基础接入。
+阶段 5 已完成基础版：
+
+- 已增加 `task_runs` 任务记录表。
+- 已增加 `/tasks` 和 `/tasks/enqueue` API。
+- 已增加 Redis queue / Null queue 适配器。
+- 无 Redis 时任务可记录为 `recorded`，有 Redis 时可推入 Redis list。
+
+下一步执行阶段 6：实验治理和权重版本化基础表与接口。
