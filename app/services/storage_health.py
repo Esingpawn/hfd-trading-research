@@ -18,6 +18,12 @@ SQLITE_TABLES = (
     "paper_trades",
     "collection_runs",
     "backtest_runs",
+    "task_runs",
+    "experiment_runs",
+    "weight_versions",
+    "trading_safety_states",
+    "trade_orders",
+    "trading_audit_logs",
 )
 
 

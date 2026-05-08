@@ -8,6 +8,7 @@ from typing import Sequence
 
 from app.constants import CORE_INDICATORS, REQUIRED_SCORING_INDICATORS, RESEARCH_INDICATORS, TIMEFRAMES
 from app.application.storage import get_storage_health, run_storage_maintenance
+from app.application.task_worker import run_task_worker
 from app.cli_commands.db_helpers import collect_once, collection_result_payload, latest_collection_run
 from app.cli_commands.utils import jsonable
 from app.db import SessionLocal, engine, init_db
@@ -213,6 +214,26 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Stop after N runs. 0 means run until interrupted",
+    )
+
+    task_worker = subparsers.add_parser("task-worker", help="Consume queued Redis task_runs")
+    task_worker.add_argument(
+        "--max-tasks",
+        type=int,
+        default=0,
+        help="Stop after N processed or failed tasks. 0 means run until interrupted",
+    )
+    task_worker.add_argument(
+        "--idle-sleep-seconds",
+        type=float,
+        default=1.0,
+        help="Sleep duration after an empty dequeue",
+    )
+    task_worker.add_argument(
+        "--dequeue-timeout-seconds",
+        type=int,
+        default=5,
+        help="Redis BLPOP timeout in seconds",
     )
 
     eval_cmd = subparsers.add_parser("evaluate", help="Evaluate latest strategy score")
@@ -628,6 +649,16 @@ async def run(argv: Sequence[str] | None = None) -> int:
         finally:
             await engine.dispose()
         return 0
+
+    if args.command == "task-worker":
+        result = await run_task_worker(
+            max_tasks=args.max_tasks,
+            idle_sleep_seconds=args.idle_sleep_seconds,
+            dequeue_timeout_seconds=args.dequeue_timeout_seconds,
+        )
+        print(json.dumps(jsonable(result.__dict__), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0 if not result.failed else 2
 
     if args.command == "telegram":
         client = TelegramClient()

@@ -77,6 +77,8 @@ $env:DATABASE_URL="postgresql+psycopg://user:password@localhost:5432/hfd"
 - `GET /data/completeness`
 - `POST /collect/run`
 - `POST /collect/scoring-core`
+- `GET /tasks`
+- `POST /tasks/enqueue`
 - `GET /decisions`
 - `POST /paper/scan`
 - `POST /paper/mark`
@@ -192,6 +194,13 @@ Linux 服务器部署优先使用 Docker Compose：
 bash scripts/linux/bootstrap.sh
 bash scripts/linux/status.sh
 bash scripts/linux/logs.sh api
+```
+
+Docker Compose 中包含 `task-worker`，用于消费 Redis 里的 `task_runs`。可以通过 API 入队：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/tasks/enqueue?task_name=signals.backfill&limit=500"
+curl -X POST "http://127.0.0.1:8000/tasks/enqueue?task_name=paper.scan&coins=BTC&coins=ETH&notify=true"
 ```
 
 项目文件按 UTF-8 保存。Windows PowerShell 默认编码有时会把中文显示成乱码，读取中文文件时优先使用：

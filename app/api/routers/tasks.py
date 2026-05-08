@@ -20,5 +20,23 @@ async def list_tasks(
 async def enqueue_task_api(
     session: SessionDep,
     task_name: str = Query(..., min_length=1),
+    coins: list[str] | None = Query(default=None),
+    timeframes: list[str] | None = Query(default=None),
+    indicators: list[str] | None = Query(default=None),
+    dry_run: bool = Query(default=False),
+    notify: bool = Query(default=False),
+    limit: int | None = Query(default=None, ge=1),
 ) -> dict[str, object]:
-    return await enqueue_task(session, task_name=task_name, payload={})
+    payload = {
+        key: value
+        for key, value in {
+            "coins": coins,
+            "timeframes": timeframes,
+            "indicators": indicators,
+            "dry_run": dry_run,
+            "notify": notify,
+            "limit": limit,
+        }.items()
+        if value not in (None, [], False)
+    }
+    return await enqueue_task(session, task_name=task_name, payload=payload)

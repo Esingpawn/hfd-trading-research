@@ -238,3 +238,19 @@
 - 已新增测试覆盖默认阻断实盘、纸上订单、真实网关缺失阻断、symbol allowlist 拒绝。
 
 下一步执行阶段 9：生产运行深化。优先补完整任务 worker 消费循环、PostgreSQL 大表治理、结构化日志/指标/Telegram 告警，再逐步替换 React 面板和设计真实交易所网关。
+
+阶段 9 已启动，任务 worker 基础版完成：
+
+- 已增加 Redis queue `dequeue` 能力和队列消息解析。
+- 已增加 `task-worker` CLI，可消费 Redis list 中的任务并回写 `task_runs` 状态。
+- 已增加任务执行器，支持 `collect`、`collect.scoring_core`、`paper.scan`、`paper.mark`、`signals.backfill`、`storage.maintain`。
+- 已增加 Docker Compose `task-worker` 服务。
+- `/tasks/enqueue` 已支持基础 payload 参数：`coins`、`timeframes`、`indicators`、`dry_run`、`notify`、`limit`。
+- 存储健康统计已覆盖 task/governance/trading 新表。
+
+阶段 9 剩余优先级：
+
+1. PostgreSQL 大表治理：分区/归档策略、raw payload 历史迁移、查询聚合表。
+2. 结构化日志和监控指标：JSON log、健康检查、队列长度、worker heartbeat、Telegram 告警规则。
+3. React 面板逐步替换旧 dashboard，先接任务、交易安全、实验治理页面。
+4. 真实交易所网关设计，必须在安全网关、审计、仓位同步、dry-run 沙盒全通过后才实现。
