@@ -178,6 +178,15 @@ http://127.0.0.1:8000/dashboard
 docs/project-handoff.md
 docs/data-quality-plan.md
 docs/architecture-upgrade-plan.md
+docs/linux-deployment.md
+```
+
+Linux 服务器部署优先使用 Docker Compose：
+
+```bash
+bash scripts/linux/bootstrap.sh
+bash scripts/linux/status.sh
+bash scripts/linux/logs.sh api
 ```
 
 项目文件按 UTF-8 保存。Windows PowerShell 默认编码有时会把中文显示成乱码，读取中文文件时优先使用：

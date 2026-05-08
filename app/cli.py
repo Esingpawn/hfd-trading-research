@@ -19,6 +19,12 @@ from app.services.collector import SnapshotCollector
 from app.services.paper import mark_open_trades, paper_scan
 from app.services.paper_loop import paper_loop_decision
 from app.services.signal_attribution import backfill_signal_outcomes, signal_effectiveness
+from app.services.storage_health import (
+    ensure_performance_indexes,
+    sqlite_checkpoint,
+    sqlite_optimize,
+    storage_health,
+)
 from app.services.strategy import evaluate_symbol
 from app.services.telegram import TelegramClient, extract_chat_candidates
 
@@ -169,6 +175,13 @@ def build_parser() -> argparse.ArgumentParser:
     signal_report.add_argument("--min-samples", type=int, default=1)
     signal_report.add_argument("--horizon", choices=["30m", "1h", "4h", "24h"], default="4h")
 
+    subparsers.add_parser("storage-health", help="Show database storage health")
+    storage_maintain = subparsers.add_parser("storage-maintain", help="Run safe database maintenance")
+    storage_maintain.add_argument("--indexes", action="store_true", help="Ensure required performance indexes")
+    storage_maintain.add_argument("--checkpoint", action="store_true", help="Run SQLite WAL checkpoint")
+    storage_maintain.add_argument("--passive-checkpoint", action="store_true", help="Use PASSIVE instead of TRUNCATE checkpoint")
+    storage_maintain.add_argument("--optimize", action="store_true", help="Run SQLite optimize or PostgreSQL ANALYZE")
+
     paper_loop = subparsers.add_parser("paper-loop", help="Run paper mark/scan after new collection runs")
     paper_loop.add_argument("--coins", nargs="*", help="Coin symbols")
     paper_loop.add_argument("--notify", action="store_true", help="Send Telegram notifications")
@@ -188,6 +201,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--process-existing",
         action="store_true",
         help="Process the latest existing collection immediately instead of waiting for the next one",
+    )
+
+    experiment_loop = subparsers.add_parser(
+        "experiment-loop",
+        help="Run signal outcome backfill on a schedule",
+    )
+    experiment_loop.add_argument("--limit", type=int, default=500)
+    experiment_loop.add_argument(
+        "--interval-seconds",
+        type=int,
+        default=300,
+        help="Seconds between experiment backfill runs",
+    )
+    experiment_loop.add_argument(
+        "--max-runs",
+        type=int,
+        default=0,
+        help="Stop after N runs. 0 means run until interrupted",
     )
 
     eval_cmd = subparsers.add_parser("evaluate", help="Evaluate latest strategy score")
@@ -483,6 +514,30 @@ async def run(argv: Sequence[str] | None = None) -> int:
         await engine.dispose()
         return 0
 
+    if args.command == "storage-health":
+        async with SessionLocal() as session:
+            result = await storage_health(session)
+        print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "storage-maintain":
+        result: dict[str, object] = {"actions": {}}
+        async with SessionLocal() as session:
+            if args.indexes:
+                result["actions"]["indexes"] = await ensure_performance_indexes(session)
+            if args.checkpoint:
+                result["actions"]["checkpoint"] = await sqlite_checkpoint(
+                    session,
+                    truncate=not args.passive_checkpoint,
+                )
+            if args.optimize:
+                result["actions"]["optimize"] = await sqlite_optimize(session)
+            result["storage"] = await storage_health(session)
+        print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
     if args.command == "paper-loop":
         coins = [c.upper() for c in args.coins] if args.coins else ["BTC", "ETH"]
         processed_runs = 0
@@ -539,6 +594,47 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 await asyncio.sleep(args.interval_seconds)
         except KeyboardInterrupt:
             print("paper loop interrupted")
+        finally:
+            await engine.dispose()
+        return 0
+
+    if args.command == "experiment-loop":
+        run_number = 0
+        try:
+            while True:
+                run_number += 1
+                try:
+                    async with SessionLocal() as session:
+                        result = await backfill_signal_outcomes(session, limit=args.limit)
+                    print(
+                        json.dumps(
+                            {
+                                "run": run_number,
+                                "status": "processed",
+                                "backfill": result.__dict__,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        json.dumps(
+                            {
+                                "run": run_number,
+                                "status": "error",
+                                "reason": "experiment_loop_iteration_failed",
+                                "error": str(exc),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+                if args.max_runs and run_number >= args.max_runs:
+                    break
+                await asyncio.sleep(args.interval_seconds)
+        except KeyboardInterrupt:
+            print("experiment loop interrupted")
         finally:
             await engine.dispose()
         return 0

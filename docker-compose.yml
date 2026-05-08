@@ -1,0 +1,164 @@
+services:
+  api:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
+      REDIS_URL: redis://redis:6379/0
+      RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
+    ports:
+      - "8000:8000"
+    volumes:
+      - hfd_raw_payloads:/var/lib/hfd/raw_payloads
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  collector-worker:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
+      REDIS_URL: redis://redis:6379/0
+      RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
+    command:
+      - python
+      - -m
+      - app.cli
+      - collect-tiered-loop
+      - --coins
+      - BTC
+      - ETH
+      - SOL
+      - BNB
+      - LINK
+      - TON
+      - DOGE
+      - HYPE
+      - ZEC
+      - --timeframes
+      - short
+      - mid
+      - long
+      - --core-interval-seconds
+      - "1800"
+      - --research-short-interval-seconds
+      - "1800"
+      - --research-mid-interval-seconds
+      - "3600"
+      - --research-long-interval-seconds
+      - "14400"
+    volumes:
+      - hfd_raw_payloads:/var/lib/hfd/raw_payloads
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  paper-worker:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
+      REDIS_URL: redis://redis:6379/0
+    command:
+      - python
+      - -m
+      - app.cli
+      - paper-loop
+      - --coins
+      - BTC
+      - ETH
+      - SOL
+      - BNB
+      - LINK
+      - TON
+      - DOGE
+      - HYPE
+      - ZEC
+      - --notify
+      - --interval-seconds
+      - "60"
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  experiment-worker:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
+      REDIS_URL: redis://redis:6379/0
+    command:
+      - python
+      - -m
+      - app.cli
+      - experiment-loop
+      - --limit
+      - "500"
+      - --interval-seconds
+      - "300"
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db-init:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
+    command: ["python", "-m", "app.cli", "init-db"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: hfd
+      POSTGRES_USER: hfd
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hfd_dev_password}
+    volumes:
+      - hfd_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hfd -d hfd"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - hfd_redis:/data
+    restart: unless-stopped
+
+volumes:
+  hfd_postgres:
+  hfd_redis:
+  hfd_raw_payloads:

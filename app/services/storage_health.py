@@ -23,17 +23,18 @@ SQLITE_TABLES = (
 
 async def storage_health(session: AsyncSession) -> dict[str, Any]:
     settings = get_settings()
+    database_kind = _database_kind(settings.database_url)
     db_path = _sqlite_path(settings.database_url)
     table_counts = await _table_counts(session)
-    page_stats = await _sqlite_page_stats(session) if db_path else {}
+    page_stats = await _sqlite_page_stats(session) if database_kind == "sqlite" else {}
     return {
-        "database_url_kind": _database_kind(settings.database_url),
+        "database_url_kind": database_kind,
         "sqlite": _sqlite_files_payload(db_path),
         "page_stats": page_stats,
         "tables": table_counts,
-        "indexes": await _index_payload(session),
+        "indexes": await _index_payload(session, database_kind),
         "raw_payload": await _raw_payload_estimate(session),
-        "recommendations": _recommendations(db_path, table_counts, page_stats),
+        "recommendations": _recommendations(database_kind, db_path, table_counts, page_stats),
     }
 
 
@@ -54,6 +55,8 @@ async def ensure_performance_indexes(session: AsyncSession) -> dict[str, Any]:
 
 
 async def sqlite_checkpoint(session: AsyncSession, *, truncate: bool = True) -> dict[str, Any]:
+    if _database_kind(get_settings().database_url) != "sqlite":
+        return {"status": "skipped", "reason": "checkpoint is only supported for SQLite"}
     mode = "TRUNCATE" if truncate else "PASSIVE"
     rows = await session.execute(text(f"PRAGMA wal_checkpoint({mode})"))
     values = list(rows.first() or ())
@@ -68,9 +71,14 @@ async def sqlite_checkpoint(session: AsyncSession, *, truncate: bool = True) -> 
 
 
 async def sqlite_optimize(session: AsyncSession) -> dict[str, Any]:
-    await session.execute(text("PRAGMA optimize"))
+    if _database_kind(get_settings().database_url) == "sqlite":
+        await session.execute(text("PRAGMA optimize"))
+        operation = "PRAGMA optimize"
+    else:
+        await session.execute(text("ANALYZE"))
+        operation = "ANALYZE"
     await session.commit()
-    return {"status": "ok", "operation": "PRAGMA optimize"}
+    return {"status": "ok", "operation": operation}
 
 
 def _sqlite_path(database_url: str) -> Path | None:
@@ -133,11 +141,25 @@ async def _sqlite_page_stats(session: AsyncSession) -> dict[str, Any]:
     }
 
 
-async def _index_payload(session: AsyncSession) -> dict[str, Any]:
-    rows = await session.execute(
-        text("SELECT name, tbl_name FROM sqlite_master WHERE type='index'")
-    )
-    existing = {str(row[0]) for row in rows.all()}
+async def _index_payload(session: AsyncSession, database_kind: str) -> dict[str, Any]:
+    if database_kind == "sqlite":
+        rows = await session.execute(
+            text("SELECT name, tbl_name FROM sqlite_master WHERE type='index'")
+        )
+        existing = {str(row[0]) for row in rows.all()}
+    elif database_kind == "postgresql":
+        rows = await session.execute(
+            text(
+                """
+                SELECT indexname
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                """
+            )
+        )
+        existing = {str(row[0]) for row in rows.all()}
+    else:
+        existing = set()
     required = [
         {
             "name": spec.name,
@@ -161,9 +183,9 @@ async def _raw_payload_estimate(session: AsyncSession) -> dict[str, Any]:
             """
             SELECT
               COUNT(*) AS rows,
-              COALESCE(SUM(LENGTH(raw_payload)), 0) AS raw_bytes,
-              COALESCE(SUM(LENGTH(summary_payload)), 0) AS summary_bytes,
-              COALESCE(AVG(LENGTH(raw_payload)), 0) AS avg_raw_bytes
+              COALESCE(SUM(LENGTH(CAST(raw_payload AS TEXT))), 0) AS raw_bytes,
+              COALESCE(SUM(LENGTH(CAST(summary_payload AS TEXT))), 0) AS summary_bytes,
+              COALESCE(AVG(LENGTH(CAST(raw_payload AS TEXT))), 0) AS avg_raw_bytes
             FROM signal_snapshots
             """
         )
@@ -182,6 +204,7 @@ async def _raw_payload_estimate(session: AsyncSession) -> dict[str, Any]:
 
 
 def _recommendations(
+    database_kind: str,
     db_path: Path | None,
     table_counts: list[dict[str, Any]],
     page_stats: dict[str, Any],
@@ -189,6 +212,8 @@ def _recommendations(
     rows_by_table = {row["table"]: row["rows"] for row in table_counts}
     recommendations = []
     db_size = db_path.stat().st_size if db_path and db_path.exists() else 0
+    if database_kind == "postgresql":
+        recommendations.append("Keep PostgreSQL backups and raw payload storage backups on separate schedules.")
     if db_size > 2 * 1024**3:
         recommendations.append("Move raw HFD payloads out of SQLite before server deployment.")
     if rows_by_table.get("signal_snapshots", 0) > 10_000:
