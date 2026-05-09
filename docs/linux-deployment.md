@@ -39,9 +39,12 @@ cp .env.production.example .env
 
 ```text
 POSTGRES_PASSWORD=change_me
+HFD_API_PORT=8000
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 ```
+
+If port 8000 is already used on the server, set `HFD_API_PORT` to another host port, for example `18000`.
 
 启动：
 
@@ -52,7 +55,7 @@ bash scripts/linux/bootstrap.sh
 面板地址：
 
 ```text
-http://服务器IP:8000/dashboard
+http://服务器IP:${HFD_API_PORT}/dashboard
 ```
 
 ## 4. 日常命令
