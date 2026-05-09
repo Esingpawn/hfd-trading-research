@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.db import Base
 from app.infrastructure.raw_store import LocalRawPayloadStore
 from app.models import CollectionRun, SignalSnapshot
-from scripts.migrate_sqlite_to_postgres import _table_names, migrate_table
+from scripts.migrate_sqlite_to_postgres import _column_names, _table_names, migrate_table
 
 
 @pytest.mark.asyncio
@@ -122,6 +122,72 @@ async def test_migrate_signal_snapshots_can_externalize_raw_payloads(tmp_path) -
         assert migrated.raw_payload_uri is not None
         assert store.resolve(migrated.raw_payload_uri).exists()
         assert migrated.raw_payload_compression == "gzip"
+    finally:
+        await source_engine.dispose()
+        await target_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_migrate_signal_snapshots_supports_legacy_source_columns(tmp_path) -> None:
+    source_url = f"sqlite+aiosqlite:///{tmp_path / 'legacy.db'}"
+    target_url = f"sqlite+aiosqlite:///{tmp_path / 'target.db'}"
+    source_engine = create_async_engine(source_url)
+    target_engine = create_async_engine(target_url)
+    try:
+        async with source_engine.begin() as conn:
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE signal_snapshots (
+                    id VARCHAR(36) PRIMARY KEY,
+                    symbol VARCHAR(24),
+                    asset_tier VARCHAR(32),
+                    timeframe VARCHAR(16),
+                    interval VARCHAR(8),
+                    indicator VARCHAR(64),
+                    endpoint TEXT,
+                    raw_payload JSON,
+                    summary_payload JSON,
+                    collected_at DATETIME,
+                    created_at DATETIME
+                )
+                """
+            )
+            await conn.exec_driver_sql(
+                """
+                INSERT INTO signal_snapshots (
+                    id, symbol, asset_tier, timeframe, interval, indicator, endpoint,
+                    raw_payload, summary_payload, collected_at, created_at
+                ) VALUES (
+                    'legacy-1', 'BTCUSDT', 'major', 'short', '30m', 'smart_money_cost',
+                    '/api/pro/pro_data', '{"payload":"value"}', '{"kline_count":1}',
+                    '2026-01-01 00:00:00', '2026-01-01 00:00:00'
+                )
+                """
+            )
+        async with target_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        source_factory = async_sessionmaker(source_engine, expire_on_commit=False)
+        target_factory = async_sessionmaker(target_engine, expire_on_commit=False)
+
+        store = LocalRawPayloadStore(tmp_path / "raw_payloads")
+        async with source_factory() as source, target_factory() as target:
+            count = await migrate_table(
+                source,
+                target,
+                SignalSnapshot,
+                batch_size=1,
+                dry_run=False,
+                raw_store=store,
+                source_columns=await _column_names(source_engine, "signal_snapshots"),
+            )
+
+        async with target_factory() as target:
+            migrated = await target.get(SignalSnapshot, "legacy-1")
+        assert count == 1
+        assert migrated is not None
+        assert migrated.raw_payload == {}
+        assert migrated.raw_payload_uri is not None
+        assert store.resolve(migrated.raw_payload_uri).exists()
     finally:
         await source_engine.dispose()
         await target_engine.dispose()

@@ -77,6 +77,7 @@ async def main(argv: Sequence[str] | None = None) -> int:
                 if model.__tablename__ not in source_tables:
                     print({"table": model.__tablename__, "rows": 0, "skipped": "missing_source_table", "dry_run": args.dry_run}, flush=True)
                     continue
+                source_columns = await _column_names(source_engine, model.__tablename__)
                 count = await migrate_table(
                     source,
                     target,
@@ -84,6 +85,7 @@ async def main(argv: Sequence[str] | None = None) -> int:
                     batch_size=args.batch_size,
                     dry_run=args.dry_run,
                     raw_store=raw_store if args.externalize_raw_payloads else None,
+                    source_columns=source_columns,
                 )
                 print({"table": model.__tablename__, "rows": count, "dry_run": args.dry_run}, flush=True)
     finally:
@@ -100,12 +102,20 @@ async def migrate_table(
     batch_size: int,
     dry_run: bool,
     raw_store: LocalRawPayloadStore | None = None,
+    source_columns: set[str] | None = None,
 ) -> int:
+    selected_columns = [
+        column
+        for column in model.__table__.columns
+        if source_columns is None or column.name in source_columns
+    ]
     offset = 0
     migrated = 0
     while True:
-        rows = await source.execute(select(model).offset(offset).limit(batch_size))
-        items = rows.scalars().all()
+        rows = await source.execute(
+            select(*selected_columns).select_from(model.__table__).offset(offset).limit(batch_size)
+        )
+        items = rows.mappings().all()
         if not items:
             break
         migrated += len(items)
@@ -122,8 +132,15 @@ async def _table_names(engine) -> set[str]:
         return await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
 
 
+async def _column_names(engine, table_name: str) -> set[str]:
+    async with engine.begin() as conn:
+        return await conn.run_sync(
+            lambda sync_conn: {column["name"] for column in inspect(sync_conn).get_columns(table_name)}
+        )
+
+
 def _clone_model(item, model, *, raw_store: LocalRawPayloadStore | None = None):
-    values = {column.name: getattr(item, column.name) for column in model.__table__.columns}
+    values = dict(item)
     if raw_store and model is SignalSnapshot:
         _externalize_signal_raw_payload(values, raw_store)
     return model(**values)
