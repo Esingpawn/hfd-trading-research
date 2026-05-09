@@ -4,7 +4,8 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
-from app.models import CollectionRun
+from app.infrastructure.raw_store import LocalRawPayloadStore
+from app.models import CollectionRun, SignalSnapshot
 from scripts.migrate_sqlite_to_postgres import _table_names, migrate_table
 
 
@@ -64,3 +65,63 @@ async def test_table_names_supports_missing_new_tables(tmp_path) -> None:
         assert "trade_orders" not in tables
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_migrate_signal_snapshots_can_externalize_raw_payloads(tmp_path) -> None:
+    source_url = f"sqlite+aiosqlite:///{tmp_path / 'source.db'}"
+    target_url = f"sqlite+aiosqlite:///{tmp_path / 'target.db'}"
+    source_engine = create_async_engine(source_url)
+    target_engine = create_async_engine(target_url)
+    try:
+        async with source_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with target_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        source_factory = async_sessionmaker(source_engine, expire_on_commit=False)
+        target_factory = async_sessionmaker(target_engine, expire_on_commit=False)
+        collected_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        async with source_factory() as source:
+            source.add(
+                SignalSnapshot(
+                    id="snapshot-1",
+                    symbol="BTCUSDT",
+                    asset_tier="major",
+                    timeframe="short",
+                    interval="30m",
+                    indicator="smart_money_cost",
+                    endpoint="/api/pro/pro_data",
+                    raw_payload={"klines": [[1, 2, 3, 4, 5]], "smart_money_cost": [1, 2]},
+                    raw_payload_uri=None,
+                    raw_payload_sha256=None,
+                    raw_payload_bytes=None,
+                    raw_payload_compression=None,
+                    summary_payload={"kline_count": 1},
+                    collected_at=collected_at,
+                    created_at=collected_at,
+                )
+            )
+            await source.commit()
+
+        store = LocalRawPayloadStore(tmp_path / "raw_payloads")
+        async with source_factory() as source, target_factory() as target:
+            count = await migrate_table(
+                source,
+                target,
+                SignalSnapshot,
+                batch_size=1,
+                dry_run=False,
+                raw_store=store,
+            )
+
+        async with target_factory() as target:
+            migrated = await target.get(SignalSnapshot, "snapshot-1")
+        assert count == 1
+        assert migrated is not None
+        assert migrated.raw_payload == {}
+        assert migrated.raw_payload_uri is not None
+        assert store.resolve(migrated.raw_payload_uri).exists()
+        assert migrated.raw_payload_compression == "gzip"
+    finally:
+        await source_engine.dispose()
+        await target_engine.dispose()
