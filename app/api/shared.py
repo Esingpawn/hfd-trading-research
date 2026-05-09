@@ -185,11 +185,20 @@ def _runtime_process_payload(name: str, label: str) -> dict[str, object]:
     stdout_log = meta.get("stdout_log") or str(Path("data/logs") / f"{name}.out.log")
     stderr_log = meta.get("stderr_log") or str(Path("data/logs") / f"{name}.err.log")
     started_at = meta.get("started_at")
+    heartbeat_age_seconds = _runtime_heartbeat_age_seconds(meta)
+    heartbeat_ttl_seconds = _runtime_heartbeat_ttl_seconds(meta)
+    running = _pid_running(pid) or _runtime_heartbeat_running(
+        heartbeat_age_seconds,
+        heartbeat_ttl_seconds,
+    )
     return {
         "name": label,
         "pid": pid,
-        "running": _pid_running(pid),
+        "running": running,
         "started_at": started_at,
+        "heartbeat_at": meta.get("heartbeat_at"),
+        "heartbeat_age_seconds": heartbeat_age_seconds,
+        "heartbeat_ttl_seconds": heartbeat_ttl_seconds,
         "interval_seconds": meta.get("interval_seconds"),
         "coins": meta.get("coins"),
         "timeframes": meta.get("timeframes"),
@@ -197,6 +206,9 @@ def _runtime_process_payload(name: str, label: str) -> dict[str, object]:
         "mode": meta.get("mode"),
         "research_indicators": meta.get("research_indicators"),
         "research_intervals": meta.get("research_intervals"),
+        "containerized": meta.get("containerized"),
+        "command": meta.get("command"),
+        "status": meta.get("status"),
         "pid_file": str(RUNTIME_DIR / f"{name}.pid"),
         "stdout_log": stdout_log,
         "stderr_log": stderr_log,
@@ -236,6 +248,43 @@ def _runtime_interval_seconds(payload: dict[str, object], default: int) -> int:
         return int(payload.get("interval_seconds") or default)
     except (TypeError, ValueError):
         return default
+
+
+def _runtime_heartbeat_age_seconds(meta: dict[str, object]) -> float | None:
+    heartbeat_at = _parse_runtime_datetime(meta.get("heartbeat_at"))
+    return _age_seconds(heartbeat_at) if heartbeat_at else None
+
+
+def _runtime_heartbeat_ttl_seconds(meta: dict[str, object]) -> int:
+    raw_ttl = meta.get("heartbeat_ttl_seconds")
+    try:
+        ttl = int(raw_ttl or 0)
+        if ttl > 0:
+            return ttl
+    except (TypeError, ValueError):
+        pass
+    try:
+        interval = int(meta.get("interval_seconds") or 0)
+    except (TypeError, ValueError):
+        interval = 0
+    return max(interval * 2 + 60, 120)
+
+
+def _runtime_heartbeat_running(age_seconds: float | None, ttl_seconds: int) -> bool:
+    if age_seconds is None:
+        return False
+    return age_seconds <= ttl_seconds
+
+
+def _parse_runtime_datetime(value: object) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return _as_aware(value)
+    try:
+        return _as_aware(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+    except ValueError:
+        return None
 
 
 def _pid_running(pid: int | None) -> bool:

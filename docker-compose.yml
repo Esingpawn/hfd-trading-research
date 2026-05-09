@@ -14,6 +14,8 @@ services:
       - "${HFD_API_PORT:-8000}:8000"
     volumes:
       - hfd_raw_payloads:/var/lib/hfd/raw_payloads
+      - hfd_runtime:/app/data/runtime
+      - hfd_logs:/app/data/logs
     depends_on:
       db-init:
         condition: service_completed_successfully
@@ -68,6 +70,8 @@ services:
       - "14400"
     volumes:
       - hfd_raw_payloads:/var/lib/hfd/raw_payloads
+      - hfd_runtime:/app/data/runtime
+      - hfd_logs:/app/data/logs
     depends_on:
       db-init:
         condition: service_completed_successfully
@@ -107,6 +111,9 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+    volumes:
+      - hfd_runtime:/app/data/runtime
+      - hfd_logs:/app/data/logs
     restart: unless-stopped
 
   experiment-worker:
@@ -132,6 +139,9 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+    volumes:
+      - hfd_runtime:/app/data/runtime
+      - hfd_logs:/app/data/logs
     restart: unless-stopped
 
   task-worker:
@@ -154,6 +164,8 @@ services:
       - "5"
     volumes:
       - hfd_raw_payloads:/var/lib/hfd/raw_payloads
+      - hfd_runtime:/app/data/runtime
+      - hfd_logs:/app/data/logs
     depends_on:
       db-init:
         condition: service_completed_successfully
@@ -201,3 +213,5 @@ volumes:
   hfd_postgres:
   hfd_redis:
   hfd_raw_payloads:
+  hfd_runtime:
+  hfd_logs:

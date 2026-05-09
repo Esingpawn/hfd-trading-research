@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import suppress
+from datetime import datetime, timezone
 import json
+import os
+from pathlib import Path
 import time
 from typing import Sequence
 
@@ -22,6 +26,89 @@ from app.services.paper_loop import paper_loop_decision
 from app.services.signal_attribution import backfill_signal_outcomes, signal_effectiveness
 from app.services.strategy import evaluate_symbol
 from app.services.telegram import TelegramClient, extract_chat_candidates
+
+
+RUNTIME_DIR = Path("data/runtime")
+LOG_DIR = Path("data/logs")
+RUNTIME_HEARTBEAT_SECONDS = 30
+
+
+def _runtime_metadata(
+    name: str,
+    *,
+    command: str,
+    interval_seconds: int | float | None = None,
+    heartbeat_ttl_seconds: int | float | None = None,
+    **extra: object,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "pid": os.getpid(),
+        "started_at": _utc_now_iso(),
+        "stdout_log": str(LOG_DIR / f"{name}.out.log"),
+        "stderr_log": str(LOG_DIR / f"{name}.err.log"),
+        "command": command,
+        "containerized": _running_in_container(),
+    }
+    if interval_seconds is not None:
+        payload["interval_seconds"] = interval_seconds
+    if heartbeat_ttl_seconds is not None:
+        payload["heartbeat_ttl_seconds"] = heartbeat_ttl_seconds
+    payload.update(extra)
+    return payload
+
+
+def _touch_runtime(name: str, metadata: dict[str, object], **updates: object) -> None:
+    try:
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        payload = dict(metadata)
+        payload.update(updates)
+        payload["pid"] = os.getpid()
+        payload["heartbeat_at"] = _utc_now_iso()
+        metadata.update(updates)
+        metadata["pid"] = payload["pid"]
+        metadata["heartbeat_at"] = payload["heartbeat_at"]
+        path = RUNTIME_DIR / f"{name}.json"
+        tmp_path = path.with_name(f"{path.name}.tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(path)
+        (RUNTIME_DIR / f"{name}.pid").write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        return
+
+
+def _start_runtime_heartbeat(
+    name: str,
+    metadata: dict[str, object],
+) -> asyncio.Task[None]:
+    _touch_runtime(name, metadata, status="running")
+    return asyncio.create_task(_runtime_heartbeat_loop(name, metadata))
+
+
+async def _stop_runtime_heartbeat(task: asyncio.Task[None] | None) -> None:
+    if task is None:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+async def _runtime_heartbeat_loop(name: str, metadata: dict[str, object]) -> None:
+    while True:
+        _touch_runtime(name, metadata, status="running")
+        await asyncio.sleep(RUNTIME_HEARTBEAT_SECONDS)
+
+
+def _heartbeat_ttl(interval_seconds: int | float) -> int:
+    return max(int(float(interval_seconds) * 2) + 60, 120)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _running_in_container() -> bool:
+    return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -315,10 +402,22 @@ async def run(argv: Sequence[str] | None = None) -> int:
         return 0 if not result.errors else 2
 
     if args.command == "collect-loop":
+        runtime_meta = _runtime_metadata(
+            "collect-core-loop",
+            command="python -m app.cli collect-loop",
+            interval_seconds=args.interval_seconds,
+            heartbeat_ttl_seconds=_heartbeat_ttl(args.interval_seconds),
+            coins=args.coins,
+            timeframes=args.timeframes,
+            indicators=args.indicators,
+            dry_run=args.dry_run,
+        )
+        heartbeat_task = _start_runtime_heartbeat("collect-core-loop", runtime_meta)
         run_number = 0
         try:
             while True:
                 run_number += 1
+                _touch_runtime("collect-core-loop", runtime_meta, run_number=run_number)
                 async with SessionLocal() as session:
                     collector = SnapshotCollector(session)
                     try:
@@ -345,6 +444,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
         except KeyboardInterrupt:
             print("collection loop interrupted")
         finally:
+            await _stop_runtime_heartbeat(heartbeat_task)
             await engine.dispose()
         return 0
 
@@ -355,11 +455,26 @@ async def run(argv: Sequence[str] | None = None) -> int:
             mid=args.research_mid_interval_seconds,
             long=args.research_long_interval_seconds,
         )
+        runtime_meta = _runtime_metadata(
+            "collect-core-loop",
+            command="python -m app.cli collect-tiered-loop",
+            interval_seconds=args.core_interval_seconds,
+            heartbeat_ttl_seconds=_heartbeat_ttl(args.core_interval_seconds),
+            coins=args.coins,
+            timeframes=selected_timeframes,
+            indicators=list(REQUIRED_SCORING_INDICATORS),
+            mode="tiered",
+            research_indicators=list(RESEARCH_INDICATORS),
+            research_intervals=intervals,
+            dry_run=args.dry_run,
+        )
+        heartbeat_task = _start_runtime_heartbeat("collect-core-loop", runtime_meta)
         last_research_completed_at: dict[str, float] = {}
         run_number = 0
         try:
             while True:
                 run_number += 1
+                _touch_runtime("collect-core-loop", runtime_meta, run_number=run_number)
                 core_result = await collect_once(
                     assets=args.coins,
                     timeframes=selected_timeframes,
@@ -400,6 +515,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
         except KeyboardInterrupt:
             print("tiered collection loop interrupted")
         finally:
+            await _stop_runtime_heartbeat(heartbeat_task)
             await engine.dispose()
         return 0
 
@@ -551,6 +667,16 @@ async def run(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "paper-loop":
         coins = [c.upper() for c in args.coins] if args.coins else ["BTC", "ETH"]
+        runtime_meta = _runtime_metadata(
+            "paper-loop",
+            command="python -m app.cli paper-loop",
+            interval_seconds=args.interval_seconds,
+            heartbeat_ttl_seconds=_heartbeat_ttl(args.interval_seconds),
+            coins=coins,
+            notify=args.notify,
+            process_existing=args.process_existing,
+        )
+        heartbeat_task = _start_runtime_heartbeat("paper-loop", runtime_meta)
         processed_runs = 0
         last_seen_run_id = None
         if not args.process_existing:
@@ -559,6 +685,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 last_seen_run_id = str(latest.id) if latest else None
         try:
             while True:
+                _touch_runtime("paper-loop", runtime_meta, processed_runs=processed_runs)
                 try:
                     async with SessionLocal() as session:
                         latest = await latest_collection_run(session)
@@ -606,14 +733,24 @@ async def run(argv: Sequence[str] | None = None) -> int:
         except KeyboardInterrupt:
             print("paper loop interrupted")
         finally:
+            await _stop_runtime_heartbeat(heartbeat_task)
             await engine.dispose()
         return 0
 
     if args.command == "experiment-loop":
+        runtime_meta = _runtime_metadata(
+            "experiment-loop",
+            command="python -m app.cli experiment-loop",
+            interval_seconds=args.interval_seconds,
+            heartbeat_ttl_seconds=_heartbeat_ttl(args.interval_seconds),
+            limit=args.limit,
+        )
+        heartbeat_task = _start_runtime_heartbeat("experiment-loop", runtime_meta)
         run_number = 0
         try:
             while True:
                 run_number += 1
+                _touch_runtime("experiment-loop", runtime_meta, run_number=run_number)
                 try:
                     async with SessionLocal() as session:
                         result = await backfill_signal_outcomes(session, limit=args.limit)
@@ -647,17 +784,31 @@ async def run(argv: Sequence[str] | None = None) -> int:
         except KeyboardInterrupt:
             print("experiment loop interrupted")
         finally:
+            await _stop_runtime_heartbeat(heartbeat_task)
             await engine.dispose()
         return 0
 
     if args.command == "task-worker":
-        result = await run_task_worker(
+        runtime_meta = _runtime_metadata(
+            "task-worker",
+            command="python -m app.cli task-worker",
+            interval_seconds=max(args.idle_sleep_seconds, 1),
+            heartbeat_ttl_seconds=max(args.dequeue_timeout_seconds * 2 + 60, 120),
             max_tasks=args.max_tasks,
             idle_sleep_seconds=args.idle_sleep_seconds,
             dequeue_timeout_seconds=args.dequeue_timeout_seconds,
         )
-        print(json.dumps(jsonable(result.__dict__), ensure_ascii=False, indent=2))
-        await engine.dispose()
+        heartbeat_task = _start_runtime_heartbeat("task-worker", runtime_meta)
+        try:
+            result = await run_task_worker(
+                max_tasks=args.max_tasks,
+                idle_sleep_seconds=args.idle_sleep_seconds,
+                dequeue_timeout_seconds=args.dequeue_timeout_seconds,
+            )
+            print(json.dumps(jsonable(result.__dict__), ensure_ascii=False, indent=2))
+        finally:
+            await _stop_runtime_heartbeat(heartbeat_task)
+            await engine.dispose()
         return 0 if not result.failed else 2
 
     if args.command == "telegram":
