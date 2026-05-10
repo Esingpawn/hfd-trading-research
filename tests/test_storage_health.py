@@ -64,6 +64,8 @@ async def test_storage_health_reports_counts_indexes_and_raw_payload(session) ->
     counts = {row["table"]: row["rows"] for row in after_indexes["tables"]}
     assert after_indexes["database_url_kind"] == "sqlite"
     assert counts["signal_snapshots"] == 1
+    assert counts["feature_events"] == 0
+    assert counts["feature_labels"] == 0
     assert after_indexes["raw_payload"]["rows"] == 1
     assert after_indexes["raw_payload"]["raw_bytes"] >= 128
     assert after_indexes["raw_payload"]["external_rows"] == 1

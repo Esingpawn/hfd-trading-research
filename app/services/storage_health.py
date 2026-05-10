@@ -13,6 +13,8 @@ from app.db_indexes import SQLITE_INDEX_SPECS
 SQLITE_TABLES = (
     "signal_snapshots",
     "price_snapshots",
+    "feature_events",
+    "feature_labels",
     "signal_observations",
     "strategy_decisions",
     "paper_trades",
