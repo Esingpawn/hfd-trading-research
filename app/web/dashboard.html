@@ -1095,6 +1095,16 @@
             <div id="featurePaperAbSummary" class="kvList"></div>
             <div id="featurePaperAb" class="miniTable"><div class="empty">等待 A/B 报告</div></div>
           </div>
+          <div class="detailBlock" style="margin-top:10px">
+            <h3>分段候选特征</h3>
+            <div id="featureSegmentCandidatesSummary" class="kvList"></div>
+            <div id="featureSegmentCandidates" class="miniTable"><div class="empty">等待分段候选</div></div>
+          </div>
+          <div class="detailBlock" style="margin-top:10px">
+            <h3>分段纸上 A/B</h3>
+            <div id="featureSegmentPaperAbSummary" class="kvList"></div>
+            <div id="featureSegmentPaperAb" class="miniTable"><div class="empty">等待分段 A/B</div></div>
+          </div>
         </div>
       </article>
 
@@ -1219,6 +1229,8 @@
       experimentEffectiveness: null,
       featureCandidates: null,
       featurePaperAb: null,
+      featureSegmentCandidates: null,
+      featureSegmentPaperAb: null,
       selectedSymbol: null,
       selectedTradeId: null,
       paperReview: null
@@ -1953,6 +1965,8 @@
       const experimentEffectiveness = state.experimentEffectiveness || {};
       const featureCandidates = state.featureCandidates || {};
       const featurePaperAb = state.featurePaperAb || {};
+      const featureSegmentCandidates = state.featureSegmentCandidates || {};
+      const featureSegmentPaperAb = state.featureSegmentPaperAb || {};
       const signals = data.signals || [];
       const roles = data.roles || [];
       const weights = weightData.weights || [];
@@ -2052,6 +2066,38 @@
         { label:"收益因子", render: row => fmt((row.pseudo_trade_metrics || {}).profit_factor, 2) },
         { label:"MFE/MAE", render: row => `${coloredPct((row.pseudo_trade_metrics || {}).avg_mfe)} / ${coloredPct((row.pseudo_trade_metrics || {}).avg_mae)}` }
       ], "暂无 A/B 候选报告"));
+      setHtml("featureSegmentCandidatesSummary", kvRows([
+        ["窗口", esc(featureSegmentCandidates.horizon || "30m")],
+        ["已标注", fmt(featureSegmentCandidates.labeled_count || 0, 0)],
+        ["候选分段", fmt(featureSegmentCandidates.candidate_count || 0, 0)],
+        ["特征组", fmt((featureSegmentCandidates.by_feature || []).length, 0)]
+      ]));
+      setHtml("featureSegmentCandidates", table((featureSegmentCandidates.candidates || []).slice(0, 10), [
+        { label:"分段", render: row => `${coinBadge(row.symbol)} <span class="muted">${esc(row.timeframe)}</span>` },
+        { label:"特征", render: row => esc(row.feature_key) },
+        { label:"样本", render: row => fmt(row.sample_count, 0) },
+        { label:"胜率", render: row => pct(row.win_rate, 1) },
+        { label:"平均收益", render: row => coloredPct(row.avg_return) },
+        { label:"收益因子", render: row => fmt(row.profit_factor, 2) },
+        { label:"状态", render: row => tag(row.paper_ab_ready ? "ok" : "warn", row.paper_ab_ready ? "分段就绪" : esc(row.promotion_status)) }
+      ], "暂无达标分段候选"));
+      const segmentCandidateArm = (featureSegmentPaperAb.arms || {}).candidate || {};
+      const segmentMatchedControl = (featureSegmentPaperAb.arms || {}).matched_control || {};
+      const segmentMatchedEdge = (featureSegmentPaperAb.arms || {}).matched_edge || {};
+      setHtml("featureSegmentPaperAbSummary", kvRows([
+        ["入选分段", fmt(featureSegmentPaperAb.selected_candidate_count || 0, 0)],
+        ["候选伪交易", fmt(segmentCandidateArm.trade_count || 0, 0)],
+        ["同分段对照", fmt(segmentMatchedControl.trade_count || 0, 0)],
+        ["收益差", coloredPct(segmentMatchedEdge.avg_return_delta)]
+      ]));
+      setHtml("featureSegmentPaperAb", table((featureSegmentPaperAb.per_segment || []).slice(0, 10), [
+        { label:"分段", render: row => `${coinBadge(row.symbol)} <span class="muted">${esc(row.timeframe)}</span>` },
+        { label:"特征", render: row => esc(row.feature_key) },
+        { label:"伪交易", render: row => fmt((row.pseudo_trade_metrics || {}).trade_count || 0, 0) },
+        { label:"胜率", render: row => pct((row.pseudo_trade_metrics || {}).win_rate, 1) },
+        { label:"平均收益", render: row => coloredPct((row.pseudo_trade_metrics || {}).avg_return) },
+        { label:"收益因子", render: row => fmt((row.pseudo_trade_metrics || {}).profit_factor, 2) }
+      ], "暂无分段 A/B 报告"));
       setHtml("indicatorCatalog", table(catalog, [
         { label:"暗流指标", render: row => esc(row.hfd_name) },
         { label:"参数", render: row => `<span class="muted">${esc(row.key)}</span>` },
@@ -2196,7 +2242,7 @@
     async function refreshAll() {
       try {
         log("正在刷新交易研究台...");
-      const [summary, runtime, trades, paperStats, backtests, effectiveness, weights, experiments, experimentEffectiveness, featureCandidates, featurePaperAb, telegram] = await Promise.all([
+      const [summary, runtime, trades, paperStats, backtests, effectiveness, weights, experiments, experimentEffectiveness, featureCandidates, featurePaperAb, featureSegmentCandidates, featureSegmentPaperAb, telegram] = await Promise.all([
           api("/system/summary"),
           api("/system/runtime").catch(error => ({ error: error.message })),
           api("/paper/trades?limit=12"),
@@ -2208,6 +2254,8 @@
           api("/signals/experiment-effectiveness?horizon=4h&min_samples=5").catch(error => ({ error: error.message, indicators: [] })),
           api("/features/candidates?horizon=30m&min_samples=30&limit=20000").catch(error => ({ error: error.message, candidates: [], watchlist: [] })),
           api("/features/paper-ab?horizon=30m&min_samples=30&limit=20000&candidate_limit=20").catch(error => ({ error: error.message, arms: {}, per_candidate: [] })),
+          api("/features/segment-candidates?horizon=30m&min_samples=30&limit=20000").catch(error => ({ error: error.message, candidates: [], by_feature: [] })),
+          api("/features/segment-paper-ab?horizon=30m&min_samples=30&limit=20000&candidate_limit=50").catch(error => ({ error: error.message, arms: {}, per_segment: [] })),
           withTimeout(
             api("/telegram/status").catch(error => ({ configured:false, error: error.message })),
             6500,
@@ -2226,6 +2274,8 @@
         state.experimentEffectiveness = experimentEffectiveness;
         state.featureCandidates = featureCandidates;
         state.featurePaperAb = featurePaperAb;
+        state.featureSegmentCandidates = featureSegmentCandidates;
+        state.featureSegmentPaperAb = featureSegmentPaperAb;
         if (trades.length && (!state.selectedTradeId || !trades.some(trade => trade.id === state.selectedTradeId))) {
           state.selectedTradeId = trades[0].id;
         }

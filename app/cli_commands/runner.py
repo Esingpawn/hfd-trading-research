@@ -21,7 +21,12 @@ from app.services.backtest_batch import run_backtest_batch
 from app.services.backtest import run_cost_band_retest_backtest
 from app.services.collection_schedule import research_due_timeframes, research_intervals
 from app.services.collector import SnapshotCollector
-from app.services.feature_candidates import feature_candidate_screen, feature_paper_ab
+from app.services.feature_candidates import (
+    feature_candidate_screen,
+    feature_paper_ab,
+    feature_segment_candidate_screen,
+    feature_segment_paper_ab,
+)
 from app.services.features import (
     backfill_feature_events,
     backfill_feature_labels,
@@ -310,6 +315,25 @@ def build_parser() -> argparse.ArgumentParser:
     feature_ab.add_argument("--candidate-limit", type=int, default=20)
     feature_ab.add_argument("--limit", type=int, default=20000)
     feature_ab.add_argument("--persist", action="store_true", help="Save the report as an experiment run")
+
+    segment_candidates = subparsers.add_parser("features-segment-candidates", help="Screen feature candidates by symbol/timeframe segment")
+    segment_candidates.add_argument("--horizon", choices=["30m", "1h", "4h", "24h"], default="30m")
+    segment_candidates.add_argument("--min-samples", type=int, default=30)
+    segment_candidates.add_argument("--min-win-rate", type=float, default=0.52)
+    segment_candidates.add_argument("--min-profit-factor", type=float, default=1.2)
+    segment_candidates.add_argument("--min-avg-return", type=float, default=0.0)
+    segment_candidates.add_argument("--limit", type=int, default=20000)
+    segment_candidates.add_argument("--persist", action="store_true", help="Save the report as an experiment run")
+
+    segment_ab = subparsers.add_parser("features-segment-paper-ab", help="Run report-only segment feature paper A/B from labels")
+    segment_ab.add_argument("--horizon", choices=["30m", "1h", "4h", "24h"], default="30m")
+    segment_ab.add_argument("--min-samples", type=int, default=30)
+    segment_ab.add_argument("--min-win-rate", type=float, default=0.52)
+    segment_ab.add_argument("--min-profit-factor", type=float, default=1.2)
+    segment_ab.add_argument("--min-avg-return", type=float, default=0.0)
+    segment_ab.add_argument("--candidate-limit", type=int, default=50)
+    segment_ab.add_argument("--limit", type=int, default=20000)
+    segment_ab.add_argument("--persist", action="store_true", help="Save the report as an experiment run")
 
     subparsers.add_parser("storage-health", help="Show database storage health")
     storage_maintain = subparsers.add_parser("storage-maintain", help="Run safe database maintenance")
@@ -783,6 +807,39 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 min_avg_return=args.min_avg_return,
                 segment_min_samples=args.segment_min_samples,
                 min_segments=args.min_segments,
+                candidate_limit=args.candidate_limit,
+                limit=args.limit,
+                persist=args.persist,
+            )
+        print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "features-segment-candidates":
+        async with SessionLocal() as session:
+            result = await feature_segment_candidate_screen(
+                session,
+                horizon=args.horizon,
+                min_samples=args.min_samples,
+                min_win_rate=args.min_win_rate,
+                min_profit_factor=args.min_profit_factor,
+                min_avg_return=args.min_avg_return,
+                limit=args.limit,
+                persist=args.persist,
+            )
+        print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "features-segment-paper-ab":
+        async with SessionLocal() as session:
+            result = await feature_segment_paper_ab(
+                session,
+                horizon=args.horizon,
+                min_samples=args.min_samples,
+                min_win_rate=args.min_win_rate,
+                min_profit_factor=args.min_profit_factor,
+                min_avg_return=args.min_avg_return,
                 candidate_limit=args.candidate_limit,
                 limit=args.limit,
                 persist=args.persist,

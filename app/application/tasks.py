@@ -9,7 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.infrastructure.queue import build_queue
 from app.models import TaskRun
 from app.services.collector import SnapshotCollector
-from app.services.feature_candidates import feature_candidate_screen, feature_paper_ab
+from app.services.feature_candidates import (
+    feature_candidate_screen,
+    feature_paper_ab,
+    feature_segment_candidate_screen,
+    feature_segment_paper_ab,
+)
 from app.services.features import (
     backfill_feature_events,
     backfill_feature_labels,
@@ -170,6 +175,29 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
             segment_min_samples=_payload_int(payload, "segment_min_samples", 5),
             min_segments=_payload_int(payload, "min_segments", 2),
             candidate_limit=_payload_int(payload, "candidate_limit", 20),
+            limit=_payload_int(payload, "limit", 20000),
+            persist=_payload_bool(payload, "persist", True),
+        )
+    if task_name in {"features.segment_candidates", "features-segment-candidates"}:
+        return await feature_segment_candidate_screen(
+            session,
+            horizon=_payload_str(payload, "horizon", "30m"),
+            min_samples=_payload_int(payload, "min_samples", 30),
+            min_win_rate=_payload_float(payload, "min_win_rate", 0.52),
+            min_profit_factor=_payload_float(payload, "min_profit_factor", 1.2),
+            min_avg_return=_payload_float(payload, "min_avg_return", 0.0),
+            limit=_payload_int(payload, "limit", 20000),
+            persist=_payload_bool(payload, "persist", True),
+        )
+    if task_name in {"features.segment_paper_ab", "features-segment-paper-ab"}:
+        return await feature_segment_paper_ab(
+            session,
+            horizon=_payload_str(payload, "horizon", "30m"),
+            min_samples=_payload_int(payload, "min_samples", 30),
+            min_win_rate=_payload_float(payload, "min_win_rate", 0.52),
+            min_profit_factor=_payload_float(payload, "min_profit_factor", 1.2),
+            min_avg_return=_payload_float(payload, "min_avg_return", 0.0),
+            candidate_limit=_payload_int(payload, "candidate_limit", 50),
             limit=_payload_int(payload, "limit", 20000),
             persist=_payload_bool(payload, "persist", True),
         )

@@ -183,6 +183,48 @@ async def test_run_task_by_id_honors_feature_candidate_persist_false(session) ->
 
 
 @pytest.mark.asyncio
+async def test_run_task_by_id_executes_segment_feature_candidates(session) -> None:
+    await _add_feature_group(session, symbol="BTCUSDT")
+    await _add_feature_group(session, symbol="ZECUSDT", returns=[-0.006, -0.005, -0.004, -0.003, 0.001, -0.002])
+    item = TaskRun(
+        task_name="features.segment_candidates",
+        payload={"min_samples": 6, "min_win_rate": 0.6, "min_profit_factor": 1.2, "persist": True},
+        result={},
+    )
+    session.add(item)
+    await session.commit()
+
+    result = await run_task_by_id(session, item.id)
+    experiment = await session.scalar(select(ExperimentRun).where(ExperimentRun.name == "feature_segment_candidates_30m"))
+
+    assert result["status"] == "completed"
+    assert result["result"]["execution"]["candidate_count"] == 1
+    assert result["result"]["execution"]["candidates"][0]["symbol"] == "BTCUSDT"
+    assert experiment is not None
+
+
+@pytest.mark.asyncio
+async def test_run_task_by_id_executes_segment_feature_paper_ab(session) -> None:
+    await _add_feature_group(session, symbol="BTCUSDT")
+    await _add_feature_group(session, symbol="ZECUSDT", returns=[-0.006, -0.005, -0.004, -0.003, 0.001, -0.002])
+    item = TaskRun(
+        task_name="features.segment_paper_ab",
+        payload={"min_samples": 6, "min_win_rate": 0.6, "min_profit_factor": 1.2, "persist": True},
+        result={},
+    )
+    session.add(item)
+    await session.commit()
+
+    result = await run_task_by_id(session, item.id)
+    experiment = await session.scalar(select(ExperimentRun).where(ExperimentRun.name == "feature_segment_paper_ab_30m"))
+
+    assert result["status"] == "completed"
+    assert result["result"]["execution"]["selected_candidate_count"] == 1
+    assert result["result"]["execution"]["policy"]["opens_paper_trades"] is False
+    assert experiment is not None
+
+
+@pytest.mark.asyncio
 async def test_run_task_by_id_records_failure(session) -> None:
     item = TaskRun(task_name="unknown.task", payload={}, result={})
     session.add(item)
@@ -197,9 +239,9 @@ async def test_run_task_by_id_records_failure(session) -> None:
     assert "unsupported task_name" in str(stored.error)
 
 
-async def _add_feature_group(session, *, symbol: str) -> None:
+async def _add_feature_group(session, *, symbol: str, returns: list[float] | None = None) -> None:
     base_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    for index, return_pct in enumerate([0.012, 0.01, 0.009, 0.008, 0.011, -0.002]):
+    for index, return_pct in enumerate(returns or [0.012, 0.01, 0.009, 0.008, 0.011, -0.002]):
         event = FeatureEvent(
             snapshot_id=f"snapshot-{symbol}-{index}",
             symbol=symbol,

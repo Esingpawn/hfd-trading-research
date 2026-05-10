@@ -6,7 +6,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
 from app.models import ExperimentRun, FeatureEvent, FeatureLabel, PaperTrade
-from app.services.feature_candidates import feature_candidate_screen, feature_paper_ab
+from app.services.feature_candidates import (
+    feature_candidate_screen,
+    feature_paper_ab,
+    feature_segment_candidate_screen,
+    feature_segment_paper_ab,
+)
 
 
 @pytest.fixture()
@@ -161,6 +166,85 @@ async def test_feature_paper_ab_is_report_only_and_does_not_open_paper_trades(se
     assert report["arms"]["candidate"]["trade_count"] == 12
     assert report["arms"]["control"]["trade_count"] == 6
     assert report["arms"]["edge"]["avg_return_delta"] > 0
+    assert paper_count == 0
+    assert experiment is not None
+    assert experiment.status == "research"
+
+
+@pytest.mark.asyncio
+async def test_segment_candidate_screen_promotes_local_segments_when_global_feature_is_weak(session) -> None:
+    strong_returns = [0.012, 0.01, 0.009, 0.008, 0.011, -0.002]
+    weak_returns = [-0.006, -0.005, -0.004, -0.003, 0.001, -0.002]
+    await add_labeled_feature(session, feature_name="inst_choch", subtype="CHoCH_Bullish", returns=strong_returns)
+    await add_labeled_feature(
+        session,
+        feature_name="inst_choch",
+        subtype="CHoCH_Bullish",
+        returns=weak_returns,
+        symbol="ZECUSDT",
+    )
+    await session.commit()
+
+    global_report = await feature_candidate_screen(
+        session,
+        horizon="30m",
+        min_samples=6,
+        min_win_rate=0.6,
+        min_profit_factor=1.2,
+        segment_min_samples=3,
+        min_segments=2,
+    )
+    segment_report = await feature_segment_candidate_screen(
+        session,
+        horizon="30m",
+        min_samples=6,
+        min_win_rate=0.6,
+        min_profit_factor=1.2,
+        persist=True,
+    )
+    experiment = await session.scalar(select(ExperimentRun).where(ExperimentRun.name == "feature_segment_candidates_30m"))
+
+    assert global_report["candidate_count"] == 0
+    assert segment_report["candidate_count"] == 1
+    assert segment_report["candidates"][0]["segment_key"] == "inst_choch:CHoCH_Bullish:long:BTCUSDT:short"
+    assert segment_report["by_feature"][0]["feature_key"] == "inst_choch:CHoCH_Bullish:long"
+    assert segment_report["candidates"][0]["used_for_opening_decisions"] is False
+    assert experiment is not None
+    assert experiment.status == "research"
+
+
+@pytest.mark.asyncio
+async def test_segment_paper_ab_is_report_only_and_uses_matched_controls(session) -> None:
+    strong_returns = [0.012, 0.01, 0.009, 0.008, 0.011, -0.002]
+    weak_returns = [-0.006, -0.005, -0.004, -0.003, 0.001, -0.002]
+    control_returns = [-0.004, 0.002, -0.003, 0.001, -0.002, 0.0]
+    await add_labeled_feature(session, feature_name="inst_choch", subtype="CHoCH_Bullish", returns=strong_returns)
+    await add_labeled_feature(session, feature_name="trend_purity", subtype="control", returns=control_returns)
+    await add_labeled_feature(
+        session,
+        feature_name="inst_choch",
+        subtype="CHoCH_Bullish",
+        returns=weak_returns,
+        symbol="ZECUSDT",
+    )
+    await session.commit()
+
+    report = await feature_segment_paper_ab(
+        session,
+        horizon="30m",
+        min_samples=6,
+        min_win_rate=0.6,
+        min_profit_factor=1.2,
+        persist=True,
+    )
+    paper_count = await session.scalar(select(func.count()).select_from(PaperTrade))
+    experiment = await session.scalar(select(ExperimentRun).where(ExperimentRun.name == "feature_segment_paper_ab_30m"))
+
+    assert report["policy"]["opens_paper_trades"] is False
+    assert report["selected_candidate_count"] == 1
+    assert report["arms"]["candidate"]["trade_count"] == 6
+    assert report["arms"]["matched_control"]["trade_count"] == 6
+    assert report["arms"]["matched_edge"]["avg_return_delta"] > 0
     assert paper_count == 0
     assert experiment is not None
     assert experiment.status == "research"

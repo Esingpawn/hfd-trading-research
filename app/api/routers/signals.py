@@ -4,7 +4,12 @@ from fastapi import APIRouter, Query
 
 from app.api.deps import SessionDep
 from app.services.experiment_effectiveness import experiment_feature_effectiveness
-from app.services.feature_candidates import feature_candidate_screen, feature_paper_ab
+from app.services.feature_candidates import (
+    feature_candidate_screen,
+    feature_paper_ab,
+    feature_segment_candidate_screen,
+    feature_segment_paper_ab,
+)
 from app.services.features import (
     backfill_feature_events,
     backfill_feature_labels,
@@ -230,6 +235,98 @@ async def persist_feature_paper_ab_report(
         min_avg_return=min_avg_return,
         segment_min_samples=segment_min_samples,
         min_segments=min_segments,
+        candidate_limit=candidate_limit,
+        limit=limit,
+        persist=True,
+    )
+
+
+@router.get("/features/segment-candidates")
+async def feature_segment_candidates(
+    session: SessionDep,
+    horizon: str = Query(default="30m", pattern="^(30m|1h|4h|24h)$"),
+    min_samples: int = Query(default=30, ge=1, le=5000),
+    min_win_rate: float = Query(default=0.52, ge=0.0, le=1.0),
+    min_profit_factor: float = Query(default=1.2, ge=0.0, le=1000.0),
+    min_avg_return: float = Query(default=0.0, ge=-1.0, le=1.0),
+    limit: int = Query(default=20000, ge=1, le=100000),
+) -> dict[str, object]:
+    return await feature_segment_candidate_screen(
+        session,
+        horizon=horizon,
+        min_samples=min_samples,
+        min_win_rate=min_win_rate,
+        min_profit_factor=min_profit_factor,
+        min_avg_return=min_avg_return,
+        limit=limit,
+        persist=False,
+    )
+
+
+@router.post("/features/segment-candidates")
+async def persist_feature_segment_candidates(
+    session: SessionDep,
+    horizon: str = Query(default="30m", pattern="^(30m|1h|4h|24h)$"),
+    min_samples: int = Query(default=30, ge=1, le=5000),
+    min_win_rate: float = Query(default=0.52, ge=0.0, le=1.0),
+    min_profit_factor: float = Query(default=1.2, ge=0.0, le=1000.0),
+    min_avg_return: float = Query(default=0.0, ge=-1.0, le=1.0),
+    limit: int = Query(default=20000, ge=1, le=100000),
+) -> dict[str, object]:
+    return await feature_segment_candidate_screen(
+        session,
+        horizon=horizon,
+        min_samples=min_samples,
+        min_win_rate=min_win_rate,
+        min_profit_factor=min_profit_factor,
+        min_avg_return=min_avg_return,
+        limit=limit,
+        persist=True,
+    )
+
+
+@router.get("/features/segment-paper-ab")
+async def feature_segment_paper_ab_report(
+    session: SessionDep,
+    horizon: str = Query(default="30m", pattern="^(30m|1h|4h|24h)$"),
+    min_samples: int = Query(default=30, ge=1, le=5000),
+    min_win_rate: float = Query(default=0.52, ge=0.0, le=1.0),
+    min_profit_factor: float = Query(default=1.2, ge=0.0, le=1000.0),
+    min_avg_return: float = Query(default=0.0, ge=-1.0, le=1.0),
+    candidate_limit: int = Query(default=50, ge=1, le=500),
+    limit: int = Query(default=20000, ge=1, le=100000),
+) -> dict[str, object]:
+    return await feature_segment_paper_ab(
+        session,
+        horizon=horizon,
+        min_samples=min_samples,
+        min_win_rate=min_win_rate,
+        min_profit_factor=min_profit_factor,
+        min_avg_return=min_avg_return,
+        candidate_limit=candidate_limit,
+        limit=limit,
+        persist=False,
+    )
+
+
+@router.post("/features/segment-paper-ab")
+async def persist_feature_segment_paper_ab_report(
+    session: SessionDep,
+    horizon: str = Query(default="30m", pattern="^(30m|1h|4h|24h)$"),
+    min_samples: int = Query(default=30, ge=1, le=5000),
+    min_win_rate: float = Query(default=0.52, ge=0.0, le=1.0),
+    min_profit_factor: float = Query(default=1.2, ge=0.0, le=1000.0),
+    min_avg_return: float = Query(default=0.0, ge=-1.0, le=1.0),
+    candidate_limit: int = Query(default=50, ge=1, le=500),
+    limit: int = Query(default=20000, ge=1, le=100000),
+) -> dict[str, object]:
+    return await feature_segment_paper_ab(
+        session,
+        horizon=horizon,
+        min_samples=min_samples,
+        min_win_rate=min_win_rate,
+        min_profit_factor=min_profit_factor,
+        min_avg_return=min_avg_return,
         candidate_limit=candidate_limit,
         limit=limit,
         persist=True,

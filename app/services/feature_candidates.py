@@ -150,6 +150,139 @@ async def feature_paper_ab(
     return report
 
 
+async def feature_segment_candidate_screen(
+    session: AsyncSession,
+    *,
+    horizon: str = "30m",
+    min_samples: int = DEFAULT_MIN_SAMPLES,
+    min_win_rate: float = DEFAULT_MIN_WIN_RATE,
+    min_profit_factor: float = DEFAULT_MIN_PROFIT_FACTOR,
+    min_avg_return: float = DEFAULT_MIN_AVG_RETURN,
+    limit: int = 20000,
+    persist: bool = False,
+) -> dict[str, Any]:
+    _validate_horizon(horizon)
+    thresholds = _thresholds(
+        min_samples=min_samples,
+        min_win_rate=min_win_rate,
+        min_profit_factor=min_profit_factor,
+        min_avg_return=min_avg_return,
+        segment_min_samples=min_samples,
+        min_segments=1,
+    )
+    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
+    rows = _segment_candidate_rows(pairs, thresholds=thresholds)
+    candidates = [row for row in rows if row["paper_ab_ready"]]
+    report: dict[str, Any] = {
+        "horizon": horizon,
+        "limit": limit,
+        "labeled_count": len(pairs),
+        "segment_group_count": len(rows),
+        "candidate_count": len(candidates),
+        "thresholds": thresholds,
+        "policy": _research_policy(),
+        "candidates": candidates,
+        "rejected_summary": _rejection_summary(rows),
+        "by_feature": _segment_candidate_feature_summary(candidates),
+        "all_segments": rows,
+    }
+    if persist:
+        report["experiment_run"] = await _persist_experiment(
+            session,
+            name=f"feature_segment_candidates_{horizon}",
+            scope={"horizon": horizon, "limit": limit, "labeled_count": len(pairs)},
+            params=thresholds,
+            metrics=report,
+            notes="Research-only segment-aware feature screening; does not affect strategy scoring or trading.",
+        )
+    return report
+
+
+async def feature_segment_paper_ab(
+    session: AsyncSession,
+    *,
+    horizon: str = "30m",
+    min_samples: int = DEFAULT_MIN_SAMPLES,
+    min_win_rate: float = DEFAULT_MIN_WIN_RATE,
+    min_profit_factor: float = DEFAULT_MIN_PROFIT_FACTOR,
+    min_avg_return: float = DEFAULT_MIN_AVG_RETURN,
+    candidate_limit: int = 50,
+    limit: int = 20000,
+    persist: bool = False,
+) -> dict[str, Any]:
+    segment_report = await feature_segment_candidate_screen(
+        session,
+        horizon=horizon,
+        min_samples=min_samples,
+        min_win_rate=min_win_rate,
+        min_profit_factor=min_profit_factor,
+        min_avg_return=min_avg_return,
+        limit=limit,
+        persist=False,
+    )
+    selected = segment_report["candidates"][:candidate_limit]
+    selected_keys = {str(row["segment_key"]) for row in selected}
+    selected_symbol_timeframes = {str(row["symbol_timeframe"]) for row in selected}
+    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
+    candidate_pairs = [(event, label) for event, label in pairs if _segment_key(event) in selected_keys]
+    matched_control_pairs = [
+        (event, label)
+        for event, label in pairs
+        if _symbol_timeframe(event) in selected_symbol_timeframes and _segment_key(event) not in selected_keys
+    ]
+    all_control_pairs = [(event, label) for event, label in pairs if _segment_key(event) not in selected_keys]
+    candidate_stats = _pseudo_trade_stats(candidate_pairs)
+    matched_control_stats = _pseudo_trade_stats(matched_control_pairs)
+    all_control_stats = _pseudo_trade_stats(all_control_pairs)
+    report: dict[str, Any] = {
+        "horizon": horizon,
+        "limit": limit,
+        "candidate_limit": candidate_limit,
+        "selected_candidate_count": len(selected),
+        "selected_segment_keys": [row["segment_key"] for row in selected],
+        "thresholds": segment_report["thresholds"],
+        "policy": _research_policy(),
+        "data_quality": {
+            "labeled_count": len(pairs),
+            "candidate_pseudo_trade_count": candidate_stats["trade_count"],
+            "matched_control_pseudo_trade_count": matched_control_stats["trade_count"],
+            "all_control_pseudo_trade_count": all_control_stats["trade_count"],
+            "status": "ready" if selected else "no_segment_candidate_features",
+        },
+        "arms": {
+            "candidate": candidate_stats,
+            "matched_control": matched_control_stats,
+            "all_control": all_control_stats,
+            "matched_edge": _arm_edge(candidate_stats, matched_control_stats),
+            "all_edge": _arm_edge(candidate_stats, all_control_stats),
+        },
+        "per_segment": [
+            {
+                **row,
+                "pseudo_trade_metrics": _pseudo_trade_stats(
+                    [(event, label) for event, label in candidate_pairs if _segment_key(event) == row["segment_key"]]
+                ),
+            }
+            for row in selected
+        ],
+        "segment_screen": {
+            "candidate_count": segment_report["candidate_count"],
+            "rejected_summary": segment_report["rejected_summary"],
+            "by_feature": segment_report["by_feature"],
+        },
+    }
+    if persist:
+        report["experiment_run"] = await _persist_experiment(
+            session,
+            name=f"feature_segment_paper_ab_{horizon}",
+            scope={"horizon": horizon, "limit": limit, "candidate_limit": candidate_limit},
+            params=segment_report["thresholds"],
+            metrics=report,
+            notes="Report-only segment-aware paper A/B using feature labels as pseudo-trades; no PaperTrade rows are opened.",
+        )
+    return report
+
+
 async def _labeled_feature_pairs(
     session: AsyncSession,
     *,
@@ -231,6 +364,58 @@ def _candidate_rows(
     )
 
 
+def _segment_candidate_rows(
+    pairs: list[tuple[FeatureEventModel, FeatureLabel]],
+    *,
+    thresholds: dict[str, Any],
+) -> list[dict[str, Any]]:
+    buckets: dict[str, list[tuple[FeatureEventModel, FeatureLabel]]] = {}
+    for event, label in pairs:
+        buckets.setdefault(_segment_key(event), []).append((event, label))
+    rows = []
+    for segment_key, items in buckets.items():
+        stats = _pseudo_trade_stats(items)
+        first = items[0][0]
+        reasons = _segment_candidate_reasons(stats, thresholds=thresholds)
+        promotion_status = "segment_candidate" if not reasons else "rejected"
+        rows.append(
+            {
+                "segment_key": segment_key,
+                "feature_key": _feature_key(first),
+                "symbol_timeframe": _symbol_timeframe(first),
+                "indicator": first.indicator,
+                "feature_name": first.feature_name,
+                "subtype": first.subtype,
+                "direction": first.direction,
+                "symbol": first.symbol,
+                "timeframe": first.timeframe,
+                "sample_count": stats["trade_count"],
+                "win_rate": stats["win_rate"],
+                "avg_return": stats["avg_return"],
+                "median_return": stats["median_return"],
+                "profit_factor": stats["profit_factor"],
+                "avg_mfe": stats["avg_mfe"],
+                "avg_mae": stats["avg_mae"],
+                "avg_strength": _avg_strength(items),
+                "rejection_reasons": reasons,
+                "promotion_status": promotion_status,
+                "paper_ab_ready": promotion_status == "segment_candidate",
+                "used_for_execution_weights": False,
+                "used_for_opening_decisions": False,
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["paper_ab_ready"],
+            row["avg_return"] if row["avg_return"] is not None else -999.0,
+            row["win_rate"] if row["win_rate"] is not None else 0.0,
+            row["sample_count"],
+        ),
+        reverse=True,
+    )
+
+
 def _segment_report(
     items: list[tuple[FeatureEventModel, FeatureLabel]],
     *,
@@ -286,6 +471,19 @@ def _candidate_reasons(
         reasons.append("segment_count_below_minimum")
     if segment_report["weak_segments"]:
         reasons.append("weak_segments")
+    return reasons
+
+
+def _segment_candidate_reasons(stats: dict[str, Any], *, thresholds: dict[str, Any]) -> list[str]:
+    reasons = []
+    if stats["trade_count"] < thresholds["min_samples"]:
+        reasons.append("sample_count_below_minimum")
+    if stats["avg_return"] is None or stats["avg_return"] <= thresholds["min_avg_return"]:
+        reasons.append("avg_return_below_minimum")
+    if stats["win_rate"] is None or stats["win_rate"] < thresholds["min_win_rate"]:
+        reasons.append("win_rate_below_minimum")
+    if stats["profit_factor"] is None or stats["profit_factor"] < thresholds["min_profit_factor"]:
+        reasons.append("profit_factor_below_minimum")
     return reasons
 
 
@@ -391,8 +589,49 @@ def _rejection_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(counter.items()))
 
 
+def _segment_candidate_feature_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        buckets.setdefault(str(row["feature_key"]), []).append(row)
+    summary = []
+    for feature_key, items in buckets.items():
+        total_samples = sum(int(row["sample_count"] or 0) for row in items)
+        weighted_return = _weighted_mean(items, "avg_return", "sample_count")
+        weighted_win_rate = _weighted_mean(items, "win_rate", "sample_count")
+        first = items[0]
+        summary.append(
+            {
+                "feature_key": feature_key,
+                "indicator": first["indicator"],
+                "feature_name": first["feature_name"],
+                "subtype": first["subtype"],
+                "direction": first["direction"],
+                "segment_count": len(items),
+                "sample_count": total_samples,
+                "weighted_avg_return": weighted_return,
+                "weighted_win_rate": weighted_win_rate,
+                "segments": [row["symbol_timeframe"] for row in items[:12]],
+                "used_for_execution_weights": False,
+                "used_for_opening_decisions": False,
+            }
+        )
+    return sorted(
+        summary,
+        key=lambda row: (row["weighted_avg_return"] or -999.0, row["weighted_win_rate"] or 0.0, row["sample_count"]),
+        reverse=True,
+    )
+
+
 def _feature_key(event: FeatureEventModel) -> str:
     return f"{event.feature_name}:{event.subtype}:{event.direction}"
+
+
+def _symbol_timeframe(event: FeatureEventModel) -> str:
+    return f"{event.symbol}:{event.timeframe}"
+
+
+def _segment_key(event: FeatureEventModel) -> str:
+    return f"{_feature_key(event)}:{event.symbol}:{event.timeframe}"
 
 
 def _avg_strength(items: list[tuple[FeatureEventModel, FeatureLabel]]) -> float | None:
@@ -420,6 +659,19 @@ def _delta(left: Any, right: Any) -> float | None:
     if isinstance(left, (int, float)) and isinstance(right, (int, float)):
         return float(left) - float(right)
     return None
+
+
+def _weighted_mean(rows: list[dict[str, Any]], value_key: str, weight_key: str) -> float | None:
+    total_weight = 0
+    total = 0.0
+    for row in rows:
+        value = row.get(value_key)
+        weight = int(row.get(weight_key) or 0)
+        if not isinstance(value, (int, float)) or weight <= 0:
+            continue
+        total += float(value) * weight
+        total_weight += weight
+    return total / total_weight if total_weight else None
 
 
 def _validate_horizon(horizon: str) -> None:
