@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.constants import ASSETS, CORE_INDICATORS, REQUIRED_SCORING_INDICATORS, TIMEFRAMES
 from app.models import PriceSnapshot, SignalSnapshot, StrategyDecision
 from app.services.completeness import _as_aware, _is_stale
+from app.services.raw_payloads import payload_for_snapshot
 from app.services.risk import build_trade_levels, template_for_tier
 
 
@@ -183,7 +184,7 @@ def _state_from_snapshot(
             True,
             age_minutes,
         )
-    zones = snapshot.raw_payload.get("smart_money_cost") or []
+    zones = payload_for_snapshot(snapshot).get("smart_money_cost") or []
     if not zones:
         return TimeframeState(timeframe, interval, "empty", None, None, None, snapshot.id)
     zone = zones[-1]

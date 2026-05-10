@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import EXPERIMENT_INDICATORS, HFD_INDICATORS
 from app.models import SignalSnapshot
+from app.services.raw_payloads import payload_for_snapshot
 
 
 HORIZON_BARS: dict[str, int] = {"30m": 1, "1h": 2, "4h": 8, "24h": 48}
@@ -46,7 +47,7 @@ async def experiment_feature_effectiveness(
     series_count: dict[str, int] = {}
     for snapshot in snapshots:
         series_count[snapshot.indicator] = series_count.get(snapshot.indicator, 0) + 1
-        raw_payload = snapshot.raw_payload or {}
+        raw_payload = payload_for_snapshot(snapshot)
         payload_fingerprints.setdefault(snapshot.indicator, set()).add(_payload_fingerprint(raw_payload))
         events.extend(
             _events_from_snapshot(
@@ -102,7 +103,7 @@ def _events_from_snapshot(
     horizon_bars: int,
     limit_per_series: int,
 ) -> list[FeatureEvent]:
-    raw_payload = snapshot.raw_payload or {}
+    raw_payload = payload_for_snapshot(snapshot)
     klines = _normalize_klines(raw_payload.get("klines") or [])
     if len(klines) <= horizon_bars + 1:
         return []

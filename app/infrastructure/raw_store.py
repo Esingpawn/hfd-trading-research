@@ -31,6 +31,28 @@ class LocalRawPayloadStore:
             raise ValueError(f"Raw payload path escapes root: {uri}")
         return path
 
+    def read_json(
+        self,
+        uri: str,
+        *,
+        compression: str | None = "gzip",
+        sha256: str | None = None,
+    ) -> dict[str, Any]:
+        path = self.resolve(uri)
+        if compression in (None, "", "none"):
+            raw_bytes = path.read_bytes()
+        elif compression == "gzip":
+            with gzip.open(path, "rb") as handle:
+                raw_bytes = handle.read()
+        else:
+            raise ValueError(f"Unsupported raw payload compression: {compression}")
+        if sha256 and hashlib.sha256(raw_bytes).hexdigest() != sha256:
+            raise ValueError(f"Raw payload sha256 mismatch: {uri}")
+        payload = json.loads(raw_bytes.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"Raw payload must be a JSON object: {uri}")
+        return payload
+
     def write_json(
         self,
         *,

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from app.services.raw_payloads import payload_for_snapshot
+
 
 @dataclass(frozen=True)
 class RiskTemplate:
@@ -191,7 +193,7 @@ def _target_candidates(
                 )
             )
     for indicator, snapshot in snapshots.items():
-        payload = getattr(snapshot, "raw_payload", {}) or {}
+        payload = payload_for_snapshot(snapshot)
         for source_key, priority in (
             ("heatmap_data", 3.0),
             ("smart_money_cost", 2.0),
@@ -255,7 +257,7 @@ def _stop_candidates(
                 )
             )
     for indicator, snapshot in snapshots.items():
-        payload = getattr(snapshot, "raw_payload", {}) or {}
+        payload = payload_for_snapshot(snapshot)
         for source_key, priority in (
             ("heatmap_data", 3.0),
             ("smart_money_cost", 2.3),

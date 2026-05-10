@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from app.infrastructure.raw_store import LocalRawPayloadStore
 from app.models import SignalSnapshot
 from app.services.strategy import _score_states, _state_from_snapshot, TimeframeState
 
@@ -204,6 +205,64 @@ def test_stale_cost_snapshot_does_not_create_directional_bias() -> None:
 
     assert state.bias == "stale"
     assert state.is_stale
+
+
+def test_state_from_snapshot_reads_externalized_raw_payload(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("RAW_PAYLOAD_DIR", str(tmp_path))
+    store = LocalRawPayloadStore(tmp_path)
+    ref = store.write_json(
+        payload={"smart_money_cost": [{"type": "Accumulation", "avg_price": 100.0, "status": "Ongoing"}]},
+        symbol="BTCUSDT",
+        timeframe="short",
+        indicator="smart_money_cost",
+        snapshot_id="snapshot-1",
+        collected_at=datetime.now(timezone.utc),
+    )
+    snapshot = SignalSnapshot(
+        id="snapshot-1",
+        symbol="BTCUSDT",
+        asset_tier="core",
+        timeframe="short",
+        interval="30m",
+        indicator="smart_money_cost",
+        endpoint="/api/pro/pro_data",
+        raw_payload={},
+        raw_payload_uri=ref.uri,
+        raw_payload_sha256=ref.sha256,
+        raw_payload_bytes=ref.bytes,
+        raw_payload_compression=ref.compression,
+        summary_payload={},
+        collected_at=datetime.now(timezone.utc),
+    )
+
+    state = _state_from_snapshot(snapshot, "short", "30m", 100.0)
+
+    assert state.bias == "long"
+    assert state.avg_price == 100.0
+
+
+def test_state_from_snapshot_tolerates_missing_externalized_payload(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("RAW_PAYLOAD_DIR", str(tmp_path))
+    snapshot = SignalSnapshot(
+        id="snapshot-1",
+        symbol="BTCUSDT",
+        asset_tier="core",
+        timeframe="short",
+        interval="30m",
+        indicator="smart_money_cost",
+        endpoint="/api/pro/pro_data",
+        raw_payload={},
+        raw_payload_uri="local://missing.json.gz",
+        raw_payload_sha256="0" * 64,
+        raw_payload_bytes=1,
+        raw_payload_compression="gzip",
+        summary_payload={},
+        collected_at=datetime.now(timezone.utc),
+    )
+
+    state = _state_from_snapshot(snapshot, "short", "30m", 100.0)
+
+    assert state.bias == "empty"
 
 
 def test_score_observes_when_long_term_state_is_stale() -> None:

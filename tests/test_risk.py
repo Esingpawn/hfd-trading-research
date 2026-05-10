@@ -1,3 +1,6 @@
+from datetime import datetime, timezone
+
+from app.infrastructure.raw_store import LocalRawPayloadStore
 from app.services.risk import build_stop_plan, build_target_plan, build_trade_levels, template_for_tier
 
 
@@ -177,6 +180,34 @@ def test_trade_levels_tolerate_non_numeric_signal_intensity() -> None:
             )()
         },
     )
+
+    assert levels["stop_source"] == "liq_heatmap.heatmap_data"
+    assert levels["target_source"] == "liq_heatmap.heatmap_data"
+
+
+def test_trade_levels_read_externalized_snapshot_payload(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("RAW_PAYLOAD_DIR", str(tmp_path))
+    store = LocalRawPayloadStore(tmp_path)
+    ref = store.write_json(
+        payload={"heatmap_data": [{"price": 98.8, "intensity": 1.0}, {"price": 103.0, "intensity": 1.0}]},
+        symbol="BTCUSDT",
+        timeframe="short",
+        indicator="liq_heatmap",
+        snapshot_id="snapshot-1",
+        collected_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    snapshot = type(
+        "Snapshot",
+        (),
+        {
+            "raw_payload": {},
+            "raw_payload_uri": ref.uri,
+            "raw_payload_sha256": ref.sha256,
+            "raw_payload_compression": ref.compression,
+        },
+    )()
+
+    levels = build_trade_levels("long", 100.0, "core", snapshots={"liq_heatmap": snapshot})
 
     assert levels["stop_source"] == "liq_heatmap.heatmap_data"
     assert levels["target_source"] == "liq_heatmap.heatmap_data"
