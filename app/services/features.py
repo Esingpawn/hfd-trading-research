@@ -34,6 +34,10 @@ FEATURE_LABEL_MAX_LAG: dict[str, timedelta] = {
     "24h": timedelta(hours=2),
 }
 
+FEATURE_REFERENCE_MAX_LAG = timedelta(minutes=45)
+FEATURE_PRICE_MIN_REFERENCE_RATIO = 0.5
+FEATURE_PRICE_MAX_REFERENCE_RATIO = 2.0
+
 FEATURE_SOURCE_KEYS: tuple[str, ...] = (
     "smart_money_cost",
     "trend_price",
@@ -693,15 +697,20 @@ async def _label_payload(
     horizon: str,
 ) -> dict[str, Any]:
     event_ts = _aware(event.event_ts)
+    if event.direction not in ("long", "short"):
+        return {"status": "skipped", "return_pct": None, "mfe": None, "mae": None, "future_price": None, "future_at": None}
     entry = event.event_price
+    base = await _price_at_or_after(session, event.symbol, event_ts)
+    reference_price = _fresh_price(base, event_ts, FEATURE_REFERENCE_MAX_LAG)
     if not entry:
-        base = await _price_at_or_after(session, event.symbol, event_ts)
-        entry = base.price if base else None
+        entry = reference_price
     if not entry:
+        return {"status": "pending", "return_pct": None, "mfe": None, "mae": None, "future_price": None, "future_at": None}
+    if reference_price is None or not _price_near_reference(entry, reference_price):
         return {"status": "skipped", "return_pct": None, "mfe": None, "mae": None, "future_price": None, "future_at": None}
     target_at = event_ts + FEATURE_HORIZONS[horizon]
     future = await _price_at_or_after(session, event.symbol, target_at)
-    if future is None or _aware(future.collected_at) - target_at > FEATURE_LABEL_MAX_LAG[horizon]:
+    if _fresh_price(future, target_at, FEATURE_LABEL_MAX_LAG[horizon]) is None:
         return {"status": "pending", "return_pct": None, "mfe": None, "mae": None, "future_price": None, "future_at": None}
     path = await _prices_between(session, event.symbol, event_ts, _aware(future.collected_at))
     returns = [_directional_return(event.direction, entry, item.price) for item in path]
@@ -729,6 +738,25 @@ async def _price_at_or_after(
         .limit(1)
     )
     return rows.scalar_one_or_none()
+
+
+def _fresh_price(
+    snapshot: PriceSnapshot | None,
+    target_at: datetime,
+    max_lag: timedelta,
+) -> float | None:
+    if snapshot is None:
+        return None
+    if _aware(snapshot.collected_at) - target_at > max_lag:
+        return None
+    return snapshot.price
+
+
+def _price_near_reference(entry: float, reference: float) -> bool:
+    if entry <= 0 or reference <= 0:
+        return False
+    ratio = entry / reference
+    return FEATURE_PRICE_MIN_REFERENCE_RATIO <= ratio <= FEATURE_PRICE_MAX_REFERENCE_RATIO
 
 
 async def _prices_between(

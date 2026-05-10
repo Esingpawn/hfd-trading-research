@@ -199,6 +199,71 @@ async def test_backfill_feature_labels_keeps_stale_future_prices_pending(session
     stored_labels = await session.execute(select(FeatureLabel))
 
     stored = stored_labels.scalar_one()
-    assert labels.labels_pending == 1
-    assert stored.status == "pending"
+    assert labels.labels_skipped == 1
+    assert stored.status == "skipped"
+    assert stored.return_pct is None
+
+
+@pytest.mark.asyncio
+async def test_backfill_feature_labels_skips_neutral_events(session) -> None:
+    rows = klines()
+    item = snapshot(
+        {
+            "klines": rows,
+            "hvn_nodes": [{"price": 100.0, "volume": 5000}],
+        }
+    )
+    item.indicator = "hvn_nodes"
+    session.add(item)
+    observed_at = item.collected_at
+    for minutes, price in [(0, 100.0), (30, 101.0)]:
+        session.add(
+            PriceSnapshot(
+                symbol="BTCUSDT",
+                price=price,
+                raw_payload={},
+                collected_at=observed_at + timedelta(minutes=minutes),
+            )
+        )
+    await session.commit()
+
+    await backfill_feature_events(session, limit=10)
+    labels = await backfill_feature_labels(session, limit=10, horizons=["30m"])
+    stored_labels = await session.execute(select(FeatureLabel))
+
+    stored = stored_labels.scalar_one()
+    assert labels.labels_skipped == 1
+    assert stored.status == "skipped"
+    assert stored.return_pct is None
+
+
+@pytest.mark.asyncio
+async def test_backfill_feature_labels_skips_mismatched_event_price(session) -> None:
+    rows = klines()
+    item = snapshot(
+        {
+            "klines": rows,
+            "inst_choch": [{"timestamp": rows[0][0], "price": 1.0, "type": "CHoCH_Bullish"}],
+        }
+    )
+    session.add(item)
+    observed_at = datetime.fromtimestamp(rows[0][0] / 1000, tz=timezone.utc)
+    for minutes, price in [(0, 100.0), (30, 101.0)]:
+        session.add(
+            PriceSnapshot(
+                symbol="BTCUSDT",
+                price=price,
+                raw_payload={},
+                collected_at=observed_at + timedelta(minutes=minutes),
+            )
+        )
+    await session.commit()
+
+    await backfill_feature_events(session, limit=10)
+    labels = await backfill_feature_labels(session, limit=10, horizons=["30m"])
+    stored_labels = await session.execute(select(FeatureLabel))
+
+    stored = stored_labels.scalar_one()
+    assert labels.labels_skipped == 1
+    assert stored.status == "skipped"
     assert stored.return_pct is None
