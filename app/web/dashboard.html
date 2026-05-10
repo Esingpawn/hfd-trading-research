@@ -1085,6 +1085,16 @@
             <h3>暗流指标映射</h3>
             <div id="indicatorCatalog" class="miniTable"><div class="empty">等待指标映射</div></div>
           </div>
+          <div class="detailBlock" style="margin-top:10px">
+            <h3>候选特征筛选</h3>
+            <div id="featureCandidatesSummary" class="kvList"></div>
+            <div id="featureCandidates" class="miniTable"><div class="empty">等待候选特征</div></div>
+          </div>
+          <div class="detailBlock" style="margin-top:10px">
+            <h3>特征纸上 A/B</h3>
+            <div id="featurePaperAbSummary" class="kvList"></div>
+            <div id="featurePaperAb" class="miniTable"><div class="empty">等待 A/B 报告</div></div>
+          </div>
         </div>
       </article>
 
@@ -1207,6 +1217,8 @@
       weights: null,
       experiments: null,
       experimentEffectiveness: null,
+      featureCandidates: null,
+      featurePaperAb: null,
       selectedSymbol: null,
       selectedTradeId: null,
       paperReview: null
@@ -1939,6 +1951,8 @@
       const weightData = state.weights || {};
       const experiments = state.experiments || {};
       const experimentEffectiveness = state.experimentEffectiveness || {};
+      const featureCandidates = state.featureCandidates || {};
+      const featurePaperAb = state.featurePaperAb || {};
       const signals = data.signals || [];
       const roles = data.roles || [];
       const weights = weightData.weights || [];
@@ -2006,6 +2020,38 @@
         { label:"噪音风险", render: row => esc(noiseRiskText(row.noise_risk)) },
         { label:"建议", render: row => esc(row.recommendation) }
       ], "暂无实验特征检验数据"));
+      setHtml("featureCandidatesSummary", kvRows([
+        ["窗口", esc(featureCandidates.horizon || "30m")],
+        ["已标注", fmt(featureCandidates.labeled_count || 0, 0)],
+        ["候选", fmt(featureCandidates.candidate_count || 0, 0)],
+        ["观察", fmt(featureCandidates.watchlist_count || 0, 0)]
+      ]));
+      setHtml("featureCandidates", table((featureCandidates.candidates || []).slice(0, 8), [
+        { label:"特征", render: row => esc(row.feature_key) },
+        { label:"样本", render: row => fmt(row.sample_count, 0) },
+        { label:"胜率", render: row => pct(row.win_rate, 1) },
+        { label:"平均收益", render: row => coloredPct(row.avg_return) },
+        { label:"收益因子", render: row => fmt(row.profit_factor, 2) },
+        { label:"分段", render: row => `${fmt(row.segment_count || 0, 0)} / ${fmt((row.weak_segments || []).length, 0)}` },
+        { label:"状态", render: row => tag(row.paper_ab_ready ? "ok" : "warn", row.paper_ab_ready ? "A/B 就绪" : esc(row.promotion_status)) }
+      ], "暂无达标候选特征"));
+      const candidateArm = (featurePaperAb.arms || {}).candidate || {};
+      const controlArm = (featurePaperAb.arms || {}).control || {};
+      const edge = (featurePaperAb.arms || {}).edge || {};
+      setHtml("featurePaperAbSummary", kvRows([
+        ["入选特征", fmt(featurePaperAb.selected_candidate_count || 0, 0)],
+        ["候选伪交易", fmt(candidateArm.trade_count || 0, 0)],
+        ["对照伪交易", fmt(controlArm.trade_count || 0, 0)],
+        ["收益差", coloredPct(edge.avg_return_delta)]
+      ]));
+      setHtml("featurePaperAb", table((featurePaperAb.per_candidate || []).slice(0, 8), [
+        { label:"特征", render: row => esc(row.feature_key) },
+        { label:"伪交易", render: row => fmt((row.pseudo_trade_metrics || {}).trade_count || 0, 0) },
+        { label:"胜率", render: row => pct((row.pseudo_trade_metrics || {}).win_rate, 1) },
+        { label:"平均收益", render: row => coloredPct((row.pseudo_trade_metrics || {}).avg_return) },
+        { label:"收益因子", render: row => fmt((row.pseudo_trade_metrics || {}).profit_factor, 2) },
+        { label:"MFE/MAE", render: row => `${coloredPct((row.pseudo_trade_metrics || {}).avg_mfe)} / ${coloredPct((row.pseudo_trade_metrics || {}).avg_mae)}` }
+      ], "暂无 A/B 候选报告"));
       setHtml("indicatorCatalog", table(catalog, [
         { label:"暗流指标", render: row => esc(row.hfd_name) },
         { label:"参数", render: row => `<span class="muted">${esc(row.key)}</span>` },
@@ -2150,7 +2196,7 @@
     async function refreshAll() {
       try {
         log("正在刷新交易研究台...");
-      const [summary, runtime, trades, paperStats, backtests, effectiveness, weights, experiments, experimentEffectiveness, telegram] = await Promise.all([
+      const [summary, runtime, trades, paperStats, backtests, effectiveness, weights, experiments, experimentEffectiveness, featureCandidates, featurePaperAb, telegram] = await Promise.all([
           api("/system/summary"),
           api("/system/runtime").catch(error => ({ error: error.message })),
           api("/paper/trades?limit=12"),
@@ -2160,6 +2206,8 @@
           api("/signals/weights?horizon=4h&min_samples=30").catch(error => ({ error: error.message, weights: [] })),
           api("/signals/experiments").catch(error => ({ error: error.message, weight_sources: [], indicator_catalog: [] })),
           api("/signals/experiment-effectiveness?horizon=4h&min_samples=5").catch(error => ({ error: error.message, indicators: [] })),
+          api("/features/candidates?horizon=30m&min_samples=30&limit=20000").catch(error => ({ error: error.message, candidates: [], watchlist: [] })),
+          api("/features/paper-ab?horizon=30m&min_samples=30&limit=20000&candidate_limit=20").catch(error => ({ error: error.message, arms: {}, per_candidate: [] })),
           withTimeout(
             api("/telegram/status").catch(error => ({ configured:false, error: error.message })),
             6500,
@@ -2176,6 +2224,8 @@
         state.weights = weights;
         state.experiments = experiments;
         state.experimentEffectiveness = experimentEffectiveness;
+        state.featureCandidates = featureCandidates;
+        state.featurePaperAb = featurePaperAb;
         if (trades.length && (!state.selectedTradeId || !trades.some(trade => trade.id === state.selectedTradeId))) {
           state.selectedTradeId = trades[0].id;
         }

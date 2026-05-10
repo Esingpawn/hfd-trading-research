@@ -27,7 +27,15 @@ async def enqueue_task_api(
     notify: bool = Query(default=False),
     limit: int | None = Query(default=None, ge=1),
     horizons: list[str] | None = Query(default=None),
+    horizon: str | None = Query(default=None, pattern="^(30m|1h|4h|24h)$"),
     min_samples: int | None = Query(default=None, ge=1),
+    min_win_rate: float | None = Query(default=None, ge=0.0, le=1.0),
+    min_profit_factor: float | None = Query(default=None, ge=0.0),
+    min_avg_return: float | None = Query(default=None, ge=-1.0, le=1.0),
+    segment_min_samples: int | None = Query(default=None, ge=1),
+    min_segments: int | None = Query(default=None, ge=1),
+    candidate_limit: int | None = Query(default=None, ge=1),
+    persist: bool | None = Query(default=None),
     refresh_labeled: bool = Query(default=False),
 ) -> dict[str, object]:
     payload = {
@@ -40,9 +48,17 @@ async def enqueue_task_api(
             "notify": notify,
             "limit": limit,
             "horizons": horizons,
+            "horizon": horizon,
             "min_samples": min_samples,
+            "min_win_rate": min_win_rate,
+            "min_profit_factor": min_profit_factor,
+            "min_avg_return": min_avg_return,
+            "segment_min_samples": segment_min_samples,
+            "min_segments": min_segments,
+            "candidate_limit": candidate_limit,
+            "persist": persist,
             "refresh_labeled": refresh_labeled,
         }.items()
-        if value not in (None, [], False)
+        if value not in (None, []) and (value is not False or key == "persist")
     }
     return await enqueue_task(session, task_name=task_name, payload=payload)

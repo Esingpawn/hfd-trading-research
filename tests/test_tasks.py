@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.application.tasks import enqueue_task, recent_tasks, run_task_by_id
 from app.db import Base
-from app.models import FeatureEvent, SignalSnapshot, TaskRun
+from app.models import ExperimentRun, FeatureEvent, FeatureLabel, SignalSnapshot, TaskRun
 
 
 @pytest.fixture()
@@ -121,6 +121,68 @@ async def test_run_task_by_id_executes_feature_reset(session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_task_by_id_executes_feature_candidate_screen(session) -> None:
+    await _add_feature_group(session, symbol="BTCUSDT")
+    await _add_feature_group(session, symbol="ETHUSDT")
+    item = TaskRun(
+        task_name="features.candidates",
+        payload={"min_samples": 6, "segment_min_samples": 3, "min_segments": 2, "persist": True},
+        result={},
+    )
+    session.add(item)
+    await session.commit()
+
+    result = await run_task_by_id(session, item.id)
+    experiment = await session.scalar(select(ExperimentRun).where(ExperimentRun.name == "feature_candidates_30m"))
+
+    assert result["status"] == "completed"
+    assert result["result"]["execution"]["candidate_count"] == 1
+    assert experiment is not None
+    assert experiment.status == "research"
+
+
+@pytest.mark.asyncio
+async def test_run_task_by_id_executes_feature_paper_ab(session) -> None:
+    await _add_feature_group(session, symbol="BTCUSDT")
+    await _add_feature_group(session, symbol="ETHUSDT")
+    item = TaskRun(
+        task_name="features.paper_ab",
+        payload={"min_samples": 6, "segment_min_samples": 3, "min_segments": 2, "persist": True},
+        result={},
+    )
+    session.add(item)
+    await session.commit()
+
+    result = await run_task_by_id(session, item.id)
+    experiment = await session.scalar(select(ExperimentRun).where(ExperimentRun.name == "feature_paper_ab_30m"))
+
+    assert result["status"] == "completed"
+    assert result["result"]["execution"]["policy"]["opens_paper_trades"] is False
+    assert result["result"]["execution"]["selected_candidate_count"] == 1
+    assert experiment is not None
+
+
+@pytest.mark.asyncio
+async def test_run_task_by_id_honors_feature_candidate_persist_false(session) -> None:
+    await _add_feature_group(session, symbol="BTCUSDT")
+    await _add_feature_group(session, symbol="ETHUSDT")
+    item = TaskRun(
+        task_name="features.candidates",
+        payload={"min_samples": 6, "segment_min_samples": 3, "min_segments": 2, "persist": False},
+        result={},
+    )
+    session.add(item)
+    await session.commit()
+
+    result = await run_task_by_id(session, item.id)
+    experiments = await session.execute(select(ExperimentRun))
+
+    assert result["status"] == "completed"
+    assert result["result"]["execution"].get("experiment_run") is None
+    assert experiments.scalars().all() == []
+
+
+@pytest.mark.asyncio
 async def test_run_task_by_id_records_failure(session) -> None:
     item = TaskRun(task_name="unknown.task", payload={}, result={})
     session.add(item)
@@ -133,3 +195,39 @@ async def test_run_task_by_id_records_failure(session) -> None:
     stored = rows.scalar_one()
     assert stored.status == "failed"
     assert "unsupported task_name" in str(stored.error)
+
+
+async def _add_feature_group(session, *, symbol: str) -> None:
+    base_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index, return_pct in enumerate([0.012, 0.01, 0.009, 0.008, 0.011, -0.002]):
+        event = FeatureEvent(
+            snapshot_id=f"snapshot-{symbol}-{index}",
+            symbol=symbol,
+            asset_tier="core",
+            timeframe="short",
+            interval="30m",
+            indicator="inst_choch",
+            event_key=f"event-{symbol}-{index}",
+            feature_name="inst_choch",
+            direction="long",
+            event_ts=base_ts,
+            event_price=100.0,
+            strength=0.7,
+            subtype="CHoCH_Bullish",
+            source_payload_key="inst_choch",
+            context={},
+        )
+        session.add(event)
+        await session.flush()
+        session.add(
+            FeatureLabel(
+                feature_event_id=event.id,
+                horizon="30m",
+                return_pct=return_pct,
+                mfe=max(return_pct, 0.0),
+                mae=min(return_pct, 0.0),
+                future_price=100.0 * (1 + return_pct),
+                future_at=base_ts,
+                status="labeled",
+            )
+        )

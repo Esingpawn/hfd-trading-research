@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.infrastructure.queue import build_queue
 from app.models import TaskRun
 from app.services.collector import SnapshotCollector
+from app.services.feature_candidates import feature_candidate_screen, feature_paper_ab
 from app.services.features import (
     backfill_feature_events,
     backfill_feature_labels,
@@ -145,6 +146,33 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
             horizons=_optional_str_list(payload.get("horizons")),
             min_samples=int(payload.get("min_samples") or 5),
         )
+    if task_name in {"features.candidates", "features-candidates"}:
+        return await feature_candidate_screen(
+            session,
+            horizon=_payload_str(payload, "horizon", "30m"),
+            min_samples=_payload_int(payload, "min_samples", 30),
+            min_win_rate=_payload_float(payload, "min_win_rate", 0.52),
+            min_profit_factor=_payload_float(payload, "min_profit_factor", 1.2),
+            min_avg_return=_payload_float(payload, "min_avg_return", 0.0),
+            segment_min_samples=_payload_int(payload, "segment_min_samples", 5),
+            min_segments=_payload_int(payload, "min_segments", 2),
+            limit=_payload_int(payload, "limit", 20000),
+            persist=_payload_bool(payload, "persist", True),
+        )
+    if task_name in {"features.paper_ab", "features-paper-ab"}:
+        return await feature_paper_ab(
+            session,
+            horizon=_payload_str(payload, "horizon", "30m"),
+            min_samples=_payload_int(payload, "min_samples", 30),
+            min_win_rate=_payload_float(payload, "min_win_rate", 0.52),
+            min_profit_factor=_payload_float(payload, "min_profit_factor", 1.2),
+            min_avg_return=_payload_float(payload, "min_avg_return", 0.0),
+            segment_min_samples=_payload_int(payload, "segment_min_samples", 5),
+            min_segments=_payload_int(payload, "min_segments", 2),
+            candidate_limit=_payload_int(payload, "candidate_limit", 20),
+            limit=_payload_int(payload, "limit", 20000),
+            persist=_payload_bool(payload, "persist", True),
+        )
     if task_name in {"storage.maintain", "storage-maintain"}:
         return await run_storage_maintenance(
             session,
@@ -194,3 +222,35 @@ def _optional_str_list(value: Any) -> list[str] | None:
     if isinstance(value, list):
         return [str(item) for item in value]
     return None
+
+
+def _payload_str(payload: dict[str, Any], key: str, default: str) -> str:
+    value = payload.get(key)
+    if value in (None, ""):
+        return default
+    return str(value)
+
+
+def _payload_int(payload: dict[str, Any], key: str, default: int) -> int:
+    value = payload.get(key)
+    if value in (None, ""):
+        return default
+    return int(value)
+
+
+def _payload_float(payload: dict[str, Any], key: str, default: float) -> float:
+    value = payload.get(key)
+    if value in (None, ""):
+        return default
+    return float(value)
+
+
+def _payload_bool(payload: dict[str, Any], key: str, default: bool) -> bool:
+    value = payload.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return bool(value)
