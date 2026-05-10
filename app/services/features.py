@@ -27,6 +27,13 @@ FEATURE_HORIZONS: dict[str, timedelta] = {
     "24h": timedelta(hours=24),
 }
 
+FEATURE_LABEL_MAX_LAG: dict[str, timedelta] = {
+    "30m": timedelta(minutes=45),
+    "1h": timedelta(hours=1),
+    "4h": timedelta(minutes=90),
+    "24h": timedelta(hours=2),
+}
+
 FEATURE_SOURCE_KEYS: tuple[str, ...] = (
     "smart_money_cost",
     "trend_price",
@@ -692,8 +699,9 @@ async def _label_payload(
         entry = base.price if base else None
     if not entry:
         return {"status": "skipped", "return_pct": None, "mfe": None, "mae": None, "future_price": None, "future_at": None}
-    future = await _price_at_or_after(session, event.symbol, event_ts + FEATURE_HORIZONS[horizon])
-    if future is None:
+    target_at = event_ts + FEATURE_HORIZONS[horizon]
+    future = await _price_at_or_after(session, event.symbol, target_at)
+    if future is None or _aware(future.collected_at) - target_at > FEATURE_LABEL_MAX_LAG[horizon]:
         return {"status": "pending", "return_pct": None, "mfe": None, "mae": None, "future_price": None, "future_at": None}
     path = await _prices_between(session, event.symbol, event_ts, _aware(future.collected_at))
     returns = [_directional_return(event.direction, entry, item.price) for item in path]
