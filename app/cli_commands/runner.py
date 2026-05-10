@@ -21,6 +21,12 @@ from app.services.backtest_batch import run_backtest_batch
 from app.services.backtest import run_cost_band_retest_backtest
 from app.services.collection_schedule import research_due_timeframes, research_intervals
 from app.services.collector import SnapshotCollector
+from app.services.features import (
+    backfill_feature_events,
+    backfill_feature_labels,
+    feature_effectiveness,
+    refresh_feature_research,
+)
 from app.services.paper import mark_open_trades, paper_scan
 from app.services.paper_loop import paper_loop_decision
 from app.services.signal_attribution import backfill_signal_outcomes, signal_effectiveness
@@ -256,6 +262,25 @@ def build_parser() -> argparse.ArgumentParser:
     signal_report = subparsers.add_parser("signals-report", help="Show signal effectiveness rankings")
     signal_report.add_argument("--min-samples", type=int, default=1)
     signal_report.add_argument("--horizon", choices=["30m", "1h", "4h", "24h"], default="4h")
+
+    feature_backfill = subparsers.add_parser("features-backfill", help="Backfill standardized feature events")
+    feature_backfill.add_argument("--limit", type=int, default=500)
+    feature_backfill.add_argument("--indicators", nargs="*", help="Indicator keys to scan")
+
+    feature_labels = subparsers.add_parser("features-label", help="Backfill future-return labels for feature events")
+    feature_labels.add_argument("--limit", type=int, default=1000)
+    feature_labels.add_argument("--horizons", nargs="*", choices=["30m", "1h", "4h", "24h"])
+
+    feature_refresh = subparsers.add_parser("features-refresh", help="Backfill feature events, labels, and print effectiveness")
+    feature_refresh.add_argument("--limit", type=int, default=500)
+    feature_refresh.add_argument("--indicators", nargs="*", help="Indicator keys to scan")
+    feature_refresh.add_argument("--horizons", nargs="*", choices=["30m", "1h", "4h", "24h"])
+    feature_refresh.add_argument("--min-samples", type=int, default=5)
+
+    feature_report = subparsers.add_parser("features-report", help="Show feature event effectiveness rankings")
+    feature_report.add_argument("--min-samples", type=int, default=5)
+    feature_report.add_argument("--horizon", choices=["30m", "1h", "4h", "24h"], default="4h")
+    feature_report.add_argument("--limit", type=int, default=10000)
 
     subparsers.add_parser("storage-health", help="Show database storage health")
     storage_maintain = subparsers.add_parser("storage-maintain", help="Run safe database maintenance")
@@ -640,6 +665,53 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 session,
                 min_samples=args.min_samples,
                 horizon=args.horizon,
+            )
+        print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "features-backfill":
+        async with SessionLocal() as session:
+            result = await backfill_feature_events(
+                session,
+                limit=args.limit,
+                indicators=args.indicators,
+            )
+        print(json.dumps(jsonable(result.__dict__), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "features-label":
+        async with SessionLocal() as session:
+            result = await backfill_feature_labels(
+                session,
+                limit=args.limit,
+                horizons=args.horizons,
+            )
+        print(json.dumps(jsonable(result.__dict__), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "features-refresh":
+        async with SessionLocal() as session:
+            result = await refresh_feature_research(
+                session,
+                limit=args.limit,
+                indicators=args.indicators,
+                horizons=args.horizons,
+                min_samples=args.min_samples,
+            )
+        print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "features-report":
+        async with SessionLocal() as session:
+            result = await feature_effectiveness(
+                session,
+                min_samples=args.min_samples,
+                horizon=args.horizon,
+                limit=args.limit,
             )
         print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
         await engine.dispose()

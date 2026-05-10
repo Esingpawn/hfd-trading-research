@@ -26,6 +26,8 @@ async def enqueue_task_api(
     dry_run: bool = Query(default=False),
     notify: bool = Query(default=False),
     limit: int | None = Query(default=None, ge=1),
+    horizons: list[str] | None = Query(default=None),
+    min_samples: int | None = Query(default=None, ge=1),
 ) -> dict[str, object]:
     payload = {
         key: value
@@ -36,6 +38,8 @@ async def enqueue_task_api(
             "dry_run": dry_run,
             "notify": notify,
             "limit": limit,
+            "horizons": horizons,
+            "min_samples": min_samples,
         }.items()
         if value not in (None, [], False)
     }

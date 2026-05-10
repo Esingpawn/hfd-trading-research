@@ -59,6 +59,18 @@ SQLITE_INDEX_SPECS: tuple[SqliteIndexSpec, ...] = (
         "role-level effectiveness summaries",
     ),
     SqliteIndexSpec(
+        "idx_feature_events_indicator_feature_ts",
+        "feature_events",
+        "indicator, feature_name, event_ts",
+        "feature effectiveness grouping and event labeling",
+    ),
+    SqliteIndexSpec(
+        "idx_feature_labels_horizon_status",
+        "feature_labels",
+        "horizon, status",
+        "feature label backfill and effectiveness scans",
+    ),
+    SqliteIndexSpec(
         "idx_paper_trades_status_opened",
         "paper_trades",
         "status, opened_at DESC",

@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import DateTime, Float, Integer, JSON, String, Text
+from sqlalchemy import DateTime, Float, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -49,6 +49,59 @@ class PriceSnapshot(Base):
     raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON)
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
+
+
+class FeatureEvent(Base):
+    __tablename__ = "feature_events"
+    __table_args__ = (
+        UniqueConstraint("event_key", name="uq_feature_events_event_key"),
+        Index("ix_feature_events_indicator_feature_ts", "indicator", "feature_name", "event_ts"),
+        Index("ix_feature_events_symbol_timeframe_ts", "symbol", "timeframe", "event_ts"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    snapshot_id: Mapped[str] = mapped_column(String(36), index=True)
+    symbol: Mapped[str] = mapped_column(String(24), index=True)
+    asset_tier: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    interval: Mapped[str] = mapped_column(String(8), index=True)
+    indicator: Mapped[str] = mapped_column(String(64), index=True)
+    event_key: Mapped[str] = mapped_column(String(64), index=True)
+    feature_name: Mapped[str] = mapped_column(String(120), index=True)
+    direction: Mapped[str] = mapped_column(String(16), index=True)
+    event_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    event_price: Mapped[float | None] = mapped_column(Float)
+    strength: Mapped[float] = mapped_column(Float, default=0.0)
+    subtype: Mapped[str] = mapped_column(String(80), index=True, default="unknown")
+    source_payload_key: Mapped[str] = mapped_column(String(120), index=True)
+    context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
+
+
+class FeatureLabel(Base):
+    __tablename__ = "feature_labels"
+    __table_args__ = (
+        UniqueConstraint("feature_event_id", "horizon", name="uq_feature_labels_event_horizon"),
+        Index("ix_feature_labels_horizon_status", "horizon", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    feature_event_id: Mapped[str] = mapped_column(String(36), index=True)
+    horizon: Mapped[str] = mapped_column(String(16), index=True)
+    return_pct: Mapped[float | None] = mapped_column(Float)
+    mfe: Mapped[float | None] = mapped_column(Float)
+    mae: Mapped[float | None] = mapped_column(Float)
+    future_price: Mapped[float | None] = mapped_column(Float)
+    future_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(32), index=True, default="pending")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, index=True
     )
 

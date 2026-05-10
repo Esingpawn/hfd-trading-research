@@ -9,6 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.infrastructure.queue import build_queue
 from app.models import TaskRun
 from app.services.collector import SnapshotCollector
+from app.services.features import (
+    backfill_feature_events,
+    backfill_feature_labels,
+    refresh_feature_research,
+)
 from app.services.paper import mark_open_trades, paper_scan
 from app.services.signal_attribution import backfill_signal_outcomes
 from app.application.storage import run_storage_maintenance
@@ -110,6 +115,28 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
     if task_name in {"signals.backfill", "signals-backfill"}:
         result = await backfill_signal_outcomes(session, limit=int(payload.get("limit") or 500))
         return result.__dict__
+    if task_name in {"features.backfill", "features-backfill"}:
+        result = await backfill_feature_events(
+            session,
+            limit=int(payload.get("limit") or 500),
+            indicators=_optional_str_list(payload.get("indicators")),
+        )
+        return result.__dict__
+    if task_name in {"features.label", "features-label"}:
+        result = await backfill_feature_labels(
+            session,
+            limit=int(payload.get("limit") or 1000),
+            horizons=_optional_str_list(payload.get("horizons")),
+        )
+        return result.__dict__
+    if task_name in {"features.refresh", "features-refresh"}:
+        return await refresh_feature_research(
+            session,
+            limit=int(payload.get("limit") or 500),
+            indicators=_optional_str_list(payload.get("indicators")),
+            horizons=_optional_str_list(payload.get("horizons")),
+            min_samples=int(payload.get("min_samples") or 5),
+        )
     if task_name in {"storage.maintain", "storage-maintain"}:
         return await run_storage_maintenance(
             session,
@@ -149,3 +176,13 @@ def _json_safe(value: Any) -> Any:
     if hasattr(value, "__dict__"):
         return _json_safe(value.__dict__)
     return value
+
+
+def _optional_str_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return None

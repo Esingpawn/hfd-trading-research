@@ -1,10 +1,12 @@
+from datetime import datetime, timezone
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.application.tasks import enqueue_task, recent_tasks, run_task_by_id
 from app.db import Base
-from app.models import TaskRun
+from app.models import FeatureEvent, SignalSnapshot, TaskRun
 
 
 @pytest.fixture()
@@ -43,6 +45,40 @@ async def test_run_task_by_id_executes_storage_maintenance(session) -> None:
     assert stored.status == "completed"
     assert stored.finished_at is not None
     assert stored.result["execution"]["actions"]["indexes"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_run_task_by_id_executes_feature_backfill(session) -> None:
+    rows = [
+        [1_700_000_000_000, 100, 101, 99, 102, 10],
+        [1_700_001_800_000, 101, 102, 100, 103, 10],
+    ]
+    session.add(
+        SignalSnapshot(
+            symbol="BTCUSDT",
+            asset_tier="core",
+            timeframe="short",
+            interval="30m",
+            indicator="inst_choch",
+            endpoint="/api/pro/pro_data",
+            raw_payload={
+                "klines": rows,
+                "inst_choch": [{"timestamp": rows[0][0], "price": 101, "type": "CHoCH_Bullish"}],
+            },
+            summary_payload={},
+            collected_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+    )
+    item = TaskRun(task_name="features.backfill", payload={"limit": 10}, result={})
+    session.add(item)
+    await session.commit()
+
+    result = await run_task_by_id(session, item.id)
+    stored_events = await session.execute(select(FeatureEvent))
+
+    assert result["status"] == "completed"
+    assert result["result"]["execution"]["events_inserted"] == 1
+    assert len(stored_events.scalars().all()) == 1
 
 
 @pytest.mark.asyncio
