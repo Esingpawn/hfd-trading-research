@@ -7,7 +7,7 @@ import json
 from statistics import mean
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -80,6 +80,30 @@ NESTED_FEATURE_KEYS: tuple[str, ...] = (
     "heatmap_data",
 )
 
+INDICATOR_SOURCE_KEYS: dict[str, tuple[str, ...]] = {
+    "smart_money_cost": ("smart_money_cost",),
+    "trend_price": ("order_blocks",),
+    "liq_heatmap": ("heatmap_data",),
+    "liquidity_sweep": ("liquidity_sweep",),
+    "micro_poc": ("micro_poc",),
+    "cross_exchange_resonance": ("cross_exchange_resonance",),
+    "fair_value_gap": ("order_blocks",),
+    "cascade_liquidation_zones": ("order_blocks",),
+    "retail_stop_loss": ("order_blocks",),
+    "inst_choch": ("inst_choch",),
+    "trend_purity": ("trend_purity",),
+    "liquidity_vacuum": ("order_blocks",),
+}
+
+CONTEXT_ONLY_INDICATORS: set[str] = {
+    "hvn_nodes",
+    "inst_volume_profile",
+    "liquidation_fuel",
+}
+
+PRICE_OPTIONAL_INDICATORS: set[str] = {"trend_exhaustion"}
+MIN_STRENGTH_BY_INDICATOR: dict[str, float] = {"trend_exhaustion": 1e-12}
+
 
 @dataclass(frozen=True)
 class ExtractedFeatureEvent:
@@ -118,6 +142,12 @@ class FeatureLabelBackfillResult:
     labels_refreshed: int
 
 
+@dataclass(frozen=True)
+class FeatureResetResult:
+    events_deleted: int
+    labels_deleted: int
+
+
 def summarize_signal_payload(payload: dict[str, Any], indicator: str) -> dict[str, Any]:
     klines = payload.get("klines") or []
     indicator_payload = payload.get(indicator)
@@ -150,12 +180,15 @@ def extract_feature_events(
     rows: list[ExtractedFeatureEvent] = []
     for source_key, source_index, item in _feature_items(snapshot.indicator, raw_payload):
         source_ts = _feature_ts(item)
-        event_ts = source_ts or _aware(snapshot.collected_at)
+        event_ts = _aware(snapshot.collected_at)
         event_price = _feature_price(item)
         if event_price is None:
             event_price = _nearest_kline_close(klines, source_ts) or _last_kline_close(klines)
         direction = _feature_direction(item)
         subtype = _feature_subtype(item)
+        strength = _feature_strength(item)
+        if not _is_researchable_event(snapshot.indicator, direction, event_price, strength):
+            continue
         feature_name = _feature_name(snapshot.indicator, source_key)
         event_key = _event_key(
             symbol=snapshot.symbol,
@@ -181,7 +214,7 @@ def extract_feature_events(
                 direction=direction,
                 event_ts=event_ts,
                 event_price=event_price,
-                strength=_feature_strength(item),
+                strength=strength,
                 subtype=subtype,
                 source_payload_key=source_key[:120],
                 context={
@@ -276,6 +309,7 @@ async def backfill_feature_labels(
     *,
     limit: int = 1000,
     horizons: list[str] | None = None,
+    refresh_labeled: bool = False,
     commit: bool = True,
 ) -> FeatureLabelBackfillResult:
     selected_horizons = _normalize_horizons(horizons)
@@ -302,7 +336,7 @@ async def backfill_feature_labels(
     for event in events:
         for horizon in selected_horizons:
             label = existing.get((event.id, horizon))
-            if label is not None and label.status == "labeled":
+            if label is not None and label.status == "labeled" and not refresh_labeled:
                 continue
             label_payload = await _label_payload(session, event, horizon)
             if label is None:
@@ -334,6 +368,33 @@ async def backfill_feature_labels(
     )
 
 
+async def reset_feature_research(
+    session: AsyncSession,
+    *,
+    indicators: list[str] | None = None,
+    commit: bool = True,
+) -> FeatureResetResult:
+    event_query = select(FeatureEventModel.id)
+    if indicators:
+        event_query = event_query.where(FeatureEventModel.indicator.in_(indicators))
+    rows = await session.execute(event_query)
+    event_ids = list(rows.scalars().all())
+    if not event_ids:
+        return FeatureResetResult(events_deleted=0, labels_deleted=0)
+    label_result = await session.execute(
+        delete(FeatureLabel).where(FeatureLabel.feature_event_id.in_(event_ids))
+    )
+    event_result = await session.execute(
+        delete(FeatureEventModel).where(FeatureEventModel.id.in_(event_ids))
+    )
+    if commit:
+        await session.commit()
+    return FeatureResetResult(
+        events_deleted=int(event_result.rowcount or 0),
+        labels_deleted=int(label_result.rowcount or 0),
+    )
+
+
 async def refresh_feature_research(
     session: AsyncSession,
     *,
@@ -352,6 +413,7 @@ async def refresh_feature_research(
         session,
         limit=limit * 10,
         horizons=horizons,
+        refresh_labeled=True,
         commit=False,
     )
     await session.commit()
@@ -410,6 +472,7 @@ async def feature_effectiveness(
         "event_count": event_count,
         "label_count": label_count,
         "labeled_count": len(pairs),
+        "label_quality": _label_quality(event_count, label_count, len(pairs)),
         "policy": {
             "used_for_execution_weights": False,
             "used_for_opening_decisions": False,
@@ -419,6 +482,9 @@ async def feature_effectiveness(
         "by_indicator": _group_feature_effectiveness(pairs, min_samples=min_samples, key="indicator"),
         "by_timeframe": _group_feature_effectiveness(pairs, min_samples=min_samples, key="timeframe"),
         "by_symbol": _group_feature_effectiveness(pairs, min_samples=min_samples, key="symbol"),
+        "by_direction": _group_feature_effectiveness(pairs, min_samples=min_samples, key="direction"),
+        "by_symbol_timeframe": _group_feature_effectiveness(pairs, min_samples=min_samples, key="symbol_timeframe"),
+        "by_indicator_timeframe": _group_feature_effectiveness(pairs, min_samples=min_samples, key="indicator_timeframe"),
     }
 
 
@@ -432,16 +498,13 @@ def _safe_len(value: Any) -> int | None:
 
 def _feature_items(indicator: str, payload: dict[str, Any]) -> list[tuple[str, int, Any]]:
     rows: list[tuple[str, int, Any]] = []
-    seen: set[str] = set()
-    for key in (indicator, *FEATURE_SOURCE_KEYS):
-        if key in seen or key not in payload or key == "klines":
+    source_keys = INDICATOR_SOURCE_KEYS.get(indicator)
+    if source_keys is None:
+        source_keys = (indicator,) if indicator in CONTEXT_ONLY_INDICATORS else ()
+    for key in source_keys:
+        if key not in payload or key == "klines":
             continue
-        seen.add(key)
         rows.extend(_items_from_value(key, payload[key]))
-    for key, value in payload.items():
-        if key in seen or key == "klines":
-            continue
-        rows.extend(_items_from_value(str(key), value))
     return rows
 
 
@@ -558,6 +621,7 @@ def _feature_price(item: Any) -> float | None:
     if isinstance(item, dict):
         for key in (
             "price",
+            "poc_price",
             "event_price",
             "level_price",
             "avg_price",
@@ -611,7 +675,7 @@ def _feature_subtype(item: Any) -> str:
 
 def _feature_strength(item: Any) -> float:
     if isinstance(item, dict):
-        for key in ("strength", "score", "confidence", "intensity", "purity", "volume", "total_vol", "buy_vol", "sell_vol", "size"):
+        for key in ("strength", "score", "confidence", "intensity", "exhaustion", "purity", "volume", "total_vol", "buy_vol", "sell_vol", "size"):
             value = _positive_float(item.get(key))
             if value is not None:
                 return value
@@ -620,6 +684,19 @@ def _feature_strength(item: Any) -> float:
 
 def _feature_name(indicator: str, source_key: str) -> str:
     return indicator if source_key == indicator else f"{indicator}.{source_key}"[:120]
+
+
+def _is_researchable_event(
+    indicator: str,
+    direction: str,
+    event_price: float | None,
+    strength: float,
+) -> bool:
+    if direction not in ("long", "short"):
+        return False
+    if event_price is None and indicator not in PRICE_OPTIONAL_INDICATORS:
+        return False
+    return strength >= MIN_STRENGTH_BY_INDICATOR.get(indicator, 0.0)
 
 
 def _event_key(
@@ -699,14 +776,12 @@ async def _label_payload(
     event_ts = _aware(event.event_ts)
     if event.direction not in ("long", "short"):
         return {"status": "skipped", "return_pct": None, "mfe": None, "mae": None, "future_price": None, "future_at": None}
-    entry = event.event_price
     base = await _price_at_or_after(session, event.symbol, event_ts)
     reference_price = _fresh_price(base, event_ts, FEATURE_REFERENCE_MAX_LAG)
-    if not entry:
-        entry = reference_price
+    entry = reference_price
     if not entry:
         return {"status": "pending", "return_pct": None, "mfe": None, "mae": None, "future_price": None, "future_at": None}
-    if reference_price is None or not _price_near_reference(entry, reference_price):
+    if event.event_price is not None and not _price_near_reference(event.event_price, reference_price):
         return {"status": "skipped", "return_pct": None, "mfe": None, "mae": None, "future_price": None, "future_at": None}
     target_at = event_ts + FEATURE_HORIZONS[horizon]
     future = await _price_at_or_after(session, event.symbol, target_at)
@@ -845,7 +920,22 @@ def _group_key(event: FeatureEventModel, key: str) -> str:
         return event.timeframe
     if key == "symbol":
         return event.symbol
+    if key == "direction":
+        return event.direction
+    if key == "symbol_timeframe":
+        return f"{event.symbol}:{event.timeframe}"
+    if key == "indicator_timeframe":
+        return f"{event.indicator}:{event.timeframe}"
     return f"{event.feature_name}:{event.subtype}:{event.direction}"
+
+
+def _label_quality(event_count: int, label_count: int, labeled_count: int) -> dict[str, Any]:
+    return {
+        "labeled_event_ratio": labeled_count / event_count if event_count else 0.0,
+        "labeled_label_ratio": labeled_count / label_count if label_count else 0.0,
+        "minimum_promotion_sample_count": 30,
+        "sample_warning": "insufficient" if labeled_count < 30 else "usable_for_research",
+    }
 
 
 def _avg_label(items: list[tuple[FeatureEventModel, FeatureLabel]], field: str) -> float | None:

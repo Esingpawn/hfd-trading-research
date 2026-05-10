@@ -12,6 +12,7 @@ from app.services.collector import SnapshotCollector
 from app.services.features import (
     backfill_feature_events,
     backfill_feature_labels,
+    reset_feature_research,
     refresh_feature_research,
 )
 from app.services.paper import mark_open_trades, paper_scan
@@ -127,6 +128,13 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
             session,
             limit=int(payload.get("limit") or 1000),
             horizons=_optional_str_list(payload.get("horizons")),
+            refresh_labeled=bool(payload.get("refresh_labeled", False)),
+        )
+        return result.__dict__
+    if task_name in {"features.reset", "features-reset"}:
+        result = await reset_feature_research(
+            session,
+            indicators=_optional_str_list(payload.get("indicators")),
         )
         return result.__dict__
     if task_name in {"features.refresh", "features-refresh"}:

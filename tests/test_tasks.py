@@ -82,6 +82,45 @@ async def test_run_task_by_id_executes_feature_backfill(session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_task_by_id_executes_feature_reset(session) -> None:
+    rows = [
+        [1_700_000_000_000, 100, 101, 99, 102, 10],
+        [1_700_001_800_000, 101, 102, 100, 103, 10],
+    ]
+    session.add(
+        SignalSnapshot(
+            symbol="BTCUSDT",
+            asset_tier="core",
+            timeframe="short",
+            interval="30m",
+            indicator="inst_choch",
+            endpoint="/api/pro/pro_data",
+            raw_payload={
+                "klines": rows,
+                "inst_choch": [{"timestamp": rows[0][0], "price": 101, "type": "CHoCH_Bullish"}],
+            },
+            summary_payload={},
+            collected_at=datetime.fromtimestamp(rows[0][0] / 1000, tz=timezone.utc),
+        )
+    )
+    backfill = TaskRun(task_name="features.backfill", payload={"limit": 10}, result={})
+    session.add(backfill)
+    await session.commit()
+    await run_task_by_id(session, backfill.id)
+
+    reset = TaskRun(task_name="features.reset", payload={}, result={})
+    session.add(reset)
+    await session.commit()
+
+    result = await run_task_by_id(session, reset.id)
+    stored_events = await session.execute(select(FeatureEvent))
+
+    assert result["status"] == "completed"
+    assert result["result"]["execution"]["events_deleted"] == 1
+    assert stored_events.scalars().all() == []
+
+
+@pytest.mark.asyncio
 async def test_run_task_by_id_records_failure(session) -> None:
     item = TaskRun(task_name="unknown.task", payload={}, result={})
     session.add(item)

@@ -25,6 +25,7 @@ from app.services.features import (
     backfill_feature_events,
     backfill_feature_labels,
     feature_effectiveness,
+    reset_feature_research,
     refresh_feature_research,
 )
 from app.services.paper import mark_open_trades, paper_scan
@@ -270,6 +271,10 @@ def build_parser() -> argparse.ArgumentParser:
     feature_labels = subparsers.add_parser("features-label", help="Backfill future-return labels for feature events")
     feature_labels.add_argument("--limit", type=int, default=1000)
     feature_labels.add_argument("--horizons", nargs="*", choices=["30m", "1h", "4h", "24h"])
+    feature_labels.add_argument("--refresh-labeled", action="store_true", help="Recompute labels that are already labeled")
+
+    feature_reset = subparsers.add_parser("features-reset", help="Delete feature events and labels before rebuilding research data")
+    feature_reset.add_argument("--indicators", nargs="*", help="Indicator keys to reset")
 
     feature_refresh = subparsers.add_parser("features-refresh", help="Backfill feature events, labels, and print effectiveness")
     feature_refresh.add_argument("--limit", type=int, default=500)
@@ -687,7 +692,15 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 session,
                 limit=args.limit,
                 horizons=args.horizons,
+                refresh_labeled=args.refresh_labeled,
             )
+        print(json.dumps(jsonable(result.__dict__), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "features-reset":
+        async with SessionLocal() as session:
+            result = await reset_feature_research(session, indicators=args.indicators)
         print(json.dumps(jsonable(result.__dict__), ensure_ascii=False, indent=2))
         await engine.dispose()
         return 0

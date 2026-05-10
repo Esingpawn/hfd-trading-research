@@ -11,6 +11,7 @@ from app.services.features import (
     backfill_feature_labels,
     extract_feature_events,
     feature_effectiveness,
+    reset_feature_research,
     summarize_signal_payload,
 )
 
@@ -84,10 +85,28 @@ def test_extract_feature_events_normalizes_indicator_items() -> None:
     assert len(events) == 2
     assert events[0].feature_name == "inst_choch"
     assert events[0].direction == "long"
+    assert events[0].event_ts == item.collected_at
     assert events[0].event_price == rows[1][2]
     assert events[0].strength == 0.7
     assert events[1].direction == "short"
     assert events[0].event_key != events[1].event_key
+
+
+def test_extract_feature_events_uses_indicator_source_whitelist() -> None:
+    rows = klines()
+    item = snapshot(
+        {
+            "klines": rows,
+            "inst_vwap": [[rows[1][0], rows[1][2]]],
+            "order_blocks": [{"start_time": rows[1][0], "avg_price": rows[1][2], "type": "Accumulation"}],
+            "micro_poc": [{"start_time": rows[2][0], "poc_price": rows[2][2], "type": "Distribution"}],
+        }
+    )
+    item.indicator = "inst_vwap"
+
+    events = extract_feature_events(item)
+
+    assert events == []
 
 
 @pytest.mark.asyncio
@@ -147,8 +166,9 @@ async def test_backfill_feature_labels_and_effectiveness(session) -> None:
             ],
         }
     )
+    item.collected_at = datetime.fromtimestamp(rows[0][0] / 1000, tz=timezone.utc)
     session.add(item)
-    observed_at = datetime.fromtimestamp(rows[0][0] / 1000, tz=timezone.utc)
+    observed_at = item.collected_at
     for minutes, price in [(0, 100.0), (30, 101.0), (60, 102.0), (240, 108.0), (1440, 110.0)]:
         session.add(
             PriceSnapshot(
@@ -169,8 +189,77 @@ async def test_backfill_feature_labels_and_effectiveness(session) -> None:
     assert labels.labels_labeled == 2
     assert len(stored_labels.scalars().all()) == 2
     assert report["policy"]["used_for_opening_decisions"] is False
+    assert report["label_quality"]["labeled_label_ratio"] >= 0
     assert report["features"][0]["sample_count"] == 2
     assert report["features"][0]["avg_return"] > 0
+    assert report["by_direction"][0]["name"] == "long"
+
+
+@pytest.mark.asyncio
+async def test_backfill_feature_labels_can_refresh_labeled_rows(session) -> None:
+    rows = klines()
+    item = snapshot(
+        {
+            "klines": rows,
+            "inst_choch": [{"timestamp": rows[0][0], "price": 100.0, "type": "CHoCH_Bullish"}],
+        }
+    )
+    item.collected_at = datetime.fromtimestamp(rows[0][0] / 1000, tz=timezone.utc)
+    session.add(item)
+    for minutes, price in [(0, 100.0), (30, 101.0)]:
+        session.add(
+            PriceSnapshot(
+                symbol="BTCUSDT",
+                price=price,
+                raw_payload={},
+                collected_at=item.collected_at + timedelta(minutes=minutes),
+            )
+        )
+    await session.commit()
+
+    await backfill_feature_events(session, limit=10)
+    first = await backfill_feature_labels(session, limit=10, horizons=["30m"])
+    second = await backfill_feature_labels(session, limit=10, horizons=["30m"])
+    refreshed = await backfill_feature_labels(session, limit=10, horizons=["30m"], refresh_labeled=True)
+
+    assert first.labels_labeled == 1
+    assert second.labels_labeled == 0
+    assert refreshed.labels_labeled == 1
+    assert refreshed.labels_refreshed == 1
+
+
+@pytest.mark.asyncio
+async def test_reset_feature_research_deletes_events_and_labels(session) -> None:
+    rows = klines()
+    item = snapshot(
+        {
+            "klines": rows,
+            "inst_choch": [{"timestamp": rows[0][0], "price": 100.0, "type": "CHoCH_Bullish"}],
+        }
+    )
+    item.collected_at = datetime.fromtimestamp(rows[0][0] / 1000, tz=timezone.utc)
+    session.add(item)
+    for minutes, price in [(0, 100.0), (30, 101.0)]:
+        session.add(
+            PriceSnapshot(
+                symbol="BTCUSDT",
+                price=price,
+                raw_payload={},
+                collected_at=item.collected_at + timedelta(minutes=minutes),
+            )
+        )
+    await session.commit()
+
+    await backfill_feature_events(session, limit=10)
+    await backfill_feature_labels(session, limit=10, horizons=["30m"])
+    result = await reset_feature_research(session)
+    stored_events = await session.execute(select(FeatureEvent))
+    stored_labels = await session.execute(select(FeatureLabel))
+
+    assert result.events_deleted == 1
+    assert result.labels_deleted == 1
+    assert stored_events.scalars().all() == []
+    assert stored_labels.scalars().all() == []
 
 
 @pytest.mark.asyncio
@@ -182,8 +271,9 @@ async def test_backfill_feature_labels_keeps_stale_future_prices_pending(session
             "inst_choch": [{"timestamp": rows[0][0], "price": 100.0, "type": "CHoCH_Bullish"}],
         }
     )
+    item.collected_at = datetime.fromtimestamp(rows[0][0] / 1000, tz=timezone.utc)
     session.add(item)
-    observed_at = datetime.fromtimestamp(rows[0][0] / 1000, tz=timezone.utc)
+    observed_at = item.collected_at
     session.add(
         PriceSnapshot(
             symbol="BTCUSDT",
@@ -199,13 +289,13 @@ async def test_backfill_feature_labels_keeps_stale_future_prices_pending(session
     stored_labels = await session.execute(select(FeatureLabel))
 
     stored = stored_labels.scalar_one()
-    assert labels.labels_skipped == 1
-    assert stored.status == "skipped"
+    assert labels.labels_pending == 1
+    assert stored.status == "pending"
     assert stored.return_pct is None
 
 
 @pytest.mark.asyncio
-async def test_backfill_feature_labels_skips_neutral_events(session) -> None:
+async def test_backfill_feature_events_skips_neutral_events(session) -> None:
     rows = klines()
     item = snapshot(
         {
@@ -227,14 +317,14 @@ async def test_backfill_feature_labels_skips_neutral_events(session) -> None:
         )
     await session.commit()
 
-    await backfill_feature_events(session, limit=10)
+    events = await backfill_feature_events(session, limit=10)
     labels = await backfill_feature_labels(session, limit=10, horizons=["30m"])
-    stored_labels = await session.execute(select(FeatureLabel))
+    stored_events = await session.execute(select(FeatureEvent))
 
-    stored = stored_labels.scalar_one()
-    assert labels.labels_skipped == 1
-    assert stored.status == "skipped"
-    assert stored.return_pct is None
+    assert events.events_extracted == 0
+    assert events.events_inserted == 0
+    assert labels.events_scanned == 0
+    assert stored_events.scalars().all() == []
 
 
 @pytest.mark.asyncio
@@ -246,8 +336,9 @@ async def test_backfill_feature_labels_skips_mismatched_event_price(session) -> 
             "inst_choch": [{"timestamp": rows[0][0], "price": 1.0, "type": "CHoCH_Bullish"}],
         }
     )
+    item.collected_at = datetime.fromtimestamp(rows[0][0] / 1000, tz=timezone.utc)
     session.add(item)
-    observed_at = datetime.fromtimestamp(rows[0][0] / 1000, tz=timezone.utc)
+    observed_at = item.collected_at
     for minutes, price in [(0, 100.0), (30, 101.0)]:
         session.add(
             PriceSnapshot(

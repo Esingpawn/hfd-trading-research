@@ -8,6 +8,7 @@ from app.services.features import (
     backfill_feature_events,
     backfill_feature_labels,
     feature_effectiveness,
+    reset_feature_research,
     refresh_feature_research,
 )
 from app.services.indicator_catalog import indicator_experiment_coverage
@@ -79,8 +80,23 @@ async def backfill_feature_label_rows(
     session: SessionDep,
     limit: int = Query(default=1000, ge=1, le=20000),
     horizons: list[str] | None = Query(default=None),
+    refresh_labeled: bool = Query(default=False),
 ) -> dict[str, object]:
-    result = await backfill_feature_labels(session, limit=limit, horizons=horizons)
+    result = await backfill_feature_labels(
+        session,
+        limit=limit,
+        horizons=horizons,
+        refresh_labeled=refresh_labeled,
+    )
+    return result.__dict__
+
+
+@router.post("/features/reset")
+async def reset_features(
+    session: SessionDep,
+    indicators: list[str] | None = Query(default=None),
+) -> dict[str, object]:
+    result = await reset_feature_research(session, indicators=indicators)
     return result.__dict__
 
 
