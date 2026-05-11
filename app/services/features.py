@@ -313,6 +313,7 @@ async def backfill_feature_labels(
     commit: bool = True,
 ) -> FeatureLabelBackfillResult:
     selected_horizons = _normalize_horizons(horizons)
+    earliest_ready_at = utc_now() - min(FEATURE_HORIZONS[horizon] for horizon in selected_horizons)
     done_horizon_count = (
         select(
             FeatureLabel.feature_event_id.label("feature_event_id"),
@@ -336,7 +337,10 @@ async def backfill_feature_labels(
         .limit(limit)
     )
     if not refresh_labeled:
-        query = query.where(func.coalesce(done_horizon_count.c.done_horizon_count, 0) < len(selected_horizons))
+        query = query.where(
+            FeatureEventModel.event_ts <= earliest_ready_at,
+            func.coalesce(done_horizon_count.c.done_horizon_count, 0) < len(selected_horizons),
+        )
     result = await session.execute(
         query
     )
