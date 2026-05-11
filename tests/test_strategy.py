@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from app.infrastructure.raw_store import LocalRawPayloadStore
 from app.models import SignalSnapshot
-from app.services.strategy import _score_states, _state_from_snapshot, TimeframeState
+from app.services.strategy import _score_states, _state_from_snapshot, STRATEGY_VERSION, TimeframeState
 
 
 def snapshot(payload: dict) -> object:
@@ -52,6 +52,11 @@ def test_score_opens_when_three_timeframes_align_near_cost() -> None:
     assert result.decision == "open"
     assert result.score >= 75
     assert result.risk_payload["execution_gate"]["ready"] is True
+    assert STRATEGY_VERSION == "0.3"
+    assert result.risk_payload["entry_plan"]["kind"] == "snapshot_trade_plan"
+    assert result.risk_payload["entry_plan"]["entry_reference_price"] == 100.0
+    assert result.risk_payload["entry_plan"]["valid_until"]
+    assert "new scan changes entry/stop/target beyond drift_limit_pct" in result.risk_payload["entry_plan"]["invalidates_when"]
 
 
 def test_score_observes_when_price_is_outside_entry_zone() -> None:

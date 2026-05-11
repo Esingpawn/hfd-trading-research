@@ -1,7 +1,36 @@
 import pytest
 
 from app.models import StrategyDecision
+from app.api.shared import _confirmation_from_items
 from app.services.paper import _collection_run_id, _confirmation_for_symbol, _record_paper_scan_status
+
+
+def risk_payload(
+    *,
+    entry: float = 100.0,
+    lower: float = 99.5,
+    upper: float = 100.5,
+    stop: float = 98.0,
+    target: float = 104.0,
+    run_id: str = "run-1",
+) -> dict:
+    return {
+        "entry_price": entry,
+        "stop_loss": stop,
+        "take_profit": target,
+        "execution_gate": {"ready": True},
+        "execution_zone": {"valid": True, "lower": lower, "upper": upper},
+        "entry_plan": {
+            "entry_reference_price": entry,
+            "entry_lower": lower,
+            "entry_upper": upper,
+            "stop_loss": stop,
+            "take_profit": target,
+            "valid_until": "2099-01-01T00:00:00+00:00",
+            "drift_limit_pct": 0.003,
+        },
+        "paper_scan_context": {"collection_run_id": run_id},
+    }
 
 
 class DummySession:
@@ -99,68 +128,69 @@ def test_collection_run_id_reads_scan_context() -> None:
 @pytest.mark.asyncio
 async def test_confirmation_counts_distinct_collection_runs_only() -> None:
     items = [
-        decision(
-            {
-                "execution_gate": {"ready": True},
-                "paper_scan_context": {"collection_run_id": "run-2"},
-            }
-        ),
-        decision(
-            {
-                "execution_gate": {"ready": True},
-                "paper_scan_context": {"collection_run_id": "run-2"},
-            }
-        ),
-        decision(
-            {
-                "execution_gate": {"ready": True},
-                "paper_scan_context": {"collection_run_id": "run-1"},
-            }
-        ),
+        decision(risk_payload(run_id="run-2")),
+        decision(risk_payload(run_id="run-2")),
+        decision(risk_payload(run_id="run-1")),
     ]
 
-    result = await _confirmation_for_symbol(DecisionSession(items), "ZECUSDT", "short")
+    result = await _confirmation_for_symbol(DecisionSession(items), "ZECUSDT", "short", current_risk=risk_payload(run_id="run-3"))
 
     assert result["streak"] == 2
     assert result["confirmed"] is True
+    assert result["plan_compatible"] is True
 
 
 @pytest.mark.asyncio
 async def test_confirmation_stays_pending_for_duplicate_collection_run() -> None:
     items = [
-        decision(
-            {
-                "execution_gate": {"ready": True},
-                "paper_scan_context": {"collection_run_id": "run-2"},
-            }
-        ),
-        decision(
-            {
-                "execution_gate": {"ready": True},
-                "paper_scan_context": {"collection_run_id": "run-2"},
-            }
-        ),
+        decision(risk_payload(run_id="run-2")),
+        decision(risk_payload(run_id="run-2")),
     ]
 
-    result = await _confirmation_for_symbol(DecisionSession(items), "ZECUSDT", "short")
+    result = await _confirmation_for_symbol(DecisionSession(items), "ZECUSDT", "short", current_risk=risk_payload(run_id="run-3"))
 
     assert result["streak"] == 1
     assert result["confirmed"] is False
 
 
 @pytest.mark.asyncio
+async def test_confirmation_rejects_shifted_entry_plan() -> None:
+    items = [
+        decision(risk_payload(entry=100.0, lower=99.5, upper=100.5, run_id="run-2")),
+        decision(risk_payload(entry=100.0, lower=99.5, upper=100.5, run_id="run-1")),
+    ]
+
+    result = await _confirmation_for_symbol(
+        DecisionSession(items),
+        "ZECUSDT",
+        "short",
+        current_risk=risk_payload(entry=101.0, lower=100.5, upper=101.5, run_id="run-3"),
+    )
+
+    assert result["streak"] == 0
+    assert result["confirmed"] is False
+    assert result["plan_compatible"] is False
+    assert "entry_reference_drift" in result["plan_checks"][0]["reasons"]
+
+
+def test_market_confirmation_rejects_shifted_entry_plan() -> None:
+    items = [decision(risk_payload(entry=100.0, run_id="run-2")), decision(risk_payload(entry=100.0, run_id="run-1"))]
+
+    result = _confirmation_from_items(items, "short", current_risk=risk_payload(entry=101.0, run_id="run-3"))
+
+    assert result["streak"] == 0
+    assert result["confirmed"] is False
+    assert result["plan_checks"][0]["compatible"] is False
+
+
+@pytest.mark.asyncio
 async def test_confirmation_ignores_legacy_decisions_without_collection_context() -> None:
     items = [
         decision({"execution_gate": {"ready": True}}),
-        decision(
-            {
-                "execution_gate": {"ready": True},
-                "paper_scan_context": {"collection_run_id": "run-1"},
-            }
-        ),
+        decision(risk_payload(run_id="run-1")),
     ]
 
-    result = await _confirmation_for_symbol(DecisionSession(items), "ZECUSDT", "short")
+    result = await _confirmation_for_symbol(DecisionSession(items), "ZECUSDT", "short", current_risk=risk_payload(run_id="run-2"))
 
     assert result["streak"] == 1
     assert result["confirmed"] is False

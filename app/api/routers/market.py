@@ -91,6 +91,7 @@ async def market_overview(session: SessionDep) -> list[dict[str, object]]:
         confirmation = _confirmation_from_items(
             confirmations.get(symbol, []),
             evaluation.direction,
+            current_risk=evaluation.risk_payload,
         )
         evaluation.risk_payload["confirmation"] = confirmation
         states_by_timeframe = {state.timeframe: state for state in evaluation.states}

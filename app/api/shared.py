@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BacktestRun, CollectionRun, PriceSnapshot, SignalSnapshot, StrategyDecision
 from app.services.completeness import data_completeness
+from app.services.entry_plan import entry_plan_compatibility, entry_plan_is_expired
 
 
 DASHBOARD_HTML = Path(__file__).resolve().parents[1] / "web" / "dashboard.html"
@@ -433,19 +434,34 @@ async def _confirmation_snapshots(
 def _confirmation_from_items(
     decisions: list[StrategyDecision],
     direction: str,
+    current_risk: dict[str, object] | None = None,
     required: int = 2,
 ) -> dict[str, object]:
     streak = 0
+    plan_checks: list[dict[str, object]] = []
+    baseline_risk = current_risk
     for item in decisions[:required]:
-        gate = (item.risk_payload or {}).get("execution_gate") or {}
-        if item.decision == "open" and item.direction == direction and gate.get("ready"):
-            streak += 1
-            continue
-        break
+        risk_payload = item.risk_payload or {}
+        gate = risk_payload.get("execution_gate") or {}
+        if item.decision != "open" or item.direction != direction or not gate.get("ready"):
+            break
+        if entry_plan_is_expired(risk_payload.get("entry_plan")):
+            plan_checks.append({"decision_id": item.id, "compatible": False, "reasons": ["entry_plan_expired"]})
+            break
+        if baseline_risk is not None:
+            compatibility = entry_plan_compatibility(baseline_risk, risk_payload)
+            plan_checks.append({"decision_id": item.id, **compatibility})
+            if not compatibility["compatible"]:
+                break
+        baseline_risk = risk_payload
+        streak += 1
+        continue
     return {
         "required": required,
         "streak": streak,
         "confirmed": streak >= required,
+        "plan_compatible": streak >= required,
+        "plan_checks": plan_checks,
         "label": "杩炵画纭" if streak >= required else "绛夊緟杩炵画纭",
     }
 

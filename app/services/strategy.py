@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -15,7 +15,9 @@ from app.services.risk import build_trade_levels, template_for_tier
 
 
 STRATEGY_NAME = "multi_timeframe_cost_stack"
-STRATEGY_VERSION = "0.2"
+STRATEGY_VERSION = "0.3"
+ENTRY_PLAN_VALID_MINUTES = 35
+ENTRY_PLAN_DRIFT_LIMIT_PCT = 0.003
 
 
 @dataclass(frozen=True)
@@ -323,6 +325,16 @@ def _score_states(
     execution = _execution_gate(asset_tier, direction, price, short_state, mid_state, risk_payload)
     risk_payload["entry_zone"] = execution["entry_zone"]
     risk_payload["execution_zone"] = execution["execution_zone"]
+    risk_payload["entry_plan"] = _entry_plan(
+        symbol=symbol,
+        direction=direction,
+        price=price,
+        asset_tier=asset_tier,
+        execution_zone=execution["execution_zone"],
+        entry_zone=execution["entry_zone"],
+        stop_loss=risk_payload.get("stop_loss"),
+        take_profit=risk_payload.get("take_profit"),
+    )
     risk_payload["execution_gate"] = {
         "ready": execution["ready"],
         "reasons": execution["reasons"],
@@ -372,6 +384,74 @@ def _distance_limit(asset_tier: str, timeframe: str) -> float:
     if asset_tier == "mainstream":
         return 0.018 if timeframe == "short" else 0.025
     return 0.028 if timeframe == "short" else 0.04
+
+
+def _entry_plan(
+    *,
+    symbol: str,
+    direction: str,
+    price: float,
+    asset_tier: str,
+    execution_zone: dict[str, Any],
+    entry_zone: dict[str, Any],
+    stop_loss: Any,
+    take_profit: Any,
+) -> dict[str, Any]:
+    created_at = datetime.now(timezone.utc)
+    valid_until = created_at + timedelta(minutes=ENTRY_PLAN_VALID_MINUTES)
+    reference = _entry_reference_price(direction, price, execution_zone)
+    return {
+        "kind": "snapshot_trade_plan",
+        "symbol": symbol,
+        "direction": direction,
+        "status": "active" if execution_zone.get("valid") else "invalid",
+        "created_at": created_at.isoformat(),
+        "valid_until": valid_until.isoformat(),
+        "valid_for_minutes": ENTRY_PLAN_VALID_MINUTES,
+        "drift_limit_pct": ENTRY_PLAN_DRIFT_LIMIT_PCT,
+        "signal_price": price,
+        "entry_reference_price": reference,
+        "entry_lower": execution_zone.get("lower"),
+        "entry_upper": execution_zone.get("upper"),
+        "cost_lower": entry_zone.get("lower"),
+        "cost_upper": entry_zone.get("upper"),
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "plan_key": _plan_key(direction, reference, execution_zone, stop_loss, take_profit),
+        "invalidates_when": [
+            "price leaves entry_lower/entry_upper",
+            "new scan changes direction",
+            "new scan changes entry/stop/target beyond drift_limit_pct",
+            "valid_until passes before confirmation/open",
+        ],
+        "display_note": "This is the current snapshot trade plan, not a standing order. Reconfirm after each scan.",
+    }
+
+
+def _entry_reference_price(direction: str, price: float, execution_zone: dict[str, Any]) -> float:
+    lower = execution_zone.get("lower")
+    upper = execution_zone.get("upper")
+    if isinstance(lower, (int, float)) and isinstance(upper, (int, float)) and lower <= upper:
+        return min(max(price, float(lower)), float(upper))
+    return price
+
+
+def _plan_key(direction: str, reference: float, execution_zone: dict[str, Any], stop_loss: Any, take_profit: Any) -> str:
+    values = [
+        direction,
+        _rounded(reference),
+        _rounded(execution_zone.get("lower")),
+        _rounded(execution_zone.get("upper")),
+        _rounded(stop_loss),
+        _rounded(take_profit),
+    ]
+    return ":".join(values)
+
+
+def _rounded(value: Any) -> str:
+    if isinstance(value, (int, float)):
+        return f"{float(value):.4f}"
+    return "none"
 
 
 def _score_breakdown(

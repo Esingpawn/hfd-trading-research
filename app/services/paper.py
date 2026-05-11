@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CollectionRun, PaperTrade, PriceSnapshot, StrategyDecision
+from app.services.entry_plan import entry_plan_compatibility, entry_plan_is_expired
 from app.services.strategy import evaluate_symbol
 from app.services.signal_attribution import backfill_signal_outcomes
 from app.services.telegram import TelegramClient
@@ -55,7 +56,12 @@ async def paper_scan(
             status="evaluated",
             scan_context=scan_context,
         )
-        confirmation = await _confirmation_for_symbol(session, evaluation.symbol, evaluation.direction)
+        confirmation = await _confirmation_for_symbol(
+            session,
+            evaluation.symbol,
+            evaluation.direction,
+            current_risk=evaluation.risk_payload,
+        )
         evaluation.risk_payload["confirmation"] = confirmation
         evaluation.risk_payload["paper_scan_context"] = scan_context
         if evaluation.decision != "open":
@@ -235,6 +241,7 @@ async def _confirmation_for_symbol(
     session: AsyncSession,
     symbol: str,
     direction: str,
+    current_risk: dict[str, Any] | None = None,
     required: int = 2,
 ) -> dict[str, Any]:
     rows = await session.execute(
@@ -245,9 +252,12 @@ async def _confirmation_for_symbol(
     )
     decisions = rows.scalars().all()
     streak = 0
+    plan_checks: list[dict[str, Any]] = []
+    baseline_risk = current_risk
     seen_collection_run_ids: set[str] = set()
     for item in decisions:
-        gate = (item.risk_payload or {}).get("execution_gate") or {}
+        risk_payload = item.risk_payload or {}
+        gate = risk_payload.get("execution_gate") or {}
         collection_run_id = _collection_run_id(item)
         if not collection_run_id:
             continue
@@ -255,16 +265,27 @@ async def _confirmation_for_symbol(
             if collection_run_id in seen_collection_run_ids:
                 continue
             seen_collection_run_ids.add(collection_run_id)
-        if item.decision == "open" and item.direction == direction and gate.get("ready"):
-            streak += 1
-            if streak >= required:
+        if item.decision != "open" or item.direction != direction or not gate.get("ready"):
+            break
+        if entry_plan_is_expired(risk_payload.get("entry_plan")):
+            plan_checks.append({"decision_id": item.id, "compatible": False, "reasons": ["entry_plan_expired"]})
+            break
+        if baseline_risk is not None:
+            compatibility = entry_plan_compatibility(baseline_risk, risk_payload)
+            plan_checks.append({"decision_id": item.id, **compatibility})
+            if not compatibility["compatible"]:
                 break
-            continue
-        break
+        baseline_risk = risk_payload
+        streak += 1
+        if streak >= required:
+            break
+        continue
     return {
         "required": required,
         "streak": streak,
         "confirmed": streak >= required,
+        "plan_compatible": streak >= required,
+        "plan_checks": plan_checks,
         "label": "连续确认" if streak >= required else "等待连续确认",
     }
 

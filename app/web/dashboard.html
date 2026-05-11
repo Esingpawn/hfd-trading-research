@@ -984,7 +984,7 @@
         </div>
         <div class="oppGrid">
           <div class="level">
-            <span>入场区间 (USDT)</span>
+            <span>当前快照入场区间 (USDT)</span>
             <b id="oppEntry" class="green">--</b>
             <small id="oppCurrent">当前价格 --</small>
           </div>
@@ -1410,6 +1410,19 @@
       return "1 : " + fmt(Math.abs(target - entry) / Math.abs(entry - stop), 2);
     }
 
+    function entryPlanMeta(plan, item) {
+      if (!plan) return `当前价格 ${fmt(item.price, 6)}`;
+      const expires = plan.valid_until ? `有效至 ${timeLabel(plan.valid_until)}` : "随下次扫描重算";
+      const signal = plan.signal_price ? `信号价 ${fmt(plan.signal_price, 6)}` : `当前价格 ${fmt(item.price, 6)}`;
+      return `${signal} / ${expires}`;
+    }
+
+    function entryPlanWarning(plan) {
+      if (!plan) return "这是当前快照判断，不是挂单计划；刷新后会重算。";
+      const invalidates = (plan.invalidates_when || []).slice(0, 2).join(" / ");
+      return `计划类型：${plan.kind || "snapshot_trade_plan"}；${invalidates || "下次扫描需重新确认"}。`;
+    }
+
     function timeLabel(value) {
       if (!value) return "--";
       const date = new Date(value);
@@ -1794,6 +1807,7 @@
       const reason = item.reason || {};
       const scoreBreakdown = risk.score_breakdown || {};
       const gate = risk.execution_gate || {};
+      const entryPlan = risk.entry_plan || {};
       const entryZone = risk.entry_zone || {};
       const executionZone = risk.execution_zone || {};
       const confirmation = risk.confirmation || {};
@@ -1817,7 +1831,7 @@
       $("oppScore").textContent = fmt(item.score || 0, 0);
       $("oppSource").textContent = item.decision === "open" ? "信号来源：多因子共振" : "信号来源：结构观察，暂不追价";
       $("oppEntry").textContent = zoneText(risk.execution_zone, risk.entry_price || item.price);
-      $("oppCurrent").textContent = `当前价格 ${fmt(item.price, 6)}`;
+      $("oppCurrent").textContent = entryPlanMeta(entryPlan, item);
       $("oppStop").textContent = fmt(risk.stop_loss, 6);
       $("oppStopMeta").textContent = `${fixText(risk.stop_source || "暗流止损")} / 幅度 ${pct(risk.stop_pct || 0, 2)}`;
       $("oppTp1").textContent = "TP1 " + targets[0];
@@ -1826,6 +1840,7 @@
       $("oppWin").textContent = `胜率参考 ${similar ? pct(similar.win_rate, 1) : "--"}`;
       $("oppReason").textContent = [
         `结论：${directionText(item.direction)}，${decisionText(item.decision)}，${stageLabel(item)}。`,
+        entryPlanWarning(entryPlan),
         explanations.length ? "信号理由：" + explanations.slice(0, 3).join(" / ") : "信号理由：暂无完整解释。",
         warnings.length ? "风险提示：" + warnings.slice(0, 3).join(" / ") : "风险提示：暂无额外提示。"
       ].join(" ");
@@ -1841,6 +1856,8 @@
         ["执行门", gate.ready ? `<span class="green">通过</span>` : `<span class="amber">等待</span>`],
         ["成本带", entryZone.inside ? `<span class="green">价格在区间内</span>` : `<span class="amber">价格未到位</span>`],
         ["可执行区", executionZone.valid ? zoneText(executionZone, null) : `<span class="amber">无有效区间</span>`],
+        ["计划有效期", esc(entryPlan.valid_until ? timeLabel(entryPlan.valid_until) : "随下次扫描重算")],
+        ["计划一致", confirmation.plan_compatible ? `<span class="green">通过</span>` : `<span class="amber">待确认</span>`],
         ["最低 R", fmt(executionZone.min_r, 2)],
         ["阶段原因", esc((risk.opportunity_stage && risk.opportunity_stage.reason) || "--")]
       ]));
