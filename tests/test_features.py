@@ -229,6 +229,73 @@ async def test_backfill_feature_labels_can_refresh_labeled_rows(session) -> None
 
 
 @pytest.mark.asyncio
+async def test_backfill_feature_labels_advances_past_completed_latest_events(session) -> None:
+    base_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    completed = FeatureEvent(
+        snapshot_id="snapshot-completed",
+        symbol="BTCUSDT",
+        asset_tier="core",
+        timeframe="short",
+        interval="30m",
+        indicator="inst_choch",
+        event_key="event-completed",
+        feature_name="inst_choch",
+        direction="long",
+        event_ts=base_ts + timedelta(hours=1),
+        event_price=100.0,
+        strength=0.7,
+        subtype="CHoCH_Bullish",
+        source_payload_key="inst_choch",
+        context={},
+    )
+    incomplete = FeatureEvent(
+        snapshot_id="snapshot-incomplete",
+        symbol="BTCUSDT",
+        asset_tier="core",
+        timeframe="short",
+        interval="30m",
+        indicator="inst_choch",
+        event_key="event-incomplete",
+        feature_name="inst_choch",
+        direction="long",
+        event_ts=base_ts,
+        event_price=100.0,
+        strength=0.7,
+        subtype="CHoCH_Bullish",
+        source_payload_key="inst_choch",
+        context={},
+    )
+    session.add_all([completed, incomplete])
+    await session.flush()
+    session.add(
+        FeatureLabel(
+            feature_event_id=completed.id,
+            horizon="30m",
+            return_pct=0.01,
+            mfe=0.01,
+            mae=0.0,
+            future_price=101.0,
+            future_at=base_ts + timedelta(hours=1, minutes=30),
+            status="labeled",
+        )
+    )
+    session.add_all(
+        [
+            PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=base_ts),
+            PriceSnapshot(symbol="BTCUSDT", price=101.0, raw_payload={}, collected_at=base_ts + timedelta(minutes=30)),
+        ]
+    )
+    await session.commit()
+
+    result = await backfill_feature_labels(session, limit=1, horizons=["30m"])
+    labels = await session.execute(select(FeatureLabel).where(FeatureLabel.feature_event_id == incomplete.id))
+
+    assert result.events_scanned == 1
+    assert result.labels_labeled == 1
+    assert labels.scalar_one().status == "labeled"
+
+
+@pytest.mark.asyncio
 async def test_reset_feature_research_deletes_events_and_labels(session) -> None:
     rows = klines()
     item = snapshot(

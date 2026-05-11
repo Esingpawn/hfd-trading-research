@@ -7,7 +7,7 @@ import json
 from statistics import mean
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -313,8 +313,32 @@ async def backfill_feature_labels(
     commit: bool = True,
 ) -> FeatureLabelBackfillResult:
     selected_horizons = _normalize_horizons(horizons)
+    done_horizon_count = (
+        select(
+            FeatureLabel.feature_event_id.label("feature_event_id"),
+            func.count(
+                func.distinct(
+                    case(
+                        (FeatureLabel.status.in_(["labeled", "skipped"]), FeatureLabel.horizon),
+                        else_=None,
+                    )
+                )
+            ).label("done_horizon_count"),
+        )
+        .where(FeatureLabel.horizon.in_(selected_horizons))
+        .group_by(FeatureLabel.feature_event_id)
+        .subquery()
+    )
+    query = (
+        select(FeatureEventModel)
+        .outerjoin(done_horizon_count, done_horizon_count.c.feature_event_id == FeatureEventModel.id)
+        .order_by(FeatureEventModel.event_ts.desc())
+        .limit(limit)
+    )
+    if not refresh_labeled:
+        query = query.where(func.coalesce(done_horizon_count.c.done_horizon_count, 0) < len(selected_horizons))
     result = await session.execute(
-        select(FeatureEventModel).order_by(FeatureEventModel.event_ts.desc()).limit(limit)
+        query
     )
     events = result.scalars().all()
     if not events:
