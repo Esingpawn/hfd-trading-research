@@ -22,6 +22,7 @@ class SignalSnapshot(Base):
     __tablename__ = "signal_snapshots"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    collection_run_id: Mapped[str | None] = mapped_column(String(36), index=True)
     symbol: Mapped[str] = mapped_column(String(24), index=True)
     asset_tier: Mapped[str] = mapped_column(String(32), index=True)
     timeframe: Mapped[str] = mapped_column(String(16), index=True)

@@ -1,6 +1,16 @@
 from app.main import app
 
 
+def test_task_enqueue_exposes_research_quality_params() -> None:
+    route = next(route for route in app.routes if getattr(route, "path", None) == "/tasks/enqueue")
+    dependant = getattr(route, "dependant", None)
+    query_params = {param.name for param in dependant.query_params}
+
+    assert "dedupe_research_samples" in query_params
+    assert "min_unique_event_days" in query_params
+    assert "min_unique_collection_runs" in query_params
+
+
 def test_expected_api_routes_are_registered() -> None:
     expected = {
         ("GET", "/health"),

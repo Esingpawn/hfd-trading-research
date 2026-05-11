@@ -29,6 +29,12 @@ SQLITE_INDEX_SPECS: tuple[SqliteIndexSpec, ...] = (
         "experiment coverage and indicator-series scans",
     ),
     SqliteIndexSpec(
+        "ix_signal_snapshots_collection_run_id",
+        "signal_snapshots",
+        "collection_run_id",
+        "research sample coverage by collection run",
+    ),
+    SqliteIndexSpec(
         "idx_price_snapshots_symbol_collected",
         "price_snapshots",
         "symbol, collected_at",

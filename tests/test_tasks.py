@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.application.tasks import enqueue_task, recent_tasks, run_task_by_id
+from app.api.routers.tasks import _task_enqueue_payload
 from app.db import Base
 from app.models import ExperimentRun, FeatureEvent, FeatureLabel, SignalSnapshot, TaskRun
 
@@ -29,6 +30,20 @@ async def test_enqueue_task_records_task_without_redis(session) -> None:
     assert result["status"] == "recorded"
     assert rows[0]["task_name"] == "collect"
     assert rows[0]["payload"] == {"coin": "BTC"}
+
+
+def test_task_enqueue_payload_preserves_false_research_dedupe_flag() -> None:
+    payload = _task_enqueue_payload(
+        dedupe_research_samples=False,
+        min_unique_event_days=2,
+        dry_run=False,
+        notify=False,
+    )
+
+    assert payload["dedupe_research_samples"] is False
+    assert payload["min_unique_event_days"] == 2
+    assert "dry_run" not in payload
+    assert "notify" not in payload
 
 
 @pytest.mark.asyncio
@@ -193,6 +208,9 @@ async def test_run_task_by_id_executes_segment_feature_candidates(session) -> No
             "min_win_rate": 0.6,
             "min_profit_factor": 1.2,
             "min_unique_time_buckets": 1,
+            "min_unique_event_days": 1,
+            "min_unique_market_windows": 1,
+            "min_unique_collection_runs": 1,
             "max_same_return_samples": 6,
             "max_return_cluster_ratio": 1.0,
             "persist": True,
@@ -223,6 +241,9 @@ async def test_run_task_by_id_executes_segment_feature_paper_ab(session) -> None
             "min_win_rate": 0.6,
             "min_profit_factor": 1.2,
             "min_unique_time_buckets": 1,
+            "min_unique_event_days": 1,
+            "min_unique_market_windows": 1,
+            "min_unique_collection_runs": 1,
             "max_same_return_samples": 6,
             "max_return_cluster_ratio": 1.0,
             "persist": True,

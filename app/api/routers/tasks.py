@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Query
 
 from app.api.deps import SessionDep
@@ -35,30 +37,53 @@ async def enqueue_task_api(
     segment_min_samples: int | None = Query(default=None, ge=1),
     min_segments: int | None = Query(default=None, ge=1),
     candidate_limit: int | None = Query(default=None, ge=1),
+    dedupe_research_samples: bool | None = Query(default=None),
+    dedupe_bucket_minutes: int | None = Query(default=None, ge=1, le=1440),
+    min_unique_time_buckets: int | None = Query(default=None, ge=1),
+    min_unique_event_days: int | None = Query(default=None, ge=1),
+    min_unique_market_windows: int | None = Query(default=None, ge=1),
+    min_unique_collection_runs: int | None = Query(default=None, ge=1),
+    market_window_hours: int | None = Query(default=None, ge=1, le=24),
+    max_same_return_samples: int | None = Query(default=None, ge=1),
+    max_return_cluster_ratio: float | None = Query(default=None, ge=0.0, le=1.0),
     persist: bool | None = Query(default=None),
     refresh_labeled: bool = Query(default=False),
 ) -> dict[str, object]:
-    payload = {
-        key: value
-        for key, value in {
-            "coins": coins,
-            "timeframes": timeframes,
-            "indicators": indicators,
-            "dry_run": dry_run,
-            "notify": notify,
-            "limit": limit,
-            "horizons": horizons,
-            "horizon": horizon,
-            "min_samples": min_samples,
-            "min_win_rate": min_win_rate,
-            "min_profit_factor": min_profit_factor,
-            "min_avg_return": min_avg_return,
-            "segment_min_samples": segment_min_samples,
-            "min_segments": min_segments,
-            "candidate_limit": candidate_limit,
-            "persist": persist,
-            "refresh_labeled": refresh_labeled,
-        }.items()
-        if value not in (None, []) and (value is not False or key == "persist")
-    }
+    payload = _task_enqueue_payload(
+        coins=coins,
+        timeframes=timeframes,
+        indicators=indicators,
+        dry_run=dry_run,
+        notify=notify,
+        limit=limit,
+        horizons=horizons,
+        horizon=horizon,
+        min_samples=min_samples,
+        min_win_rate=min_win_rate,
+        min_profit_factor=min_profit_factor,
+        min_avg_return=min_avg_return,
+        segment_min_samples=segment_min_samples,
+        min_segments=min_segments,
+        candidate_limit=candidate_limit,
+        dedupe_research_samples=dedupe_research_samples,
+        dedupe_bucket_minutes=dedupe_bucket_minutes,
+        min_unique_time_buckets=min_unique_time_buckets,
+        min_unique_event_days=min_unique_event_days,
+        min_unique_market_windows=min_unique_market_windows,
+        min_unique_collection_runs=min_unique_collection_runs,
+        market_window_hours=market_window_hours,
+        max_same_return_samples=max_same_return_samples,
+        max_return_cluster_ratio=max_return_cluster_ratio,
+        persist=persist,
+        refresh_labeled=refresh_labeled,
+    )
     return await enqueue_task(session, task_name=task_name, payload=payload)
+
+
+def _task_enqueue_payload(**values: Any) -> dict[str, Any]:
+    keep_false = {"persist", "dedupe_research_samples"}
+    return {
+        key: value
+        for key, value in values.items()
+        if value not in (None, []) and (value is not False or key in keep_false)
+    }

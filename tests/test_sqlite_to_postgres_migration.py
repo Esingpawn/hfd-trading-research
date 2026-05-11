@@ -139,6 +139,7 @@ async def test_migrate_signal_snapshots_supports_legacy_source_columns(tmp_path)
                 """
                 CREATE TABLE signal_snapshots (
                     id VARCHAR(36) PRIMARY KEY,
+                    collection_run_id VARCHAR(36),
                     symbol VARCHAR(24),
                     asset_tier VARCHAR(32),
                     timeframe VARCHAR(16),
@@ -155,10 +156,10 @@ async def test_migrate_signal_snapshots_supports_legacy_source_columns(tmp_path)
             await conn.exec_driver_sql(
                 """
                 INSERT INTO signal_snapshots (
-                    id, symbol, asset_tier, timeframe, interval, indicator, endpoint,
+                    id, collection_run_id, symbol, asset_tier, timeframe, interval, indicator, endpoint,
                     raw_payload, summary_payload, collected_at, created_at
                 ) VALUES (
-                    'legacy-1', 'BTCUSDT', 'major', 'short', '30m', 'smart_money_cost',
+                    'legacy-1', NULL, 'BTCUSDT', 'major', 'short', '30m', 'smart_money_cost',
                     '/api/pro/pro_data', '{"payload":"value"}', '{"kline_count":1}',
                     '2026-01-01 00:00:00', '2026-01-01 00:00:00'
                 )

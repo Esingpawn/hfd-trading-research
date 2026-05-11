@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
-from app.models import ExperimentRun, FeatureEvent, FeatureLabel, PaperTrade
+from app.models import CollectionRun, ExperimentRun, FeatureEvent, FeatureLabel, PaperTrade, SignalSnapshot
 from app.services.feature_candidates import (
     feature_candidate_screen,
     feature_paper_ab,
@@ -35,20 +35,47 @@ async def add_labeled_feature(
     symbol: str = "BTCUSDT",
     timeframe: str = "short",
     event_spacing_minutes: int = 31,
+    start_ts: datetime | None = None,
+    create_snapshots: bool = False,
+    collection_run_ids: list[str] | None = None,
 ) -> None:
-    base_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    base_ts = start_ts or datetime(2026, 1, 1, tzinfo=timezone.utc)
     for index, return_pct in enumerate(returns):
+        event_ts = base_ts + timedelta(minutes=index * event_spacing_minutes)
+        key_suffix = f"{event_ts.strftime('%Y%m%d%H%M')}-{index}"
+        snapshot_id = f"snapshot-{feature_name}-{subtype}-{symbol}-{timeframe}-{key_suffix}"
+        if create_snapshots:
+            session.add(
+                SignalSnapshot(
+                    id=snapshot_id,
+                    collection_run_id=(collection_run_ids or [None])[index % len(collection_run_ids or [None])],
+                    symbol=symbol,
+                    asset_tier="core",
+                    timeframe=timeframe,
+                    interval="30m",
+                    indicator=feature_name.split(".")[0],
+                    endpoint="/api/pro/pro_data",
+                    raw_payload={},
+                    raw_payload_uri=None,
+                    raw_payload_sha256=None,
+                    raw_payload_bytes=None,
+                    raw_payload_compression=None,
+                    summary_payload={},
+                    collected_at=event_ts,
+                    created_at=event_ts,
+                )
+            )
         event = FeatureEvent(
-            snapshot_id=f"snapshot-{feature_name}-{subtype}-{symbol}-{timeframe}-{index}",
+            snapshot_id=snapshot_id,
             symbol=symbol,
             asset_tier="core",
             timeframe=timeframe,
             interval="30m",
             indicator=feature_name.split(".")[0],
-            event_key=f"event-{feature_name}-{subtype}-{symbol}-{timeframe}-{index}",
+            event_key=f"event-{feature_name}-{subtype}-{symbol}-{timeframe}-{key_suffix}",
             feature_name=feature_name,
             direction=direction,
-            event_ts=base_ts + timedelta(minutes=index * event_spacing_minutes),
+            event_ts=event_ts,
             event_price=100.0,
             strength=0.7,
             subtype=subtype,
@@ -202,6 +229,9 @@ async def test_segment_candidate_screen_promotes_local_segments_when_global_feat
         min_win_rate=0.6,
         min_profit_factor=1.2,
         min_unique_time_buckets=1,
+        min_unique_event_days=1,
+        min_unique_market_windows=1,
+        min_unique_collection_runs=1,
         max_same_return_samples=6,
         max_return_cluster_ratio=1.0,
         persist=True,
@@ -248,6 +278,103 @@ async def test_segment_candidate_screen_marks_clustered_segments_as_high_risk(se
 
 
 @pytest.mark.asyncio
+async def test_segment_candidate_screen_requires_cross_day_and_run_diversity(session) -> None:
+    await add_labeled_feature(
+        session,
+        feature_name="inst_choch",
+        subtype="CHoCH_Bullish",
+        returns=[0.012, 0.01, 0.009, 0.008, 0.011, -0.002],
+        event_spacing_minutes=31,
+    )
+    await session.commit()
+
+    report = await feature_segment_candidate_screen(
+        session,
+        horizon="30m",
+        min_samples=6,
+        min_win_rate=0.6,
+        min_profit_factor=1.2,
+        min_unique_time_buckets=3,
+        min_unique_event_days=2,
+        min_unique_market_windows=2,
+        min_unique_collection_runs=2,
+        max_same_return_samples=6,
+        max_return_cluster_ratio=1.0,
+    )
+    row = report["all_segments"][0]
+
+    assert report["candidate_count"] == 0
+    assert row["quality"]["unique_event_day_count"] == 1
+    assert row["quality"]["unique_market_window_count"] == 1
+    assert row["quality"]["unique_collection_run_count"] >= 1
+    assert "event_day_count_below_minimum" in row["rejection_reasons"]
+    assert "market_window_count_below_minimum" in row["rejection_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_segment_candidate_screen_accepts_cross_day_run_diverse_segments(session) -> None:
+    run_ids = ["run-1", "run-2"]
+    for index, run_id in enumerate(run_ids):
+        session.add(
+            CollectionRun(
+                id=run_id,
+                status="completed",
+                dry_run=False,
+                requested_assets=["BTC"],
+                requested_timeframes=["short"],
+                requested_indicators=["inst_choch"],
+                snapshots_written=3,
+                prices_written=1,
+                errors=[],
+                started_at=datetime(2026, 1, 1 + index, tzinfo=timezone.utc),
+                finished_at=datetime(2026, 1, 1 + index, 1, tzinfo=timezone.utc),
+            )
+        )
+    await add_labeled_feature(
+        session,
+        feature_name="inst_choch",
+        subtype="CHoCH_Bullish",
+        returns=[0.012, 0.01, 0.009],
+        event_spacing_minutes=31,
+        start_ts=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        create_snapshots=True,
+        collection_run_ids=["run-1"],
+    )
+    await add_labeled_feature(
+        session,
+        feature_name="inst_choch",
+        subtype="CHoCH_Bullish",
+        returns=[0.008, 0.011, -0.002],
+        event_spacing_minutes=31,
+        start_ts=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        create_snapshots=True,
+        collection_run_ids=["run-2"],
+    )
+    await session.commit()
+
+    report = await feature_segment_candidate_screen(
+        session,
+        horizon="30m",
+        min_samples=6,
+        min_win_rate=0.6,
+        min_profit_factor=1.2,
+        min_unique_time_buckets=3,
+        min_unique_event_days=2,
+        min_unique_market_windows=2,
+        min_unique_collection_runs=2,
+        max_same_return_samples=6,
+        max_return_cluster_ratio=1.0,
+    )
+    row = report["candidates"][0]
+
+    assert report["candidate_count"] == 1
+    assert row["quality"]["unique_event_day_count"] == 2
+    assert row["quality"]["unique_collection_run_count"] == 2
+    assert row["quality"]["unique_market_window_count"] == 2
+    assert report["quality_summary"]["max_unique_event_day_count"] == 2
+
+
+@pytest.mark.asyncio
 async def test_segment_paper_ab_is_report_only_and_uses_matched_controls(session) -> None:
     strong_returns = [0.012, 0.01, 0.009, 0.008, 0.011, -0.002]
     weak_returns = [-0.006, -0.005, -0.004, -0.003, 0.001, -0.002]
@@ -270,6 +397,9 @@ async def test_segment_paper_ab_is_report_only_and_uses_matched_controls(session
         min_win_rate=0.6,
         min_profit_factor=1.2,
         min_unique_time_buckets=1,
+        min_unique_event_days=1,
+        min_unique_market_windows=1,
+        min_unique_collection_runs=1,
         max_same_return_samples=6,
         max_return_cluster_ratio=1.0,
         persist=True,

@@ -325,6 +325,10 @@ def build_parser() -> argparse.ArgumentParser:
     segment_candidates.add_argument("--no-dedupe-research-samples", action="store_true", help="Disable research sample time-bucket dedupe")
     segment_candidates.add_argument("--dedupe-bucket-minutes", type=int, default=30)
     segment_candidates.add_argument("--min-unique-time-buckets", type=int, default=3)
+    segment_candidates.add_argument("--min-unique-event-days", type=int, default=2)
+    segment_candidates.add_argument("--min-unique-market-windows", type=int, default=2)
+    segment_candidates.add_argument("--min-unique-collection-runs", type=int, default=2)
+    segment_candidates.add_argument("--market-window-hours", type=int, default=8)
     segment_candidates.add_argument("--max-same-return-samples", type=int, default=10)
     segment_candidates.add_argument("--max-return-cluster-ratio", type=float, default=0.75)
     segment_candidates.add_argument("--limit", type=int, default=20000)
@@ -339,6 +343,10 @@ def build_parser() -> argparse.ArgumentParser:
     segment_ab.add_argument("--no-dedupe-research-samples", action="store_true", help="Disable research sample time-bucket dedupe")
     segment_ab.add_argument("--dedupe-bucket-minutes", type=int, default=30)
     segment_ab.add_argument("--min-unique-time-buckets", type=int, default=3)
+    segment_ab.add_argument("--min-unique-event-days", type=int, default=2)
+    segment_ab.add_argument("--min-unique-market-windows", type=int, default=2)
+    segment_ab.add_argument("--min-unique-collection-runs", type=int, default=2)
+    segment_ab.add_argument("--market-window-hours", type=int, default=8)
     segment_ab.add_argument("--max-same-return-samples", type=int, default=10)
     segment_ab.add_argument("--max-return-cluster-ratio", type=float, default=0.75)
     segment_ab.add_argument("--candidate-limit", type=int, default=50)
@@ -837,6 +845,10 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 dedupe_research_samples=not args.no_dedupe_research_samples,
                 dedupe_bucket_minutes=args.dedupe_bucket_minutes,
                 min_unique_time_buckets=args.min_unique_time_buckets,
+                min_unique_event_days=args.min_unique_event_days,
+                min_unique_market_windows=args.min_unique_market_windows,
+                min_unique_collection_runs=args.min_unique_collection_runs,
+                market_window_hours=args.market_window_hours,
                 max_same_return_samples=args.max_same_return_samples,
                 max_return_cluster_ratio=args.max_return_cluster_ratio,
                 limit=args.limit,
@@ -858,6 +870,10 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 dedupe_research_samples=not args.no_dedupe_research_samples,
                 dedupe_bucket_minutes=args.dedupe_bucket_minutes,
                 min_unique_time_buckets=args.min_unique_time_buckets,
+                min_unique_event_days=args.min_unique_event_days,
+                min_unique_market_windows=args.min_unique_market_windows,
+                min_unique_collection_runs=args.min_unique_collection_runs,
+                market_window_hours=args.market_window_hours,
                 max_same_return_samples=args.max_same_return_samples,
                 max_return_cluster_ratio=args.max_return_cluster_ratio,
                 candidate_limit=args.candidate_limit,

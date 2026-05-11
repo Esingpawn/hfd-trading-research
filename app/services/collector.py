@@ -183,6 +183,7 @@ class SnapshotCollector:
                 raw_payload = {}
             snapshot_values = {
                 "symbol": f"{coin}USDT",
+                "collection_run_id": result.run_id,
                 "asset_tier": ASSETS[coin].tier,
                 "timeframe": timeframe_name,
                 "interval": interval,
