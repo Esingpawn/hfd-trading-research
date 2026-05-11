@@ -7,7 +7,7 @@ import json
 from statistics import mean
 from typing import Any
 
-from sqlalchemy import case, delete, func, select
+from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -313,7 +313,8 @@ async def backfill_feature_labels(
     commit: bool = True,
 ) -> FeatureLabelBackfillResult:
     selected_horizons = _normalize_horizons(horizons)
-    earliest_ready_at = utc_now() - min(FEATURE_HORIZONS[horizon] for horizon in selected_horizons)
+    min_horizon = min(FEATURE_HORIZONS[horizon] for horizon in selected_horizons)
+    latest_price_cutoffs = await _latest_price_cutoffs(session, min_horizon)
     done_horizon_count = (
         select(
             FeatureLabel.feature_event_id.label("feature_event_id"),
@@ -337,8 +338,14 @@ async def backfill_feature_labels(
         .limit(limit)
     )
     if not refresh_labeled:
+        if not latest_price_cutoffs:
+            return FeatureLabelBackfillResult(0, 0, 0, 0, 0)
+        price_ready_filters = [
+            (FeatureEventModel.symbol == symbol) & (FeatureEventModel.event_ts <= cutoff_at)
+            for symbol, cutoff_at in latest_price_cutoffs.items()
+        ]
         query = query.where(
-            FeatureEventModel.event_ts <= earliest_ready_at,
+            or_(*price_ready_filters),
             func.coalesce(done_horizon_count.c.done_horizon_count, 0) < len(selected_horizons),
         )
     result = await session.execute(
@@ -829,6 +836,21 @@ async def _label_payload(
     }
 
 
+async def _latest_price_cutoffs(
+    session: AsyncSession,
+    horizon: timedelta,
+) -> dict[str, datetime]:
+    rows = await session.execute(
+        select(PriceSnapshot.symbol, func.max(PriceSnapshot.collected_at)).group_by(PriceSnapshot.symbol)
+    )
+    cutoffs: dict[str, datetime] = {}
+    for symbol, latest_at in rows.all():
+        if latest_at is None:
+            continue
+        cutoffs[str(symbol)] = _aware_datetime(latest_at) - horizon
+    return cutoffs
+
+
 async def _price_at_or_after(
     session: AsyncSession,
     symbol: str,
@@ -996,3 +1018,9 @@ def _aware(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value
+
+
+def _aware_datetime(value: datetime | str) -> datetime:
+    if isinstance(value, datetime):
+        return _aware(value)
+    return _aware(datetime.fromisoformat(value.replace("Z", "+00:00")))

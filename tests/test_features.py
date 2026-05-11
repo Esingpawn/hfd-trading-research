@@ -298,7 +298,7 @@ async def test_backfill_feature_labels_advances_past_completed_latest_events(ses
 @pytest.mark.asyncio
 async def test_backfill_feature_labels_skips_unmatured_latest_events(session) -> None:
     now = datetime.now(timezone.utc)
-    recent_ts = now - timedelta(minutes=5)
+    recent_ts = now - timedelta(minutes=35)
     mature_ts = now - timedelta(hours=2)
     recent = FeatureEvent(
         snapshot_id="snapshot-recent",
@@ -339,6 +339,7 @@ async def test_backfill_feature_labels_skips_unmatured_latest_events(session) ->
         [
             PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=mature_ts),
             PriceSnapshot(symbol="BTCUSDT", price=101.0, raw_payload={}, collected_at=mature_ts + timedelta(minutes=30)),
+            PriceSnapshot(symbol="BTCUSDT", price=102.0, raw_payload={}, collected_at=now - timedelta(minutes=10)),
         ]
     )
     await session.commit()
