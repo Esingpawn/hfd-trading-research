@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from statistics import mean
 from typing import Any, Callable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CollectionRun, ExperimentRun, FeatureEvent as FeatureEventModel, FeatureLabel, SignalSnapshot
@@ -27,6 +27,7 @@ DEFAULT_MIN_UNIQUE_COLLECTION_RUNS = 2
 DEFAULT_MARKET_WINDOW_HOURS = 8
 DEFAULT_MAX_SAME_RETURN_SAMPLES = 10
 DEFAULT_MAX_RETURN_CLUSTER_RATIO = 0.75
+DEFAULT_BALANCED_SAMPLE_DAYS = 14
 
 
 FeaturePair = tuple[FeatureEventModel, FeatureLabel, SignalSnapshot | None, CollectionRun | None]
@@ -362,7 +363,70 @@ async def _labeled_feature_pairs(
     horizon: str,
     limit: int,
 ) -> list[FeaturePair]:
+    row_items = await _balanced_labeled_feature_rows(session, horizon=horizon, limit=limit)
+    collection_runs = await _collection_run_windows(session)
+    return [
+        (event, label, snapshot, collection_run or _infer_collection_run(snapshot, collection_runs))
+        for event, label, snapshot, collection_run in row_items
+        if isinstance(label.return_pct, (int, float)) and event.direction in {"long", "short"}
+    ]
+
+
+async def _balanced_labeled_feature_rows(
+    session: AsyncSession,
+    *,
+    horizon: str,
+    limit: int,
+) -> list[tuple[FeatureEventModel, FeatureLabel, SignalSnapshot | None, CollectionRun | None]]:
+    if limit <= 0:
+        return []
+    days = await _labeled_event_days(session, horizon=horizon, limit=min(limit, DEFAULT_BALANCED_SAMPLE_DAYS))
+    if not days:
+        return []
+    per_day_limit = max(1, (limit + len(days) - 1) // len(days))
+    rows: list[tuple[FeatureEventModel, FeatureLabel, SignalSnapshot | None, CollectionRun | None]] = []
+    seen_event_ids: set[str] = set()
+    day_expr = func.date(FeatureEventModel.event_ts)
+    for event_day in days:
+        result = await session.execute(
+            _labeled_feature_query(horizon)
+            .where(day_expr == event_day)
+            .order_by(FeatureEventModel.event_ts.desc())
+            .limit(per_day_limit)
+        )
+        _append_unique_feature_rows(rows, result.all(), seen_event_ids=seen_event_ids)
+    if len(rows) < limit:
+        fill_query = _labeled_feature_query(horizon).order_by(FeatureEventModel.event_ts.desc()).limit(limit - len(rows))
+        if seen_event_ids:
+            fill_query = fill_query.where(~FeatureEventModel.id.in_(seen_event_ids))
+        result = await session.execute(fill_query)
+        _append_unique_feature_rows(rows, result.all(), seen_event_ids=seen_event_ids)
+    return sorted(rows, key=lambda row: _aware(row[0].event_ts), reverse=True)[:limit]
+
+
+async def _labeled_event_days(
+    session: AsyncSession,
+    *,
+    horizon: str,
+    limit: int,
+) -> list[Any]:
+    day_expr = func.date(FeatureEventModel.event_ts)
     rows = await session.execute(
+        select(day_expr)
+        .where(
+            FeatureLabel.feature_event_id == FeatureEventModel.id,
+            FeatureLabel.horizon == horizon,
+            FeatureLabel.status == "labeled",
+        )
+        .group_by(day_expr)
+        .order_by(day_expr.desc())
+        .limit(limit)
+    )
+    return [item for item in rows.scalars().all() if item is not None]
+
+
+def _labeled_feature_query(horizon: str):
+    return (
         select(FeatureEventModel, FeatureLabel, SignalSnapshot, CollectionRun)
         .outerjoin(SignalSnapshot, SignalSnapshot.id == FeatureEventModel.snapshot_id)
         .outerjoin(CollectionRun, CollectionRun.id == SignalSnapshot.collection_run_id)
@@ -371,15 +435,21 @@ async def _labeled_feature_pairs(
             FeatureLabel.horizon == horizon,
             FeatureLabel.status == "labeled",
         )
-        .order_by(FeatureEventModel.event_ts.desc())
-        .limit(limit)
     )
-    collection_runs = await _collection_run_windows(session)
-    return [
-        (event, label, snapshot, collection_run or _infer_collection_run(snapshot, collection_runs))
-        for event, label, snapshot, collection_run in rows.all()
-        if isinstance(label.return_pct, (int, float)) and event.direction in {"long", "short"}
-    ]
+
+
+def _append_unique_feature_rows(
+    rows: list[tuple[FeatureEventModel, FeatureLabel, SignalSnapshot | None, CollectionRun | None]],
+    candidates: list[tuple[FeatureEventModel, FeatureLabel, SignalSnapshot | None, CollectionRun | None]],
+    *,
+    seen_event_ids: set[str],
+) -> None:
+    for item in candidates:
+        event = item[0]
+        if event.id in seen_event_ids:
+            continue
+        seen_event_ids.add(event.id)
+        rows.append(item)
 
 
 async def _collection_run_windows(session: AsyncSession) -> list[CollectionRun]:

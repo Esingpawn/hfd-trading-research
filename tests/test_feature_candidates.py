@@ -375,6 +375,71 @@ async def test_segment_candidate_screen_accepts_cross_day_run_diverse_segments(s
 
 
 @pytest.mark.asyncio
+async def test_segment_candidate_screen_balances_limited_samples_across_days(session) -> None:
+    for run_id, started_at in [
+        ("run-old", datetime(2026, 1, 1, tzinfo=timezone.utc)),
+        ("run-new", datetime(2026, 1, 2, tzinfo=timezone.utc)),
+    ]:
+        session.add(
+            CollectionRun(
+                id=run_id,
+                status="completed",
+                dry_run=False,
+                requested_assets=["BTC"],
+                requested_timeframes=["short"],
+                requested_indicators=["inst_choch"],
+                snapshots_written=20,
+                prices_written=1,
+                errors=[],
+                started_at=started_at,
+                finished_at=started_at + timedelta(hours=2),
+            )
+        )
+    await add_labeled_feature(
+        session,
+        feature_name="inst_choch",
+        subtype="CHoCH_Bullish",
+        returns=[0.012, 0.011, 0.01],
+        event_spacing_minutes=31,
+        start_ts=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        create_snapshots=True,
+        collection_run_ids=["run-old"],
+    )
+    await add_labeled_feature(
+        session,
+        feature_name="inst_choch",
+        subtype="CHoCH_Bullish",
+        returns=[0.009, 0.008, 0.007, 0.006, 0.005, 0.004, 0.003, 0.002],
+        event_spacing_minutes=31,
+        start_ts=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        create_snapshots=True,
+        collection_run_ids=["run-new"],
+    )
+    await session.commit()
+
+    report = await feature_segment_candidate_screen(
+        session,
+        horizon="30m",
+        min_samples=6,
+        min_win_rate=0.6,
+        min_profit_factor=1.2,
+        min_unique_time_buckets=3,
+        min_unique_event_days=2,
+        min_unique_market_windows=2,
+        min_unique_collection_runs=2,
+        max_same_return_samples=6,
+        max_return_cluster_ratio=1.0,
+        limit=6,
+    )
+    row = report["candidates"][0]
+
+    assert report["labeled_count"] == 6
+    assert report["candidate_count"] == 1
+    assert row["quality"]["unique_event_day_count"] == 2
+    assert row["quality"]["unique_collection_run_count"] == 2
+
+
+@pytest.mark.asyncio
 async def test_segment_paper_ab_is_report_only_and_uses_matched_controls(session) -> None:
     strong_returns = [0.012, 0.01, 0.009, 0.008, 0.011, -0.002]
     weak_returns = [-0.006, -0.005, -0.004, -0.003, 0.001, -0.002]
