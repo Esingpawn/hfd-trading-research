@@ -1,0 +1,82 @@
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.db import Base
+from app.models import FeatureEvent, FeatureLabel, PriceSnapshot, SignalSnapshot
+from app.services.experiment_loop import run_experiment_backfill
+
+
+@pytest.fixture()
+async def session():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as db_session:
+        yield db_session
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_experiment_backfill_maintains_feature_research_labels(session) -> None:
+    observed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add(
+        SignalSnapshot(
+            symbol="BTCUSDT",
+            asset_tier="core",
+            timeframe="short",
+            interval="30m",
+            indicator="inst_choch",
+            endpoint="/api/pro/pro_data",
+            raw_payload={
+                "klines": [[1_700_000_000_000, 100, 100, 99, 101, 10]],
+                "inst_choch": [
+                    {"timestamp": 1_700_000_000_000, "price": 100.0, "type": "CHoCH_Bullish"},
+                ],
+            },
+            summary_payload={},
+            collected_at=observed_at,
+        )
+    )
+    session.add_all(
+        [
+            PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=observed_at),
+            PriceSnapshot(
+                symbol="BTCUSDT",
+                price=101.0,
+                raw_payload={},
+                collected_at=observed_at + timedelta(minutes=30),
+            ),
+        ]
+    )
+    await session.commit()
+
+    result = await run_experiment_backfill(
+        session,
+        signal_limit=10,
+        feature_limit=10,
+        feature_label_limit=10,
+        feature_horizons=["30m"],
+    )
+    events = await session.execute(select(FeatureEvent))
+    labels = await session.execute(select(FeatureLabel))
+
+    assert result["features"]["enabled"] is True
+    assert result["features"]["events"]["events_inserted"] == 1
+    assert result["features"]["labels"]["labels_labeled"] == 1
+    assert len(events.scalars().all()) == 1
+    assert labels.scalar_one().status == "labeled"
+
+
+@pytest.mark.asyncio
+async def test_experiment_backfill_can_disable_feature_research(session) -> None:
+    result = await run_experiment_backfill(
+        session,
+        signal_limit=10,
+        include_feature_research=False,
+    )
+
+    assert result["features"] == {"enabled": False}

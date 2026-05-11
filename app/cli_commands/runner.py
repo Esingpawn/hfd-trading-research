@@ -27,6 +27,7 @@ from app.services.feature_candidates import (
     feature_segment_candidate_screen,
     feature_segment_paper_ab,
 )
+from app.services.experiment_loop import run_experiment_backfill
 from app.services.features import (
     backfill_feature_events,
     backfill_feature_labels,
@@ -383,9 +384,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     experiment_loop = subparsers.add_parser(
         "experiment-loop",
-        help="Run signal outcome backfill on a schedule",
+        help="Run signal and feature research backfills on a schedule",
     )
     experiment_loop.add_argument("--limit", type=int, default=500)
+    experiment_loop.add_argument(
+        "--feature-limit",
+        type=int,
+        default=500,
+        help="Latest signal snapshots to scan for research feature events each run",
+    )
+    experiment_loop.add_argument(
+        "--feature-label-limit",
+        type=int,
+        default=5000,
+        help="Latest feature events to label each run",
+    )
+    experiment_loop.add_argument(
+        "--feature-horizons",
+        nargs="*",
+        choices=["30m", "1h", "4h", "24h"],
+        default=["30m"],
+        help="Feature label horizons to maintain for candidate research",
+    )
+    experiment_loop.add_argument(
+        "--no-feature-research",
+        action="store_true",
+        help="Only backfill signal attribution outcomes",
+    )
     experiment_loop.add_argument(
         "--interval-seconds",
         type=int,
@@ -983,6 +1008,10 @@ async def run(argv: Sequence[str] | None = None) -> int:
             interval_seconds=args.interval_seconds,
             heartbeat_ttl_seconds=_heartbeat_ttl(args.interval_seconds),
             limit=args.limit,
+            feature_limit=args.feature_limit,
+            feature_label_limit=args.feature_label_limit,
+            feature_horizons=args.feature_horizons,
+            feature_research_enabled=not args.no_feature_research,
         )
         heartbeat_task = _start_runtime_heartbeat("experiment-loop", runtime_meta)
         run_number = 0
@@ -992,13 +1021,22 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 _touch_runtime("experiment-loop", runtime_meta, run_number=run_number)
                 try:
                     async with SessionLocal() as session:
-                        result = await backfill_signal_outcomes(session, limit=args.limit)
+                        result = await run_experiment_backfill(
+                            session,
+                            signal_limit=args.limit,
+                            feature_limit=args.feature_limit,
+                            feature_label_limit=args.feature_label_limit,
+                            feature_horizons=args.feature_horizons,
+                            include_feature_research=not args.no_feature_research,
+                        )
                     print(
                         json.dumps(
                             {
                                 "run": run_number,
                                 "status": "processed",
-                                "backfill": result.__dict__,
+                                "backfill": result["signals"],
+                                "signals": result["signals"],
+                                "features": result["features"],
                             },
                             ensure_ascii=False,
                         ),
