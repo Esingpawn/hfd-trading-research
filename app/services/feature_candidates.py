@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timezone
 from statistics import mean
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +18,11 @@ DEFAULT_MIN_PROFIT_FACTOR = 1.2
 DEFAULT_MIN_AVG_RETURN = 0.0
 DEFAULT_SEGMENT_MIN_SAMPLES = 5
 DEFAULT_MIN_SEGMENTS = 2
+DEFAULT_DEDUPE_RESEARCH_SAMPLES = True
+DEFAULT_DEDUPE_BUCKET_MINUTES = 30
+DEFAULT_MIN_UNIQUE_TIME_BUCKETS = 3
+DEFAULT_MAX_SAME_RETURN_SAMPLES = 10
+DEFAULT_MAX_RETURN_CLUSTER_RATIO = 0.75
 
 
 async def feature_candidate_screen(
@@ -158,6 +164,11 @@ async def feature_segment_candidate_screen(
     min_win_rate: float = DEFAULT_MIN_WIN_RATE,
     min_profit_factor: float = DEFAULT_MIN_PROFIT_FACTOR,
     min_avg_return: float = DEFAULT_MIN_AVG_RETURN,
+    dedupe_research_samples: bool = DEFAULT_DEDUPE_RESEARCH_SAMPLES,
+    dedupe_bucket_minutes: int = DEFAULT_DEDUPE_BUCKET_MINUTES,
+    min_unique_time_buckets: int = DEFAULT_MIN_UNIQUE_TIME_BUCKETS,
+    max_same_return_samples: int = DEFAULT_MAX_SAME_RETURN_SAMPLES,
+    max_return_cluster_ratio: float = DEFAULT_MAX_RETURN_CLUSTER_RATIO,
     limit: int = 20000,
     persist: bool = False,
 ) -> dict[str, Any]:
@@ -169,6 +180,11 @@ async def feature_segment_candidate_screen(
         min_avg_return=min_avg_return,
         segment_min_samples=min_samples,
         min_segments=1,
+        dedupe_research_samples=dedupe_research_samples,
+        dedupe_bucket_minutes=dedupe_bucket_minutes,
+        min_unique_time_buckets=min_unique_time_buckets,
+        max_same_return_samples=max_same_return_samples,
+        max_return_cluster_ratio=max_return_cluster_ratio,
     )
     pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
     rows = _segment_candidate_rows(pairs, thresholds=thresholds)
@@ -181,6 +197,8 @@ async def feature_segment_candidate_screen(
         "candidate_count": len(candidates),
         "thresholds": thresholds,
         "policy": _research_policy(),
+        "quality_summary": _research_quality_summary(rows),
+        "risk_summary": _risk_summary(rows),
         "candidates": candidates,
         "rejected_summary": _rejection_summary(rows),
         "by_feature": _segment_candidate_feature_summary(candidates),
@@ -206,6 +224,11 @@ async def feature_segment_paper_ab(
     min_win_rate: float = DEFAULT_MIN_WIN_RATE,
     min_profit_factor: float = DEFAULT_MIN_PROFIT_FACTOR,
     min_avg_return: float = DEFAULT_MIN_AVG_RETURN,
+    dedupe_research_samples: bool = DEFAULT_DEDUPE_RESEARCH_SAMPLES,
+    dedupe_bucket_minutes: int = DEFAULT_DEDUPE_BUCKET_MINUTES,
+    min_unique_time_buckets: int = DEFAULT_MIN_UNIQUE_TIME_BUCKETS,
+    max_same_return_samples: int = DEFAULT_MAX_SAME_RETURN_SAMPLES,
+    max_return_cluster_ratio: float = DEFAULT_MAX_RETURN_CLUSTER_RATIO,
     candidate_limit: int = 50,
     limit: int = 20000,
     persist: bool = False,
@@ -217,20 +240,29 @@ async def feature_segment_paper_ab(
         min_win_rate=min_win_rate,
         min_profit_factor=min_profit_factor,
         min_avg_return=min_avg_return,
+        dedupe_research_samples=dedupe_research_samples,
+        dedupe_bucket_minutes=dedupe_bucket_minutes,
+        min_unique_time_buckets=min_unique_time_buckets,
+        max_same_return_samples=max_same_return_samples,
+        max_return_cluster_ratio=max_return_cluster_ratio,
         limit=limit,
         persist=False,
     )
+    thresholds = segment_report["thresholds"]
     selected = segment_report["candidates"][:candidate_limit]
     selected_keys = {str(row["segment_key"]) for row in selected}
     selected_symbol_timeframes = {str(row["symbol_timeframe"]) for row in selected}
     pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
-    candidate_pairs = [(event, label) for event, label in pairs if _segment_key(event) in selected_keys]
-    matched_control_pairs = [
+    raw_candidate_pairs = [(event, label) for event, label in pairs if _segment_key(event) in selected_keys]
+    raw_matched_control_pairs = [
         (event, label)
         for event, label in pairs
         if _symbol_timeframe(event) in selected_symbol_timeframes and _segment_key(event) not in selected_keys
     ]
-    all_control_pairs = [(event, label) for event, label in pairs if _segment_key(event) not in selected_keys]
+    raw_all_control_pairs = [(event, label) for event, label in pairs if _segment_key(event) not in selected_keys]
+    candidate_pairs = _dedupe_research_pairs(raw_candidate_pairs, thresholds=thresholds, key_func=_segment_key)
+    matched_control_pairs = _dedupe_research_pairs(raw_matched_control_pairs, thresholds=thresholds, key_func=_segment_key)
+    all_control_pairs = _dedupe_research_pairs(raw_all_control_pairs, thresholds=thresholds, key_func=_segment_key)
     candidate_stats = _pseudo_trade_stats(candidate_pairs)
     matched_control_stats = _pseudo_trade_stats(matched_control_pairs)
     all_control_stats = _pseudo_trade_stats(all_control_pairs)
@@ -240,14 +272,24 @@ async def feature_segment_paper_ab(
         "candidate_limit": candidate_limit,
         "selected_candidate_count": len(selected),
         "selected_segment_keys": [row["segment_key"] for row in selected],
-        "thresholds": segment_report["thresholds"],
+        "thresholds": thresholds,
         "policy": _research_policy(),
         "data_quality": {
             "labeled_count": len(pairs),
             "candidate_pseudo_trade_count": candidate_stats["trade_count"],
+            "raw_candidate_pseudo_trade_count": len(raw_candidate_pairs),
             "matched_control_pseudo_trade_count": matched_control_stats["trade_count"],
+            "raw_matched_control_pseudo_trade_count": len(raw_matched_control_pairs),
             "all_control_pseudo_trade_count": all_control_stats["trade_count"],
+            "raw_all_control_pseudo_trade_count": len(raw_all_control_pairs),
             "status": "ready" if selected else "no_segment_candidate_features",
+        },
+        "quality": {
+            "candidate": _sample_quality(raw_candidate_pairs, candidate_pairs, thresholds=thresholds),
+            "matched_control": _sample_quality(
+                raw_matched_control_pairs, matched_control_pairs, thresholds=thresholds
+            ),
+            "all_control": _sample_quality(raw_all_control_pairs, all_control_pairs, thresholds=thresholds),
         },
         "arms": {
             "candidate": candidate_stats,
@@ -260,7 +302,15 @@ async def feature_segment_paper_ab(
             {
                 **row,
                 "pseudo_trade_metrics": _pseudo_trade_stats(
-                    [(event, label) for event, label in candidate_pairs if _segment_key(event) == row["segment_key"]]
+                    _dedupe_research_pairs(
+                        [
+                            (event, label)
+                            for event, label in raw_candidate_pairs
+                            if _segment_key(event) == row["segment_key"]
+                        ],
+                        thresholds=thresholds,
+                        key_func=_segment_key,
+                    )
                 ),
             }
             for row in selected
@@ -276,7 +326,7 @@ async def feature_segment_paper_ab(
             session,
             name=f"feature_segment_paper_ab_{horizon}",
             scope={"horizon": horizon, "limit": limit, "candidate_limit": candidate_limit},
-            params=segment_report["thresholds"],
+            params=thresholds,
             metrics=report,
             notes="Report-only segment-aware paper A/B using feature labels as pseudo-trades; no PaperTrade rows are opened.",
         )
@@ -374,9 +424,12 @@ def _segment_candidate_rows(
         buckets.setdefault(_segment_key(event), []).append((event, label))
     rows = []
     for segment_key, items in buckets.items():
-        stats = _pseudo_trade_stats(items)
+        effective_items = _dedupe_research_pairs(items, thresholds=thresholds, key_func=_segment_key)
+        raw_stats = _pseudo_trade_stats(items)
+        stats = _pseudo_trade_stats(effective_items)
+        quality = _sample_quality(items, effective_items, thresholds=thresholds)
         first = items[0][0]
-        reasons = _segment_candidate_reasons(stats, thresholds=thresholds)
+        reasons = _segment_candidate_reasons(stats, quality=quality, thresholds=thresholds)
         promotion_status = "segment_candidate" if not reasons else "rejected"
         rows.append(
             {
@@ -390,13 +443,16 @@ def _segment_candidate_rows(
                 "symbol": first.symbol,
                 "timeframe": first.timeframe,
                 "sample_count": stats["trade_count"],
+                "raw_sample_count": raw_stats["trade_count"],
                 "win_rate": stats["win_rate"],
                 "avg_return": stats["avg_return"],
                 "median_return": stats["median_return"],
                 "profit_factor": stats["profit_factor"],
                 "avg_mfe": stats["avg_mfe"],
                 "avg_mae": stats["avg_mae"],
-                "avg_strength": _avg_strength(items),
+                "avg_strength": _avg_strength(effective_items),
+                "quality": quality,
+                "overfit_risk": quality["overfit_risk"],
                 "rejection_reasons": reasons,
                 "promotion_status": promotion_status,
                 "paper_ab_ready": promotion_status == "segment_candidate",
@@ -474,10 +530,22 @@ def _candidate_reasons(
     return reasons
 
 
-def _segment_candidate_reasons(stats: dict[str, Any], *, thresholds: dict[str, Any]) -> list[str]:
+def _segment_candidate_reasons(
+    stats: dict[str, Any],
+    *,
+    quality: dict[str, Any] | None = None,
+    thresholds: dict[str, Any],
+) -> list[str]:
     reasons = []
     if stats["trade_count"] < thresholds["min_samples"]:
         reasons.append("sample_count_below_minimum")
+    if quality:
+        if quality["unique_time_bucket_count"] < thresholds["min_unique_time_buckets"]:
+            reasons.append("time_bucket_count_below_minimum")
+        if quality["max_same_return_count"] > thresholds["max_same_return_samples"]:
+            reasons.append("same_return_cluster_too_large")
+        if quality["return_cluster_ratio"] > thresholds["max_return_cluster_ratio"]:
+            reasons.append("return_cluster_ratio_too_high")
     if stats["avg_return"] is None or stats["avg_return"] <= thresholds["min_avg_return"]:
         reasons.append("avg_return_below_minimum")
     if stats["win_rate"] is None or stats["win_rate"] < thresholds["min_win_rate"]:
@@ -558,6 +626,11 @@ def _thresholds(
     min_avg_return: float,
     segment_min_samples: int,
     min_segments: int,
+    dedupe_research_samples: bool = DEFAULT_DEDUPE_RESEARCH_SAMPLES,
+    dedupe_bucket_minutes: int = DEFAULT_DEDUPE_BUCKET_MINUTES,
+    min_unique_time_buckets: int = DEFAULT_MIN_UNIQUE_TIME_BUCKETS,
+    max_same_return_samples: int = DEFAULT_MAX_SAME_RETURN_SAMPLES,
+    max_return_cluster_ratio: float = DEFAULT_MAX_RETURN_CLUSTER_RATIO,
 ) -> dict[str, Any]:
     return {
         "min_samples": int(min_samples),
@@ -566,6 +639,11 @@ def _thresholds(
         "min_avg_return": float(min_avg_return),
         "segment_min_samples": int(segment_min_samples),
         "min_segments": int(min_segments),
+        "dedupe_research_samples": bool(dedupe_research_samples),
+        "dedupe_bucket_minutes": max(1, int(dedupe_bucket_minutes)),
+        "min_unique_time_buckets": max(1, int(min_unique_time_buckets)),
+        "max_same_return_samples": max(1, int(max_same_return_samples)),
+        "max_return_cluster_ratio": float(max_return_cluster_ratio),
     }
 
 
@@ -589,6 +667,105 @@ def _rejection_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(counter.items()))
 
 
+def _dedupe_research_pairs(
+    items: list[tuple[FeatureEventModel, FeatureLabel]],
+    *,
+    thresholds: dict[str, Any],
+    key_func: Callable[[FeatureEventModel], str],
+) -> list[tuple[FeatureEventModel, FeatureLabel]]:
+    if not thresholds.get("dedupe_research_samples", DEFAULT_DEDUPE_RESEARCH_SAMPLES):
+        return items
+    bucket_minutes = max(1, int(thresholds.get("dedupe_bucket_minutes") or DEFAULT_DEDUPE_BUCKET_MINUTES))
+    seen: set[tuple[str, str]] = set()
+    deduped: list[tuple[FeatureEventModel, FeatureLabel]] = []
+    for event, label in items:
+        key = (key_func(event), _time_bucket_key(event.event_ts, bucket_minutes))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((event, label))
+    return deduped
+
+
+def _sample_quality(
+    raw_items: list[tuple[FeatureEventModel, FeatureLabel]],
+    effective_items: list[tuple[FeatureEventModel, FeatureLabel]],
+    *,
+    thresholds: dict[str, Any],
+) -> dict[str, Any]:
+    bucket_minutes = max(1, int(thresholds.get("dedupe_bucket_minutes") or DEFAULT_DEDUPE_BUCKET_MINUTES))
+    raw_count = len(raw_items)
+    effective_count = len(effective_items)
+    return_counts = Counter(_return_cluster_key(label.return_pct) for _event, label in effective_items)
+    max_same_return_count = max(return_counts.values(), default=0)
+    return_cluster_ratio = max_same_return_count / effective_count if effective_count else 0.0
+    unique_event_ts = {_event_ts_key(event.event_ts) for event, _label in raw_items}
+    unique_snapshots = {str(event.snapshot_id) for event, _label in raw_items if event.snapshot_id}
+    unique_time_buckets = {_time_bucket_key(event.event_ts, bucket_minutes) for event, _label in raw_items}
+    risk_reasons: list[str] = []
+    if len(unique_time_buckets) < int(thresholds["min_unique_time_buckets"]):
+        risk_reasons.append("time_bucket_count_below_minimum")
+    if max_same_return_count > int(thresholds["max_same_return_samples"]):
+        risk_reasons.append("same_return_cluster_too_large")
+    if return_cluster_ratio > float(thresholds["max_return_cluster_ratio"]):
+        risk_reasons.append("return_cluster_ratio_too_high")
+    dedupe_removed_count = raw_count - effective_count
+    dedupe_ratio = dedupe_removed_count / raw_count if raw_count else 0.0
+    overfit_risk = "low"
+    if risk_reasons:
+        overfit_risk = "high"
+    elif dedupe_ratio >= 0.5 or (effective_count and len(unique_snapshots) < effective_count):
+        overfit_risk = "medium"
+    return {
+        "dedupe_research_samples": bool(thresholds.get("dedupe_research_samples")),
+        "dedupe_bucket_minutes": bucket_minutes,
+        "raw_sample_count": raw_count,
+        "effective_sample_count": effective_count,
+        "dedupe_removed_count": dedupe_removed_count,
+        "dedupe_ratio": dedupe_ratio,
+        "unique_event_ts_count": len(unique_event_ts),
+        "unique_snapshot_count": len(unique_snapshots),
+        "unique_time_bucket_count": len(unique_time_buckets),
+        "max_same_return_count": max_same_return_count,
+        "return_cluster_ratio": return_cluster_ratio,
+        "overfit_risk": overfit_risk,
+        "risk_reasons": risk_reasons,
+    }
+
+
+def _research_quality_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    qualities = [row.get("quality") or {} for row in rows]
+    raw_count = sum(int(item.get("raw_sample_count") or 0) for item in qualities)
+    effective_count = sum(int(item.get("effective_sample_count") or 0) for item in qualities)
+    dedupe_removed_count = sum(int(item.get("dedupe_removed_count") or 0) for item in qualities)
+    return {
+        "raw_sample_count": raw_count,
+        "effective_sample_count": effective_count,
+        "dedupe_removed_count": dedupe_removed_count,
+        "dedupe_ratio": dedupe_removed_count / raw_count if raw_count else 0.0,
+        "risk_counts": _risk_summary(rows),
+    }
+
+
+def _risk_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counter: Counter[str] = Counter()
+    for row in rows:
+        risk = str(row.get("overfit_risk") or (row.get("quality") or {}).get("overfit_risk") or "unknown")
+        counter[risk] += 1
+    return dict(sorted(counter.items()))
+
+
+def _combined_overfit_risk(rows: list[dict[str, Any]]) -> str:
+    risks = {str(row.get("overfit_risk") or "unknown") for row in rows}
+    if "high" in risks:
+        return "high"
+    if "medium" in risks:
+        return "medium"
+    if "low" in risks:
+        return "low"
+    return "unknown"
+
+
 def _segment_candidate_feature_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     buckets: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -596,6 +773,7 @@ def _segment_candidate_feature_summary(rows: list[dict[str, Any]]) -> list[dict[
     summary = []
     for feature_key, items in buckets.items():
         total_samples = sum(int(row["sample_count"] or 0) for row in items)
+        total_raw_samples = sum(int(row.get("raw_sample_count") or row["sample_count"] or 0) for row in items)
         weighted_return = _weighted_mean(items, "avg_return", "sample_count")
         weighted_win_rate = _weighted_mean(items, "win_rate", "sample_count")
         first = items[0]
@@ -608,8 +786,10 @@ def _segment_candidate_feature_summary(rows: list[dict[str, Any]]) -> list[dict[
                 "direction": first["direction"],
                 "segment_count": len(items),
                 "sample_count": total_samples,
+                "raw_sample_count": total_raw_samples,
                 "weighted_avg_return": weighted_return,
                 "weighted_win_rate": weighted_win_rate,
+                "overfit_risk": _combined_overfit_risk(items),
                 "segments": [row["symbol_timeframe"] for row in items[:12]],
                 "used_for_execution_weights": False,
                 "used_for_opening_decisions": False,
@@ -632,6 +812,29 @@ def _symbol_timeframe(event: FeatureEventModel) -> str:
 
 def _segment_key(event: FeatureEventModel) -> str:
     return f"{_feature_key(event)}:{event.symbol}:{event.timeframe}"
+
+
+def _time_bucket_key(value: datetime, bucket_minutes: int) -> str:
+    aware = _aware(value)
+    bucket_seconds = max(1, int(bucket_minutes)) * 60
+    bucket_start = int(aware.timestamp()) // bucket_seconds * bucket_seconds
+    return datetime.fromtimestamp(bucket_start, tz=timezone.utc).isoformat()
+
+
+def _event_ts_key(value: datetime) -> str:
+    return _aware(value).isoformat()
+
+
+def _aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _return_cluster_key(value: Any) -> str:
+    if isinstance(value, (int, float)):
+        return f"{float(value):.8f}"
+    return "none"
 
 
 def _avg_strength(items: list[tuple[FeatureEventModel, FeatureLabel]]) -> float | None:

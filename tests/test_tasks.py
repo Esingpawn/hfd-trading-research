@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -188,7 +188,15 @@ async def test_run_task_by_id_executes_segment_feature_candidates(session) -> No
     await _add_feature_group(session, symbol="ZECUSDT", returns=[-0.006, -0.005, -0.004, -0.003, 0.001, -0.002])
     item = TaskRun(
         task_name="features.segment_candidates",
-        payload={"min_samples": 6, "min_win_rate": 0.6, "min_profit_factor": 1.2, "persist": True},
+        payload={
+            "min_samples": 6,
+            "min_win_rate": 0.6,
+            "min_profit_factor": 1.2,
+            "min_unique_time_buckets": 1,
+            "max_same_return_samples": 6,
+            "max_return_cluster_ratio": 1.0,
+            "persist": True,
+        },
         result={},
     )
     session.add(item)
@@ -200,6 +208,7 @@ async def test_run_task_by_id_executes_segment_feature_candidates(session) -> No
     assert result["status"] == "completed"
     assert result["result"]["execution"]["candidate_count"] == 1
     assert result["result"]["execution"]["candidates"][0]["symbol"] == "BTCUSDT"
+    assert result["result"]["execution"]["candidates"][0]["quality"]["dedupe_research_samples"] is True
     assert experiment is not None
 
 
@@ -209,7 +218,15 @@ async def test_run_task_by_id_executes_segment_feature_paper_ab(session) -> None
     await _add_feature_group(session, symbol="ZECUSDT", returns=[-0.006, -0.005, -0.004, -0.003, 0.001, -0.002])
     item = TaskRun(
         task_name="features.segment_paper_ab",
-        payload={"min_samples": 6, "min_win_rate": 0.6, "min_profit_factor": 1.2, "persist": True},
+        payload={
+            "min_samples": 6,
+            "min_win_rate": 0.6,
+            "min_profit_factor": 1.2,
+            "min_unique_time_buckets": 1,
+            "max_same_return_samples": 6,
+            "max_return_cluster_ratio": 1.0,
+            "persist": True,
+        },
         result={},
     )
     session.add(item)
@@ -221,6 +238,7 @@ async def test_run_task_by_id_executes_segment_feature_paper_ab(session) -> None
     assert result["status"] == "completed"
     assert result["result"]["execution"]["selected_candidate_count"] == 1
     assert result["result"]["execution"]["policy"]["opens_paper_trades"] is False
+    assert result["result"]["execution"]["quality"]["candidate"]["raw_sample_count"] >= 1
     assert experiment is not None
 
 
@@ -252,7 +270,7 @@ async def _add_feature_group(session, *, symbol: str, returns: list[float] | Non
             event_key=f"event-{symbol}-{index}",
             feature_name="inst_choch",
             direction="long",
-            event_ts=base_ts,
+            event_ts=base_ts + timedelta(minutes=index * 31),
             event_price=100.0,
             strength=0.7,
             subtype="CHoCH_Bullish",

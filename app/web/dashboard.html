@@ -2069,16 +2069,20 @@
       setHtml("featureSegmentCandidatesSummary", kvRows([
         ["窗口", esc(featureSegmentCandidates.horizon || "30m")],
         ["已标注", fmt(featureSegmentCandidates.labeled_count || 0, 0)],
+        ["有效/原始", `${fmt((featureSegmentCandidates.quality_summary || {}).effective_sample_count || 0, 0)} / ${fmt((featureSegmentCandidates.quality_summary || {}).raw_sample_count || 0, 0)}`],
+        ["去重比例", pct((featureSegmentCandidates.quality_summary || {}).dedupe_ratio, 1)],
         ["候选分段", fmt(featureSegmentCandidates.candidate_count || 0, 0)],
+        ["风险", Object.entries(featureSegmentCandidates.risk_summary || {}).map(([key, value]) => `${esc(key)}:${fmt(value, 0)}`).join(" / ") || "--"],
         ["特征组", fmt((featureSegmentCandidates.by_feature || []).length, 0)]
       ]));
       setHtml("featureSegmentCandidates", table((featureSegmentCandidates.candidates || []).slice(0, 10), [
         { label:"分段", render: row => `${coinBadge(row.symbol)} <span class="muted">${esc(row.timeframe)}</span>` },
         { label:"特征", render: row => esc(row.feature_key) },
-        { label:"样本", render: row => fmt(row.sample_count, 0) },
+        { label:"有效/原始", render: row => `${fmt(row.sample_count, 0)} / ${fmt(row.raw_sample_count || row.sample_count, 0)}` },
+        { label:"时间桶", render: row => fmt((row.quality || {}).unique_time_bucket_count || 0, 0) },
         { label:"胜率", render: row => pct(row.win_rate, 1) },
         { label:"平均收益", render: row => coloredPct(row.avg_return) },
-        { label:"收益因子", render: row => fmt(row.profit_factor, 2) },
+        { label:"风险", render: row => tag(row.overfit_risk === "low" ? "ok" : row.overfit_risk === "medium" ? "warn" : "bad", row.overfit_risk || "unknown") },
         { label:"状态", render: row => tag(row.paper_ab_ready ? "ok" : "warn", row.paper_ab_ready ? "分段就绪" : esc(row.promotion_status)) }
       ], "暂无达标分段候选"));
       const segmentCandidateArm = (featureSegmentPaperAb.arms || {}).candidate || {};
@@ -2087,16 +2091,17 @@
       setHtml("featureSegmentPaperAbSummary", kvRows([
         ["入选分段", fmt(featureSegmentPaperAb.selected_candidate_count || 0, 0)],
         ["候选伪交易", fmt(segmentCandidateArm.trade_count || 0, 0)],
+        ["原始候选", fmt((featureSegmentPaperAb.data_quality || {}).raw_candidate_pseudo_trade_count || 0, 0)],
         ["同分段对照", fmt(segmentMatchedControl.trade_count || 0, 0)],
         ["收益差", coloredPct(segmentMatchedEdge.avg_return_delta)]
       ]));
       setHtml("featureSegmentPaperAb", table((featureSegmentPaperAb.per_segment || []).slice(0, 10), [
         { label:"分段", render: row => `${coinBadge(row.symbol)} <span class="muted">${esc(row.timeframe)}</span>` },
         { label:"特征", render: row => esc(row.feature_key) },
-        { label:"伪交易", render: row => fmt((row.pseudo_trade_metrics || {}).trade_count || 0, 0) },
+        { label:"伪交易", render: row => `${fmt((row.pseudo_trade_metrics || {}).trade_count || 0, 0)} / ${fmt(row.raw_sample_count || row.sample_count || 0, 0)}` },
         { label:"胜率", render: row => pct((row.pseudo_trade_metrics || {}).win_rate, 1) },
         { label:"平均收益", render: row => coloredPct((row.pseudo_trade_metrics || {}).avg_return) },
-        { label:"收益因子", render: row => fmt((row.pseudo_trade_metrics || {}).profit_factor, 2) }
+        { label:"风险", render: row => tag(row.overfit_risk === "low" ? "ok" : row.overfit_risk === "medium" ? "warn" : "bad", row.overfit_risk || "unknown") }
       ], "暂无分段 A/B 报告"));
       setHtml("indicatorCatalog", table(catalog, [
         { label:"暗流指标", render: row => esc(row.hfd_name) },
@@ -2254,8 +2259,8 @@
           api("/signals/experiment-effectiveness?horizon=4h&min_samples=5").catch(error => ({ error: error.message, indicators: [] })),
           api("/features/candidates?horizon=30m&min_samples=30&limit=20000").catch(error => ({ error: error.message, candidates: [], watchlist: [] })),
           api("/features/paper-ab?horizon=30m&min_samples=30&limit=20000&candidate_limit=20").catch(error => ({ error: error.message, arms: {}, per_candidate: [] })),
-          api("/features/segment-candidates?horizon=30m&min_samples=30&limit=20000").catch(error => ({ error: error.message, candidates: [], by_feature: [] })),
-          api("/features/segment-paper-ab?horizon=30m&min_samples=30&limit=20000&candidate_limit=50").catch(error => ({ error: error.message, arms: {}, per_segment: [] })),
+          api("/features/segment-candidates?horizon=30m&min_samples=30&limit=20000&dedupe_research_samples=true&dedupe_bucket_minutes=30&min_unique_time_buckets=3&max_same_return_samples=10&max_return_cluster_ratio=0.75").catch(error => ({ error: error.message, candidates: [], by_feature: [] })),
+          api("/features/segment-paper-ab?horizon=30m&min_samples=30&limit=20000&candidate_limit=50&dedupe_research_samples=true&dedupe_bucket_minutes=30&min_unique_time_buckets=3&max_same_return_samples=10&max_return_cluster_ratio=0.75").catch(error => ({ error: error.message, arms: {}, per_segment: [] })),
           withTimeout(
             api("/telegram/status").catch(error => ({ configured:false, error: error.message })),
             6500,

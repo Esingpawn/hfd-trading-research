@@ -34,6 +34,7 @@ async def add_labeled_feature(
     returns: list[float],
     symbol: str = "BTCUSDT",
     timeframe: str = "short",
+    event_spacing_minutes: int = 31,
 ) -> None:
     base_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
     for index, return_pct in enumerate(returns):
@@ -47,7 +48,7 @@ async def add_labeled_feature(
             event_key=f"event-{feature_name}-{subtype}-{symbol}-{timeframe}-{index}",
             feature_name=feature_name,
             direction=direction,
-            event_ts=base_ts + timedelta(minutes=index),
+            event_ts=base_ts + timedelta(minutes=index * event_spacing_minutes),
             event_price=100.0,
             strength=0.7,
             subtype=subtype,
@@ -200,6 +201,9 @@ async def test_segment_candidate_screen_promotes_local_segments_when_global_feat
         min_samples=6,
         min_win_rate=0.6,
         min_profit_factor=1.2,
+        min_unique_time_buckets=1,
+        max_same_return_samples=6,
+        max_return_cluster_ratio=1.0,
         persist=True,
     )
     experiment = await session.scalar(select(ExperimentRun).where(ExperimentRun.name == "feature_segment_candidates_30m"))
@@ -211,6 +215,36 @@ async def test_segment_candidate_screen_promotes_local_segments_when_global_feat
     assert segment_report["candidates"][0]["used_for_opening_decisions"] is False
     assert experiment is not None
     assert experiment.status == "research"
+
+
+@pytest.mark.asyncio
+async def test_segment_candidate_screen_marks_clustered_segments_as_high_risk(session) -> None:
+    await add_labeled_feature(
+        session,
+        feature_name="inst_choch",
+        subtype="CHoCH_Bullish",
+        returns=[0.01, 0.011, 0.012, 0.013, 0.014, 0.015],
+        event_spacing_minutes=1,
+    )
+    await session.commit()
+
+    report = await feature_segment_candidate_screen(
+        session,
+        horizon="30m",
+        min_samples=3,
+        min_win_rate=0.6,
+        min_profit_factor=1.2,
+        min_unique_time_buckets=3,
+        max_same_return_samples=10,
+    )
+    row = report["all_segments"][0]
+
+    assert report["candidate_count"] == 0
+    assert row["raw_sample_count"] == 6
+    assert row["sample_count"] == 1
+    assert row["quality"]["unique_time_bucket_count"] == 1
+    assert row["overfit_risk"] == "high"
+    assert "time_bucket_count_below_minimum" in row["rejection_reasons"]
 
 
 @pytest.mark.asyncio
@@ -235,6 +269,9 @@ async def test_segment_paper_ab_is_report_only_and_uses_matched_controls(session
         min_samples=6,
         min_win_rate=0.6,
         min_profit_factor=1.2,
+        min_unique_time_buckets=1,
+        max_same_return_samples=6,
+        max_return_cluster_ratio=1.0,
         persist=True,
     )
     paper_count = await session.scalar(select(func.count()).select_from(PaperTrade))
@@ -243,6 +280,7 @@ async def test_segment_paper_ab_is_report_only_and_uses_matched_controls(session
     assert report["policy"]["opens_paper_trades"] is False
     assert report["selected_candidate_count"] == 1
     assert report["arms"]["candidate"]["trade_count"] == 6
+    assert report["data_quality"]["raw_candidate_pseudo_trade_count"] == 6
     assert report["arms"]["matched_control"]["trade_count"] == 6
     assert report["arms"]["matched_edge"]["avg_return_delta"] > 0
     assert paper_count == 0

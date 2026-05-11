@@ -322,6 +322,11 @@ def build_parser() -> argparse.ArgumentParser:
     segment_candidates.add_argument("--min-win-rate", type=float, default=0.52)
     segment_candidates.add_argument("--min-profit-factor", type=float, default=1.2)
     segment_candidates.add_argument("--min-avg-return", type=float, default=0.0)
+    segment_candidates.add_argument("--no-dedupe-research-samples", action="store_true", help="Disable research sample time-bucket dedupe")
+    segment_candidates.add_argument("--dedupe-bucket-minutes", type=int, default=30)
+    segment_candidates.add_argument("--min-unique-time-buckets", type=int, default=3)
+    segment_candidates.add_argument("--max-same-return-samples", type=int, default=10)
+    segment_candidates.add_argument("--max-return-cluster-ratio", type=float, default=0.75)
     segment_candidates.add_argument("--limit", type=int, default=20000)
     segment_candidates.add_argument("--persist", action="store_true", help="Save the report as an experiment run")
 
@@ -331,6 +336,11 @@ def build_parser() -> argparse.ArgumentParser:
     segment_ab.add_argument("--min-win-rate", type=float, default=0.52)
     segment_ab.add_argument("--min-profit-factor", type=float, default=1.2)
     segment_ab.add_argument("--min-avg-return", type=float, default=0.0)
+    segment_ab.add_argument("--no-dedupe-research-samples", action="store_true", help="Disable research sample time-bucket dedupe")
+    segment_ab.add_argument("--dedupe-bucket-minutes", type=int, default=30)
+    segment_ab.add_argument("--min-unique-time-buckets", type=int, default=3)
+    segment_ab.add_argument("--max-same-return-samples", type=int, default=10)
+    segment_ab.add_argument("--max-return-cluster-ratio", type=float, default=0.75)
     segment_ab.add_argument("--candidate-limit", type=int, default=50)
     segment_ab.add_argument("--limit", type=int, default=20000)
     segment_ab.add_argument("--persist", action="store_true", help="Save the report as an experiment run")
@@ -824,6 +834,11 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 min_win_rate=args.min_win_rate,
                 min_profit_factor=args.min_profit_factor,
                 min_avg_return=args.min_avg_return,
+                dedupe_research_samples=not args.no_dedupe_research_samples,
+                dedupe_bucket_minutes=args.dedupe_bucket_minutes,
+                min_unique_time_buckets=args.min_unique_time_buckets,
+                max_same_return_samples=args.max_same_return_samples,
+                max_return_cluster_ratio=args.max_return_cluster_ratio,
                 limit=args.limit,
                 persist=args.persist,
             )
@@ -840,6 +855,11 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 min_win_rate=args.min_win_rate,
                 min_profit_factor=args.min_profit_factor,
                 min_avg_return=args.min_avg_return,
+                dedupe_research_samples=not args.no_dedupe_research_samples,
+                dedupe_bucket_minutes=args.dedupe_bucket_minutes,
+                min_unique_time_buckets=args.min_unique_time_buckets,
+                max_same_return_samples=args.max_same_return_samples,
+                max_return_cluster_ratio=args.max_return_cluster_ratio,
                 candidate_limit=args.candidate_limit,
                 limit=args.limit,
                 persist=args.persist,
