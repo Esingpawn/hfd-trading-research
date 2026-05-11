@@ -86,6 +86,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
       REDIS_URL: redis://redis:6379/0
+      RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
+      EXTERNALIZE_RAW_PAYLOADS: "true"
       LIVE_TRADING_ENABLED: "false"
       TRADING_GATEWAY: disabled
     command:
@@ -112,6 +114,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
+      - hfd_raw_payloads:/var/lib/hfd/raw_payloads
       - hfd_runtime:/app/data/runtime
       - hfd_logs:/app/data/logs
     restart: unless-stopped
@@ -123,6 +126,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
       REDIS_URL: redis://redis:6379/0
+      RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
+      EXTERNALIZE_RAW_PAYLOADS: "true"
       LIVE_TRADING_ENABLED: "false"
       TRADING_GATEWAY: disabled
     command:
@@ -140,6 +145,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
+      - hfd_raw_payloads:/var/lib/hfd/raw_payloads
       - hfd_runtime:/app/data/runtime
       - hfd_logs:/app/data/logs
     restart: unless-stopped
