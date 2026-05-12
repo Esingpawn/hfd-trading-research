@@ -1,0 +1,15 @@
+[Unit]
+Description=HFD Telegram Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/hfd-telegram-relay.env
+ExecStart=/usr/bin/python3 /opt/hfd-relay/telegram-relay.py
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

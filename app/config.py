@@ -28,6 +28,8 @@ class Settings:
     collector_user_agent: str = "HFDResearchBot/0.1"
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_relay_url: str = ""
+    telegram_relay_secret: str = ""
     live_trading_enabled: bool = False
     trading_gateway: str = "disabled"
 
@@ -48,6 +50,8 @@ def get_settings() -> Settings:
         ),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+        telegram_relay_url=os.getenv("TELEGRAM_RELAY_URL", "").rstrip("/"),
+        telegram_relay_secret=os.getenv("TELEGRAM_RELAY_SECRET", ""),
         live_trading_enabled=os.getenv("LIVE_TRADING_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
         trading_gateway=os.getenv("TRADING_GATEWAY", Settings.trading_gateway),
     )
