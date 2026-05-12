@@ -403,7 +403,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--feature-horizons",
         nargs="*",
         choices=["30m", "1h", "4h", "24h"],
-        default=["30m"],
+        default=["30m", "1h", "4h", "24h"],
         help="Feature label horizons to maintain for candidate research",
     )
     experiment_loop.add_argument(

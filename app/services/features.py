@@ -140,6 +140,7 @@ class FeatureLabelBackfillResult:
     labels_pending: int
     labels_skipped: int
     labels_refreshed: int
+    horizon_results: dict[str, dict[str, int]] | None = None
 
 
 @dataclass(frozen=True)
@@ -313,6 +314,14 @@ async def backfill_feature_labels(
     commit: bool = True,
 ) -> FeatureLabelBackfillResult:
     selected_horizons = _normalize_horizons(horizons)
+    if len(selected_horizons) > 1:
+        return await _backfill_feature_labels_by_horizon(
+            session,
+            limit=limit,
+            horizons=selected_horizons,
+            refresh_labeled=refresh_labeled,
+            commit=commit,
+        )
     min_horizon = min(FEATURE_HORIZONS[horizon] for horizon in selected_horizons)
     latest_price_cutoffs = await _latest_price_cutoffs(session, min_horizon)
     done_horizon_count = (
@@ -331,11 +340,25 @@ async def backfill_feature_labels(
         .group_by(FeatureLabel.feature_event_id)
         .subquery()
     )
+    pending_horizon_count = (
+        select(
+            FeatureLabel.feature_event_id.label("feature_event_id"),
+            func.count(func.distinct(FeatureLabel.horizon)).label("pending_horizon_count"),
+        )
+        .where(
+            FeatureLabel.horizon.in_(selected_horizons),
+            FeatureLabel.status == "pending",
+        )
+        .group_by(FeatureLabel.feature_event_id)
+        .subquery()
+    )
     query = (
         select(FeatureEventModel)
         .outerjoin(done_horizon_count, done_horizon_count.c.feature_event_id == FeatureEventModel.id)
-        .order_by(FeatureEventModel.event_ts.desc())
+        .outerjoin(pending_horizon_count, pending_horizon_count.c.feature_event_id == FeatureEventModel.id)
+        .order_by(func.coalesce(pending_horizon_count.c.pending_horizon_count, 0).desc(), FeatureEventModel.event_ts.desc())
         .limit(limit)
+        .with_for_update(of=FeatureEventModel, skip_locked=True)
     )
     if not refresh_labeled:
         if not latest_price_cutoffs:
@@ -401,6 +424,72 @@ async def backfill_feature_labels(
         labels_skipped=skipped,
         labels_refreshed=refreshed,
     )
+
+
+async def _backfill_feature_labels_by_horizon(
+    session: AsyncSession,
+    *,
+    limit: int,
+    horizons: list[str],
+    refresh_labeled: bool,
+    commit: bool,
+) -> FeatureLabelBackfillResult:
+    horizon_limits = _split_limit(limit, len(horizons))
+    per_horizon: dict[str, dict[str, int]] = {}
+    total = FeatureLabelBackfillResult(0, 0, 0, 0, 0)
+    for horizon, horizon_limit in zip(horizons, horizon_limits, strict=False):
+        result = await backfill_feature_labels(
+            session,
+            limit=horizon_limit,
+            horizons=[horizon],
+            refresh_labeled=refresh_labeled,
+            commit=False,
+        )
+        per_horizon[horizon] = _label_result_counts(result)
+        total = _sum_label_results(total, result)
+    if commit and _label_result_changed(total):
+        await session.commit()
+    return FeatureLabelBackfillResult(
+        events_scanned=total.events_scanned,
+        labels_labeled=total.labels_labeled,
+        labels_pending=total.labels_pending,
+        labels_skipped=total.labels_skipped,
+        labels_refreshed=total.labels_refreshed,
+        horizon_results=per_horizon,
+    )
+
+
+def _split_limit(limit: int, parts: int) -> list[int]:
+    if parts <= 0:
+        return []
+    safe_limit = max(0, int(limit))
+    base = safe_limit // parts
+    remainder = safe_limit % parts
+    return [base + (1 if index < remainder else 0) for index in range(parts)]
+
+
+def _sum_label_results(left: FeatureLabelBackfillResult, right: FeatureLabelBackfillResult) -> FeatureLabelBackfillResult:
+    return FeatureLabelBackfillResult(
+        events_scanned=left.events_scanned + right.events_scanned,
+        labels_labeled=left.labels_labeled + right.labels_labeled,
+        labels_pending=left.labels_pending + right.labels_pending,
+        labels_skipped=left.labels_skipped + right.labels_skipped,
+        labels_refreshed=left.labels_refreshed + right.labels_refreshed,
+    )
+
+
+def _label_result_counts(result: FeatureLabelBackfillResult) -> dict[str, int]:
+    return {
+        "events_scanned": result.events_scanned,
+        "labels_labeled": result.labels_labeled,
+        "labels_pending": result.labels_pending,
+        "labels_skipped": result.labels_skipped,
+        "labels_refreshed": result.labels_refreshed,
+    }
+
+
+def _label_result_changed(result: FeatureLabelBackfillResult) -> bool:
+    return bool(result.labels_labeled or result.labels_pending or result.labels_skipped or result.labels_refreshed)
 
 
 async def reset_feature_research(

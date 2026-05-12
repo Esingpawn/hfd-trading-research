@@ -80,3 +80,47 @@ async def test_experiment_backfill_can_disable_feature_research(session) -> None
     )
 
     assert result["features"] == {"enabled": False}
+
+
+@pytest.mark.asyncio
+async def test_experiment_backfill_maintains_default_feature_horizons_independently(session) -> None:
+    observed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add(
+        SignalSnapshot(
+            symbol="BTCUSDT",
+            asset_tier="core",
+            timeframe="short",
+            interval="30m",
+            indicator="inst_choch",
+            endpoint="/api/pro/pro_data",
+            raw_payload={
+                "klines": [[1_700_000_000_000, 100, 100, 99, 101, 10]],
+                "inst_choch": [
+                    {"timestamp": 1_700_000_000_000, "price": 100.0, "type": "CHoCH_Bullish"},
+                ],
+            },
+            summary_payload={},
+            collected_at=observed_at,
+        )
+    )
+    session.add_all(
+        [
+            PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=observed_at),
+            PriceSnapshot(symbol="BTCUSDT", price=101.0, raw_payload={}, collected_at=observed_at + timedelta(minutes=30)),
+        ]
+    )
+    await session.commit()
+
+    result = await run_experiment_backfill(
+        session,
+        signal_limit=10,
+        feature_limit=10,
+        feature_label_limit=8,
+    )
+    labels = await session.execute(select(FeatureLabel))
+
+    assert result["features"]["horizons"] == ["30m", "1h", "4h", "24h"]
+    assert result["features"]["labels"]["labels_labeled"] == 1
+    assert result["features"]["labels"]["labels_pending"] == 0
+    assert result["features"]["labels"]["horizon_results"]["30m"]["labels_labeled"] == 1
+    assert labels.scalar_one().horizon == "30m"

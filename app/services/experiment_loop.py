@@ -8,7 +8,7 @@ from app.services.features import backfill_feature_events, backfill_feature_labe
 from app.services.signal_attribution import backfill_signal_outcomes
 
 
-DEFAULT_FEATURE_HORIZONS: tuple[str, ...] = ("30m",)
+DEFAULT_FEATURE_HORIZONS: tuple[str, ...] = ("30m", "1h", "4h", "24h")
 
 
 async def run_experiment_backfill(
