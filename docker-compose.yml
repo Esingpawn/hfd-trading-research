@@ -199,6 +199,13 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    shm_size: 512m
+    command:
+      - postgres
+      - -c
+      - max_parallel_workers_per_gather=0
+      - -c
+      - work_mem=16MB
     environment:
       POSTGRES_DB: hfd
       POSTGRES_USER: hfd

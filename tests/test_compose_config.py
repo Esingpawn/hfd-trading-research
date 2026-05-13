@@ -21,6 +21,15 @@ def test_db_init_mounts_current_migration_tree() -> None:
     assert "- ./alembic.ini:/app/alembic.ini:ro" in block
 
 
+def test_postgres_has_shared_memory_for_research_reports() -> None:
+    compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
+    block = _service_block(compose_text, "postgres")
+
+    assert "shm_size: 512m" in block
+    assert "max_parallel_workers_per_gather=0" in block
+    assert "work_mem=16MB" in block
+
+
 def _service_block(compose_text: str, service_name: str) -> str:
     lines = compose_text.splitlines()
     start = next(index for index, line in enumerate(lines) if line == f"  {service_name}:")

@@ -2333,17 +2333,26 @@
         renderEffectiveness();
         renderSettings();
 
-        const [featureCandidates, featurePaperAb, featureSegmentCandidates, featureSegmentPaperAb] = await Promise.all([
-          api("/features/candidates?horizon=30m&min_samples=30&limit=20000").catch(error => ({ error: error.message, candidates: [], watchlist: [] })),
-          api("/features/paper-ab?horizon=30m&min_samples=30&limit=20000&candidate_limit=20").catch(error => ({ error: error.message, arms: {}, per_candidate: [] })),
-          api("/features/segment-candidates?horizon=30m&min_samples=30&limit=20000&dedupe_research_samples=true&dedupe_bucket_minutes=30&min_unique_time_buckets=3&min_unique_event_days=2&min_unique_market_windows=2&min_unique_collection_runs=2&market_window_hours=8&max_same_return_samples=10&max_return_cluster_ratio=0.75").catch(error => ({ error: error.message, candidates: [], by_feature: [] })),
-          api("/features/segment-paper-ab?horizon=30m&min_samples=30&limit=20000&candidate_limit=50&dedupe_research_samples=true&dedupe_bucket_minutes=30&min_unique_time_buckets=3&min_unique_event_days=2&min_unique_market_windows=2&min_unique_collection_runs=2&market_window_hours=8&max_same_return_samples=10&max_return_cluster_ratio=0.75").catch(error => ({ error: error.message, arms: {}, per_segment: [] }))
-        ]);
+        const featureCandidates = await api("/features/candidates?horizon=30m&min_samples=30&limit=20000")
+          .catch(error => ({ error: error.message, candidates: [], watchlist: [] }));
         state.featureCandidates = featureCandidates;
+        renderEffectiveness();
+
+        const featurePaperAb = await api("/features/paper-ab?horizon=30m&min_samples=30&limit=20000&candidate_limit=20")
+          .catch(error => ({ error: error.message, arms: {}, per_candidate: [] }));
         state.featurePaperAb = featurePaperAb;
+        renderEffectiveness();
+
+        const featureSegmentCandidates = await api("/features/segment-candidates?horizon=30m&min_samples=30&limit=20000&dedupe_research_samples=true&dedupe_bucket_minutes=30&min_unique_time_buckets=3&min_unique_event_days=2&min_unique_market_windows=2&min_unique_collection_runs=2&market_window_hours=8&max_same_return_samples=10&max_return_cluster_ratio=0.75")
+          .catch(error => ({ error: error.message, candidates: [], by_feature: [] }));
         state.featureSegmentCandidates = featureSegmentCandidates;
+        renderEffectiveness();
+
+        const featureSegmentPaperAb = await api("/features/segment-paper-ab?horizon=30m&min_samples=30&limit=20000&candidate_limit=50&dedupe_research_samples=true&dedupe_bucket_minutes=30&min_unique_time_buckets=3&min_unique_event_days=2&min_unique_market_windows=2&min_unique_collection_runs=2&market_window_hours=8&max_same_return_samples=10&max_return_cluster_ratio=0.75")
+          .catch(error => ({ error: error.message, arms: {}, per_segment: [] }));
         state.featureSegmentPaperAb = featureSegmentPaperAb;
         renderEffectiveness();
+
         const cacheHits = [featureCandidates, featurePaperAb, featureSegmentCandidates, featureSegmentPaperAb]
           .filter(item => item && item.cache && item.cache.hit).length;
         log(`研究报告加载完成${cacheHits ? `，缓存命中 ${cacheHits}/4` : ""}。`);
