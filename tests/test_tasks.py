@@ -289,6 +289,19 @@ async def test_run_task_by_id_executes_research_report_materialization(session) 
 
 
 @pytest.mark.asyncio
+async def test_run_task_by_id_executes_data_quality_report(session) -> None:
+    item = TaskRun(task_name="data_quality.report", payload={}, result={})
+    session.add(item)
+    await session.commit()
+
+    result = await run_task_by_id(session, item.id)
+
+    assert result["status"] == "completed"
+    assert result["result"]["execution"]["policy"]["read_only"] is True
+    assert result["result"]["execution"]["policy"]["opens_live_orders"] is False
+
+
+@pytest.mark.asyncio
 async def test_run_task_by_id_executes_shadow_paper_scan_without_real_paper_trade(session) -> None:
     await _add_feature_group(session, symbol="BTCUSDT")
     session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=datetime(2026, 1, 1, tzinfo=timezone.utc)))

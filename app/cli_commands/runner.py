@@ -21,6 +21,7 @@ from app.services.backtest_batch import run_backtest_batch
 from app.services.backtest import run_cost_band_retest_backtest
 from app.services.collection_schedule import research_due_timeframes, research_intervals
 from app.services.collector import SnapshotCollector
+from app.services.data_quality import data_quality_report
 from app.services.feature_candidates import (
     feature_candidate_screen,
     feature_paper_ab,
@@ -373,6 +374,8 @@ def build_parser() -> argparse.ArgumentParser:
     storage_maintain.add_argument("--checkpoint", action="store_true", help="Run SQLite WAL checkpoint")
     storage_maintain.add_argument("--passive-checkpoint", action="store_true", help="Use PASSIVE instead of TRUNCATE checkpoint")
     storage_maintain.add_argument("--optimize", action="store_true", help="Run SQLite optimize or PostgreSQL ANALYZE")
+
+    subparsers.add_parser("data-quality-report", help="Print a read-only data quality summary")
 
     paper_loop = subparsers.add_parser("paper-loop", help="Run paper mark/scan after new collection runs")
     paper_loop.add_argument("--coins", nargs="*", help="Coin symbols")
@@ -823,6 +826,13 @@ async def run(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
         await engine.dispose()
         return 0
+
+    if args.command == "data-quality-report":
+        async with SessionLocal() as session:
+            result = await data_quality_report(session)
+        print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0 if result.get("status") != "error" else 2
 
     if args.command == "signals-backfill":
         async with SessionLocal() as session:

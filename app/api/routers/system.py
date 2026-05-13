@@ -25,6 +25,7 @@ from app.api.shared import (
 from app.application.storage import get_storage_health, run_storage_maintenance
 from app.constants import ASSETS, CORE_INDICATORS, TIMEFRAMES
 from app.models import PaperTrade, PriceSnapshot, SignalSnapshot, StrategyDecision
+from app.services.data_quality import data_quality_report
 from app.services.diagnostics import build_diagnostics
 from app.services.telegram import TelegramClient
 
@@ -160,3 +161,8 @@ async def system_storage_optimize(session: SessionDep) -> dict[str, object]:
 @router.get("/data/completeness")
 async def completeness(session: SessionDep) -> dict[str, object]:
     return await _cached_completeness(session)
+
+
+@router.get("/data/quality-report")
+async def quality_report(session: SessionDep) -> dict[str, object]:
+    return await data_quality_report(session)

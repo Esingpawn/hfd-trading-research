@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.queue import build_queue
 from app.models import TaskRun
+from app.services.data_quality import data_quality_report
 from app.services.collector import SnapshotCollector
 from app.services.feature_candidates import (
     feature_candidate_screen,
@@ -25,6 +26,7 @@ from app.services.features import (
 from app.services.paper import mark_open_trades, paper_scan
 from app.services.shadow_paper import mark_shadow_paper_trades, shadow_paper_scan
 from app.services.signal_attribution import backfill_signal_outcomes
+from app.services.telegram import TelegramClient
 from app.application.storage import run_storage_maintenance
 
 
@@ -75,6 +77,7 @@ async def run_task_record(session: AsyncSession, item: TaskRun) -> dict[str, Any
         item.error = str(exc)
         item.finished_at = _utc_now()
         await session.commit()
+        await _notify_task_failure(item)
         raise
     item.status = "completed"
     item.result = _json_safe({**(item.result or {}), "execution": result})
@@ -236,6 +239,8 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
             min_samples=_payload_int(payload, "min_samples", 30),
             limit=_payload_int(payload, "limit", 5000),
         )
+    if task_name in {"data_quality.report", "data-quality-report"}:
+        return await data_quality_report(session)
     if task_name in {"storage.maintain", "storage-maintain"}:
         return await run_storage_maintenance(
             session,
@@ -263,6 +268,21 @@ def task_payload(item: TaskRun) -> dict[str, Any]:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def _notify_task_failure(item: TaskRun) -> None:
+    client = TelegramClient()
+    if not client.configured or not client.chat_id:
+        return
+    try:
+        await client.send_message(
+            "HFD task failed\n"
+            f"task: {item.task_name}\n"
+            f"id: {item.id}\n"
+            f"error: {(item.error or '')[:500]}"
+        )
+    except Exception:
+        return
 
 
 def _json_safe(value: Any) -> Any:

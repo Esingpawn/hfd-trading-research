@@ -17,6 +17,7 @@ def test_expected_api_routes_are_registered() -> None:
         ("GET", "/system/runtime"),
         ("GET", "/system/storage"),
         ("GET", "/data/completeness"),
+        ("GET", "/data/quality-report"),
         ("GET", "/market/overview"),
         ("POST", "/collect/run"),
         ("POST", "/paper/scan"),
