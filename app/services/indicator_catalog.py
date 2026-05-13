@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import (
@@ -15,6 +15,7 @@ from app.constants import (
     TIMEFRAMES,
 )
 from app.models import BacktestRun, SignalObservation, SignalSnapshot
+from app.models import FeatureEvent as FeatureEventModel, FeatureLabel
 
 
 BACKTEST_WEIGHT_POLICY = {
@@ -47,6 +48,7 @@ SHARED_PAYLOAD_CANDIDATES = {
 async def indicator_experiment_coverage(session: AsyncSession) -> dict[str, Any]:
     snapshot_counts = await _snapshot_counts(session)
     observation_counts = await _observation_counts(session)
+    feature_counts = await _feature_counts(session)
     latest_backtest = await _latest_backtest(session)
     backtest_indicators = _backtest_indicator_keys(latest_backtest)
     catalog = [
@@ -54,6 +56,7 @@ async def indicator_experiment_coverage(session: AsyncSession) -> dict[str, Any]
             key,
             snapshot_counts=snapshot_counts,
             observation_counts=observation_counts,
+            feature_counts=feature_counts,
             backtest_indicators=backtest_indicators,
         )
         for key in HFD_INDICATORS
@@ -127,6 +130,29 @@ async def _observation_counts(session: AsyncSession) -> dict[str, dict[str, int]
     return counts
 
 
+async def _feature_counts(session: AsyncSession) -> dict[str, dict[str, int]]:
+    rows = await session.execute(
+        select(
+            FeatureEventModel.indicator,
+            func.count(func.distinct(FeatureEventModel.id)).label("event_count"),
+            func.count(func.distinct(FeatureLabel.id)).label("label_count"),
+            func.count(func.distinct(case((FeatureLabel.status == "labeled", FeatureLabel.id), else_=None))).label(
+                "labeled_count"
+            ),
+        )
+        .outerjoin(FeatureLabel, FeatureLabel.feature_event_id == FeatureEventModel.id)
+        .group_by(FeatureEventModel.indicator)
+    )
+    return {
+        str(indicator): {
+            "event_count": int(event_count or 0),
+            "label_count": int(label_count or 0),
+            "labeled_count": int(labeled_count or 0),
+        }
+        for indicator, event_count, label_count, labeled_count in rows.all()
+    }
+
+
 async def _latest_backtest(session: AsyncSession) -> BacktestRun | None:
     rows = await session.execute(
         select(BacktestRun).order_by(BacktestRun.created_at.desc()).limit(1)
@@ -139,12 +165,17 @@ def _catalog_row(
     *,
     snapshot_counts: dict[str, dict[str, Any]],
     observation_counts: dict[str, dict[str, int]],
+    feature_counts: dict[str, dict[str, int]],
     backtest_indicators: set[str],
 ) -> dict[str, Any]:
     item = HFD_INDICATORS[key]
     snapshot_payload = snapshot_counts.get(key, {})
     aliases = [_fix_text(alias) for alias in item.internal_aliases]
     live_counts = _sum_alias_counts(observation_counts, aliases)
+    feature_payload = feature_counts.get(key, {})
+    feature_event_count = int(feature_payload.get("event_count") or 0)
+    feature_label_count = int(feature_payload.get("label_count") or 0)
+    feature_labeled_count = int(feature_payload.get("labeled_count") or 0)
     collected = int(snapshot_payload.get("snapshot_count") or 0) > 0
     expected_slots = len(ASSETS) * len(TIMEFRAMES)
     coverage_slots = int(snapshot_payload.get("coverage_slots") or 0)
@@ -164,11 +195,15 @@ def _catalog_row(
         "used_in_live_strategy": bool(aliases),
         "live_observation_count": live_counts["total"],
         "live_labeled_count": live_counts["labeled"],
+        "feature_event_count": feature_event_count,
+        "feature_label_count": feature_label_count,
+        "feature_labeled_count": feature_labeled_count,
+        "research_sample_count": feature_labeled_count,
         "used_in_backtest": key in backtest_indicators,
         "used_for_execution_weights": False if key in EXPERIMENT_INDICATORS else bool(aliases),
         "used_for_opening_decisions": False if key in EXPERIMENT_INDICATORS else key in REQUIRED_SCORING_INDICATORS,
         "payload_status": _payload_status(key, collected),
-        "evidence_level": _evidence_level(key, collected, live_counts, backtest_indicators),
+        "evidence_level": _evidence_level(key, collected, live_counts, feature_labeled_count, backtest_indicators),
     }
 
 
@@ -208,6 +243,10 @@ def _experiment_row(row: dict[str, Any]) -> dict[str, Any]:
         "latest_snapshot_at": row["latest_snapshot_at"],
         "live_observation_count": row["live_observation_count"],
         "live_labeled_count": row["live_labeled_count"],
+        "feature_event_count": row["feature_event_count"],
+        "feature_label_count": row["feature_label_count"],
+        "feature_labeled_count": row["feature_labeled_count"],
+        "research_sample_count": row["research_sample_count"],
         "used_for_execution_weights": False,
         "used_for_opening_decisions": False,
         "experiment_status": status,
@@ -326,12 +365,17 @@ def _evidence_level(
     key: str,
     collected: bool,
     live_counts: dict[str, int],
+    feature_labeled_count: int,
     backtest_indicators: set[str],
 ) -> str:
     if live_counts["labeled"] >= 30:
         return "live_weight_ready"
     if live_counts["total"] > 0:
         return "live_observing"
+    if feature_labeled_count >= EXPERIMENT_POLICY["minimum_labeled_samples_for_promotion"]:
+        return "feature_research_ready"
+    if feature_labeled_count > 0:
+        return "feature_research_observing"
     if key in backtest_indicators:
         return "backtest_screened"
     if collected:

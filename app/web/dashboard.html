@@ -1681,6 +1681,8 @@
       return {
         live_weight_ready:"实时权重样本",
         live_observing:"实时观察中",
+        feature_research_ready:"特征研究样本",
+        feature_research_observing:"特征观察中",
         backtest_screened:"回测初筛",
         collected_unmodeled:"已采集未建模",
         catalog_only:"仅目录"
@@ -2126,7 +2128,7 @@
         { label:"参数", render: row => `<span class="muted">${esc(row.key)}</span>` },
         { label:"状态", render: row => tag(row.status === "scoring" ? "ok" : row.status === "research" || row.status === "experiment" ? "neutral" : "warn", indicatorStatusText(row.status)) },
         { label:"采集", render: row => row.collected ? `<span class="green">${fmt(row.snapshot_count, 0)}</span>` : `<span class="amber">未采集</span>` },
-        { label:"策略样本", render: row => fmt(row.live_labeled_count || row.live_observation_count || 0, 0) },
+        { label:"策略样本", render: row => `${fmt(row.live_labeled_count || row.live_observation_count || 0, 0)} / ${fmt(row.feature_labeled_count || row.research_sample_count || 0, 0)}` },
         { label:"回测", render: row => row.used_in_backtest ? `<span class="green">已覆盖</span>` : `<span class="muted">未覆盖</span>` },
         { label:"证据", render: row => esc(evidenceText(row.evidence_level)) }
       ], "暂无指标目录"));

@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
-from app.models import BacktestRun, SignalObservation, SignalSnapshot
+from app.models import BacktestRun, FeatureEvent, FeatureLabel, SignalObservation, SignalSnapshot
 from app.services.indicator_catalog import indicator_experiment_coverage
 
 
@@ -76,6 +76,37 @@ async def test_indicator_experiment_coverage_separates_live_weights_and_backtest
             errors=[],
         )
     )
+    event = FeatureEvent(
+        snapshot_id="snapshot-fvg-1",
+        symbol="BTCUSDT",
+        asset_tier="core",
+        timeframe="short",
+        interval="30m",
+        indicator="fair_value_gap",
+        event_key="event-fvg-1",
+        feature_name="fair_value_gap.order_blocks",
+        direction="long",
+        event_ts=now,
+        event_price=100.0,
+        strength=1.0,
+        subtype="gap",
+        source_payload_key="order_blocks",
+        context={},
+    )
+    session.add(event)
+    await session.flush()
+    session.add(
+        FeatureLabel(
+            feature_event_id=event.id,
+            horizon="30m",
+            return_pct=0.01,
+            mfe=0.02,
+            mae=-0.001,
+            future_price=101.0,
+            future_at=now,
+            status="labeled",
+        )
+    )
     await session.commit()
 
     report = await indicator_experiment_coverage(session)
@@ -92,7 +123,12 @@ async def test_indicator_experiment_coverage_separates_live_weights_and_backtest
     assert catalog["fair_value_gap"]["status"] == "experiment"
     assert catalog["fair_value_gap"]["selected_for_experiment"] is True
     assert catalog["fair_value_gap"]["used_for_execution_weights"] is False
+    assert catalog["fair_value_gap"]["feature_event_count"] == 1
+    assert catalog["fair_value_gap"]["feature_labeled_count"] == 1
+    assert catalog["fair_value_gap"]["research_sample_count"] == 1
+    assert catalog["fair_value_gap"]["evidence_level"] == "feature_research_observing"
     assert matrix["fair_value_gap"]["experiment_status"] == "collecting"
+    assert matrix["fair_value_gap"]["feature_labeled_count"] == 1
     assert matrix["fair_value_gap"]["snapshot_count"] == 1
     assert matrix["fair_value_gap"]["coverage_slots"] == 1
     assert matrix["fair_value_gap"]["expected_coverage_slots"] == 27
