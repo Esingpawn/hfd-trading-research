@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.feature_candidates import generate_default_research_reports
 from app.services.features import backfill_feature_events, backfill_feature_labels
+from app.services.shadow_paper import mark_shadow_paper_trades, shadow_paper_scan
 from app.services.signal_attribution import backfill_signal_outcomes
 
 
@@ -24,6 +25,9 @@ async def run_experiment_backfill(
     research_report_horizon: str = "30m",
     research_report_min_samples: int = 30,
     research_report_limit: int = 5000,
+    include_shadow_paper: bool = False,
+    shadow_candidate_limit: int = 20,
+    shadow_include_watchlist: bool = True,
 ) -> dict[str, Any]:
     signal_result = await backfill_signal_outcomes(
         session,
@@ -34,6 +38,7 @@ async def run_experiment_backfill(
         "signals": signal_result.__dict__,
         "features": {"enabled": False},
         "research_reports": {"enabled": False},
+        "shadow_paper": {"enabled": False},
     }
     if include_feature_research:
         horizons = list(feature_horizons or DEFAULT_FEATURE_HORIZONS)
@@ -62,4 +67,14 @@ async def run_experiment_backfill(
             min_samples=research_report_min_samples,
             limit=research_report_limit,
         )
+    if include_shadow_paper:
+        payload["shadow_paper"] = {
+            "enabled": True,
+            "mark": await mark_shadow_paper_trades(session),
+            "scan": await shadow_paper_scan(
+                session,
+                candidate_limit=shadow_candidate_limit,
+                include_watchlist=shadow_include_watchlist,
+            ),
+        }
     return payload

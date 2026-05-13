@@ -109,6 +109,49 @@ def test_extract_feature_events_uses_indicator_source_whitelist() -> None:
     assert events == []
 
 
+def test_extract_feature_events_uses_experiment_indicator_payloads() -> None:
+    rows = klines()
+    item = snapshot(
+        {
+            "klines": rows,
+            "fair_value_gap": [
+                {"start_time": rows[1][0], "gap_low": 98.0, "gap_high": 99.0, "direction": "bullish", "score": 0.8},
+            ],
+        }
+    )
+    item.indicator = "fair_value_gap"
+
+    events = extract_feature_events(item)
+
+    assert len(events) == 1
+    assert events[0].indicator == "fair_value_gap"
+    assert events[0].feature_name == "fair_value_gap"
+    assert events[0].source_payload_key == "fair_value_gap"
+    assert events[0].direction == "long"
+    assert events[0].event_price == 98.5
+
+
+def test_extract_feature_events_uses_liquidity_vacuum_alias_payloads() -> None:
+    rows = klines()
+    item = snapshot(
+        {
+            "klines": rows,
+            "vacuum_zones": [
+                {"timestamp": rows[2][0], "lower_price": 104.0, "upper_price": 106.0, "type": "bearish_vacuum", "size": 2.0},
+            ],
+        }
+    )
+    item.indicator = "liquidity_vacuum"
+
+    events = extract_feature_events(item)
+
+    assert len(events) == 1
+    assert events[0].feature_name == "liquidity_vacuum.vacuum_zones"
+    assert events[0].source_payload_key == "vacuum_zones"
+    assert events[0].direction == "short"
+    assert events[0].event_price == 105.0
+
+
 @pytest.mark.asyncio
 async def test_backfill_feature_events_is_idempotent(session) -> None:
     rows = klines()

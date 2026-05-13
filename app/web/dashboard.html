@@ -1105,6 +1105,11 @@
             <div id="featureSegmentPaperAbSummary" class="kvList"></div>
             <div id="featureSegmentPaperAb" class="miniTable"><div class="empty">等待分段 A/B</div></div>
           </div>
+          <div class="detailBlock" style="margin-top:10px">
+            <h3>影子纸上交易</h3>
+            <div id="shadowPaperSummary" class="kvList"></div>
+            <div id="shadowPaperTrades" class="miniTable"><div class="empty">等待影子纸上记录</div></div>
+          </div>
         </div>
       </article>
 
@@ -1231,6 +1236,8 @@
       featurePaperAb: null,
       featureSegmentCandidates: null,
       featureSegmentPaperAb: null,
+      shadowPaperStats: null,
+      shadowPaperTrades: [],
       selectedSymbol: null,
       selectedTradeId: null,
       paperReview: null
@@ -1986,6 +1993,8 @@
       const featurePaperAb = state.featurePaperAb || {};
       const featureSegmentCandidates = state.featureSegmentCandidates || {};
       const featureSegmentPaperAb = state.featureSegmentPaperAb || {};
+      const shadowPaperStats = state.shadowPaperStats || {};
+      const shadowPaperTrades = state.shadowPaperTrades || [];
       const signals = data.signals || [];
       const roles = data.roles || [];
       const weights = weightData.weights || [];
@@ -2123,6 +2132,23 @@
         { label:"平均收益", render: row => coloredPct((row.pseudo_trade_metrics || {}).avg_return) },
         { label:"风险", render: row => tag(row.overfit_risk === "low" ? "ok" : row.overfit_risk === "medium" ? "warn" : "bad", row.overfit_risk || "unknown") }
       ], "暂无分段 A/B 报告"));
+      setHtml("shadowPaperSummary", kvRows([
+        ["策略", esc(shadowPaperStats.strategy_name || "shadow_feature_candidates_v1")],
+        ["观察单", fmt(shadowPaperStats.total_trades || 0, 0)],
+        ["持仓/已结", `${fmt(shadowPaperStats.open_trades || 0, 0)} / ${fmt(shadowPaperStats.closed_trades || 0, 0)}`],
+        ["胜率", pct(shadowPaperStats.win_rate, 1)],
+        ["平均盈亏", coloredPct(shadowPaperStats.avg_pnl)],
+        ["隔离", shadowPaperStats.policy && shadowPaperStats.policy.opens_paper_trades === false ? `<span class="green">仅研究</span>` : `<span class="amber">待确认</span>`]
+      ]));
+      setHtml("shadowPaperTrades", table(shadowPaperTrades.slice(0, 8), [
+        { label:"时间", render: row => timeLabel(row.opened_at) },
+        { label:"币种", render: row => coinBadge(row.symbol) },
+        { label:"方向", render: row => tag(row.direction, directionText(row.direction)) },
+        { label:"来源", render: row => esc(row.candidate_type) },
+        { label:"入场", render: row => fmt(row.entry_price, 4) },
+        { label:"状态", render: row => tag(row.status === "open" ? "neutral" : "ok", row.status) },
+        { label:"盈亏", render: row => coloredPct(row.pnl) }
+      ], "暂无影子纸上记录"));
       setHtml("indicatorCatalog", table(catalog, [
         { label:"暗流指标", render: row => esc(row.hfd_name) },
         { label:"参数", render: row => `<span class="muted">${esc(row.key)}</span>` },
@@ -2353,6 +2379,14 @@
         const featureSegmentPaperAb = await api("/features/segment-paper-ab/latest?horizon=30m")
           .catch(error => ({ error: error.message, arms: {}, per_segment: [] }));
         state.featureSegmentPaperAb = featureSegmentPaperAb;
+        renderEffectiveness();
+
+        const [shadowPaperStats, shadowPaperTrades] = await Promise.all([
+          api("/shadow-paper/stats").catch(error => ({ error: error.message, total_trades: 0, open_trades: 0, closed_trades: 0 })),
+          api("/shadow-paper/trades?limit=8").catch(() => [])
+        ]);
+        state.shadowPaperStats = shadowPaperStats;
+        state.shadowPaperTrades = Array.isArray(shadowPaperTrades) ? shadowPaperTrades : [];
         renderEffectiveness();
 
         const cacheHits = [featureCandidates, featurePaperAb, featureSegmentCandidates, featureSegmentPaperAb]

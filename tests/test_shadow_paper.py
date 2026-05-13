@@ -58,7 +58,8 @@ async def test_shadow_paper_scan_uses_materialized_watchlist_without_real_trade(
     assert result["policy"]["opens_paper_trades"] is False
     assert len(result["opened"]) == 1
     assert len(trades) == 1
-    assert trades[0].candidate_type == "watchlist_segment"
+    assert trades[0].candidate_type == "observation_segment"
+    assert result["opened"][0]["id"] == trades[0].id
     assert trades[0].status == "open"
 
 

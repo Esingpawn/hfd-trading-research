@@ -96,12 +96,12 @@ INDICATOR_SOURCE_KEYS: dict[str, tuple[str, ...]] = {
     "cross_exchange_resonance": ("cross_exchange_resonance",),
     "imbalance": ("imbalance_series",),
     "trend_exhaustion": ("trend_exhaustion",),
-    "fair_value_gap": ("order_blocks",),
-    "cascade_liquidation_zones": ("order_blocks",),
-    "retail_stop_loss": ("order_blocks",),
+    "fair_value_gap": ("fair_value_gap", "order_blocks", "gaps", "zones"),
+    "cascade_liquidation_zones": ("cascade_liquidation_zones", "order_blocks", "liquidation_zones", "zones", "levels"),
+    "retail_stop_loss": ("retail_stop_loss", "order_blocks", "stop_loss_clusters", "zones", "levels"),
     "inst_choch": ("inst_choch",),
     "trend_purity": ("trend_purity",),
-    "liquidity_vacuum": ("order_blocks",),
+    "liquidity_vacuum": ("liquidity_vacuum", "order_blocks", "vacuum_zones", "gaps", "zones", "levels"),
 }
 
 CONTEXT_ONLY_INDICATORS: set[str] = set()
@@ -707,6 +707,14 @@ def _is_feature_item(item: Any) -> bool:
             "high",
             "top_price",
             "bottom_price",
+            "min_price",
+            "max_price",
+            "lower_price",
+            "upper_price",
+            "gap_low",
+            "gap_high",
+            "start_price",
+            "end_price",
             "bottom",
             "top",
             "volume",
@@ -808,7 +816,15 @@ def _feature_price(item: Any) -> float | None:
             value = _positive_float(item.get(key))
             if value is not None:
                 return value
-        for low_key, high_key in (("low", "high"), ("bottom", "top"), ("lower", "upper")):
+        for low_key, high_key in (
+            ("low", "high"),
+            ("bottom", "top"),
+            ("lower", "upper"),
+            ("min_price", "max_price"),
+            ("lower_price", "upper_price"),
+            ("gap_low", "gap_high"),
+            ("start_price", "end_price"),
+        ):
             low = _positive_float(item.get(low_key))
             high = _positive_float(item.get(high_key))
             if low is not None and high is not None:

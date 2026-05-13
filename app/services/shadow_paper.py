@@ -29,7 +29,7 @@ async def shadow_paper_scan(
     candidate_type = "segment_candidate"
     if include_watchlist and not candidates:
         candidates = list(report.get("all_segments") or [])
-        candidate_type = "watchlist_segment"
+        candidate_type = "observation_segment"
     opened: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     for row in candidates[: max(0, candidate_limit)]:
@@ -72,6 +72,7 @@ async def shadow_paper_scan(
             },
         )
         session.add(trade)
+        await session.flush()
         opened.append({"id": trade.id, "symbol": symbol, "candidate_key": candidate_key, "direction": direction})
     if opened:
         await session.commit()

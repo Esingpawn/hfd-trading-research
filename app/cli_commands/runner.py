@@ -448,6 +448,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum samples for materialized research candidates",
     )
     experiment_loop.add_argument(
+        "--no-shadow-paper",
+        action="store_true",
+        help="Do not maintain isolated shadow paper trades from research reports",
+    )
+    experiment_loop.add_argument(
+        "--shadow-paper-interval-seconds",
+        type=int,
+        default=900,
+        help="Seconds between isolated shadow paper mark/scan runs",
+    )
+    experiment_loop.add_argument(
+        "--shadow-paper-candidate-limit",
+        type=int,
+        default=20,
+        help="Maximum research rows to scan into isolated shadow paper each run",
+    )
+    experiment_loop.add_argument(
+        "--shadow-paper-strict-only",
+        action="store_true",
+        help="Only use strict segment candidates, not observation rows, for shadow paper",
+    )
+    experiment_loop.add_argument(
         "--interval-seconds",
         type=int,
         default=300,
@@ -1082,10 +1104,15 @@ async def run(argv: Sequence[str] | None = None) -> int:
             research_report_interval_seconds=args.research_report_interval_seconds,
             research_report_limit=args.research_report_limit,
             research_report_min_samples=args.research_report_min_samples,
+            shadow_paper_enabled=not args.no_shadow_paper,
+            shadow_paper_interval_seconds=args.shadow_paper_interval_seconds,
+            shadow_paper_candidate_limit=args.shadow_paper_candidate_limit,
+            shadow_paper_strict_only=args.shadow_paper_strict_only,
         )
         heartbeat_task = _start_runtime_heartbeat("experiment-loop", runtime_meta)
         run_number = 0
         last_research_report_at = 0.0
+        last_shadow_paper_at = 0.0
         try:
             while True:
                 run_number += 1
@@ -1095,6 +1122,10 @@ async def run(argv: Sequence[str] | None = None) -> int:
                     include_reports = (
                         not args.no_research_reports
                         and (last_research_report_at <= 0 or now - last_research_report_at >= args.research_report_interval_seconds)
+                    )
+                    include_shadow_paper = (
+                        not args.no_shadow_paper
+                        and (last_shadow_paper_at <= 0 or now - last_shadow_paper_at >= args.shadow_paper_interval_seconds)
                     )
                     async with SessionLocal() as session:
                         result = await run_experiment_backfill(
@@ -1108,9 +1139,14 @@ async def run(argv: Sequence[str] | None = None) -> int:
                             research_report_horizon="30m",
                             research_report_min_samples=args.research_report_min_samples,
                             research_report_limit=args.research_report_limit,
+                            include_shadow_paper=include_shadow_paper,
+                            shadow_candidate_limit=args.shadow_paper_candidate_limit,
+                            shadow_include_watchlist=not args.shadow_paper_strict_only,
                         )
                     if include_reports and not result.get("research_reports", {}).get("error_count"):
                         last_research_report_at = now
+                    if include_shadow_paper:
+                        last_shadow_paper_at = now
                     print(
                         json.dumps(
                             {
@@ -1120,6 +1156,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
                                 "signals": result["signals"],
                                 "features": result["features"],
                                 "research_reports": result["research_reports"],
+                                "shadow_paper": result["shadow_paper"],
                             },
                             ensure_ascii=False,
                         ),
