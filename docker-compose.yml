@@ -191,6 +191,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    volumes:
+      - ./app:/app/app:ro
+      - ./migrations:/app/migrations:ro
+      - ./alembic.ini:/app/alembic.ini:ro
     restart: "no"
 
   postgres:

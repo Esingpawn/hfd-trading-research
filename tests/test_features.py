@@ -535,12 +535,12 @@ async def test_backfill_feature_labels_keeps_stale_future_prices_pending(session
 
 
 @pytest.mark.asyncio
-async def test_backfill_feature_events_skips_neutral_events(session) -> None:
+async def test_backfill_feature_events_infers_hvn_support_resistance(session) -> None:
     rows = klines()
     item = snapshot(
         {
             "klines": rows,
-            "hvn_nodes": [{"price": 100.0, "volume": 5000}],
+            "hvn_nodes": [{"price": 90.0, "volume": 5000}],
         }
     )
     item.indicator = "hvn_nodes"
@@ -560,11 +560,14 @@ async def test_backfill_feature_events_skips_neutral_events(session) -> None:
     events = await backfill_feature_events(session, limit=10)
     labels = await backfill_feature_labels(session, limit=10, horizons=["30m"])
     stored_events = await session.execute(select(FeatureEvent))
+    stored = stored_events.scalar_one()
 
-    assert events.events_extracted == 0
-    assert events.events_inserted == 0
-    assert labels.events_scanned == 0
-    assert stored_events.scalars().all() == []
+    assert events.events_extracted == 1
+    assert events.events_inserted == 1
+    assert labels.events_scanned == 1
+    assert stored.indicator == "hvn_nodes"
+    assert stored.direction == "long"
+    assert stored.feature_name == "hvn_nodes"
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,15 @@ def test_payload_reading_workers_mount_raw_payload_volume() -> None:
         assert "- hfd_raw_payloads:/var/lib/hfd/raw_payloads" in block
 
 
+def test_db_init_mounts_current_migration_tree() -> None:
+    compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
+    block = _service_block(compose_text, "db-init")
+
+    assert "- ./app:/app/app:ro" in block
+    assert "- ./migrations:/app/migrations:ro" in block
+    assert "- ./alembic.ini:/app/alembic.ini:ro" in block
+
+
 def _service_block(compose_text: str, service_name: str) -> str:
     lines = compose_text.splitlines()
     start = next(index for index, line in enumerate(lines) if line == f"  {service_name}:")

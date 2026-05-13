@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import copy
+import time
+from collections.abc import Awaitable, Callable
+from typing import Any
+
 from fastapi import APIRouter, Query
 
 from app.api.deps import SessionDep
@@ -22,6 +27,9 @@ from app.services.signal_attribution import backfill_signal_outcomes, signal_eff
 from app.services.signal_weights import signal_weight_governance
 
 router = APIRouter()
+
+_REPORT_CACHE_SECONDS = 300.0
+_REPORT_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, object]]] = {}
 
 
 @router.post("/signals/backfill")
@@ -145,17 +153,28 @@ async def feature_candidates(
     min_segments: int = Query(default=2, ge=1, le=100),
     limit: int = Query(default=20000, ge=1, le=100000),
 ) -> dict[str, object]:
-    return await feature_candidate_screen(
-        session,
-        horizon=horizon,
-        min_samples=min_samples,
-        min_win_rate=min_win_rate,
-        min_profit_factor=min_profit_factor,
-        min_avg_return=min_avg_return,
-        segment_min_samples=segment_min_samples,
-        min_segments=min_segments,
-        limit=limit,
-        persist=False,
+    return await _cached_report(
+        "feature_candidates",
+        horizon,
+        min_samples,
+        min_win_rate,
+        min_profit_factor,
+        min_avg_return,
+        segment_min_samples,
+        min_segments,
+        limit,
+        compute=lambda: feature_candidate_screen(
+            session,
+            horizon=horizon,
+            min_samples=min_samples,
+            min_win_rate=min_win_rate,
+            min_profit_factor=min_profit_factor,
+            min_avg_return=min_avg_return,
+            segment_min_samples=segment_min_samples,
+            min_segments=min_segments,
+            limit=limit,
+            persist=False,
+        ),
     )
 
 
@@ -198,18 +217,30 @@ async def feature_paper_ab_report(
     candidate_limit: int = Query(default=20, ge=1, le=500),
     limit: int = Query(default=20000, ge=1, le=100000),
 ) -> dict[str, object]:
-    return await feature_paper_ab(
-        session,
-        horizon=horizon,
-        min_samples=min_samples,
-        min_win_rate=min_win_rate,
-        min_profit_factor=min_profit_factor,
-        min_avg_return=min_avg_return,
-        segment_min_samples=segment_min_samples,
-        min_segments=min_segments,
-        candidate_limit=candidate_limit,
-        limit=limit,
-        persist=False,
+    return await _cached_report(
+        "feature_paper_ab",
+        horizon,
+        min_samples,
+        min_win_rate,
+        min_profit_factor,
+        min_avg_return,
+        segment_min_samples,
+        min_segments,
+        candidate_limit,
+        limit,
+        compute=lambda: feature_paper_ab(
+            session,
+            horizon=horizon,
+            min_samples=min_samples,
+            min_win_rate=min_win_rate,
+            min_profit_factor=min_profit_factor,
+            min_avg_return=min_avg_return,
+            segment_min_samples=segment_min_samples,
+            min_segments=min_segments,
+            candidate_limit=candidate_limit,
+            limit=limit,
+            persist=False,
+        ),
     )
 
 
@@ -260,24 +291,42 @@ async def feature_segment_candidates(
     max_return_cluster_ratio: float = Query(default=0.75, ge=0.0, le=1.0),
     limit: int = Query(default=20000, ge=1, le=100000),
 ) -> dict[str, object]:
-    return await feature_segment_candidate_screen(
-        session,
-        horizon=horizon,
-        min_samples=min_samples,
-        min_win_rate=min_win_rate,
-        min_profit_factor=min_profit_factor,
-        min_avg_return=min_avg_return,
-        dedupe_research_samples=dedupe_research_samples,
-        dedupe_bucket_minutes=dedupe_bucket_minutes,
-        min_unique_time_buckets=min_unique_time_buckets,
-        min_unique_event_days=min_unique_event_days,
-        min_unique_market_windows=min_unique_market_windows,
-        min_unique_collection_runs=min_unique_collection_runs,
-        market_window_hours=market_window_hours,
-        max_same_return_samples=max_same_return_samples,
-        max_return_cluster_ratio=max_return_cluster_ratio,
-        limit=limit,
-        persist=False,
+    return await _cached_report(
+        "feature_segment_candidates",
+        horizon,
+        min_samples,
+        min_win_rate,
+        min_profit_factor,
+        min_avg_return,
+        dedupe_research_samples,
+        dedupe_bucket_minutes,
+        min_unique_time_buckets,
+        min_unique_event_days,
+        min_unique_market_windows,
+        min_unique_collection_runs,
+        market_window_hours,
+        max_same_return_samples,
+        max_return_cluster_ratio,
+        limit,
+        compute=lambda: feature_segment_candidate_screen(
+            session,
+            horizon=horizon,
+            min_samples=min_samples,
+            min_win_rate=min_win_rate,
+            min_profit_factor=min_profit_factor,
+            min_avg_return=min_avg_return,
+            dedupe_research_samples=dedupe_research_samples,
+            dedupe_bucket_minutes=dedupe_bucket_minutes,
+            min_unique_time_buckets=min_unique_time_buckets,
+            min_unique_event_days=min_unique_event_days,
+            min_unique_market_windows=min_unique_market_windows,
+            min_unique_collection_runs=min_unique_collection_runs,
+            market_window_hours=market_window_hours,
+            max_same_return_samples=max_same_return_samples,
+            max_return_cluster_ratio=max_return_cluster_ratio,
+            limit=limit,
+            persist=False,
+        ),
     )
 
 
@@ -341,25 +390,44 @@ async def feature_segment_paper_ab_report(
     candidate_limit: int = Query(default=50, ge=1, le=500),
     limit: int = Query(default=20000, ge=1, le=100000),
 ) -> dict[str, object]:
-    return await feature_segment_paper_ab(
-        session,
-        horizon=horizon,
-        min_samples=min_samples,
-        min_win_rate=min_win_rate,
-        min_profit_factor=min_profit_factor,
-        min_avg_return=min_avg_return,
-        dedupe_research_samples=dedupe_research_samples,
-        dedupe_bucket_minutes=dedupe_bucket_minutes,
-        min_unique_time_buckets=min_unique_time_buckets,
-        min_unique_event_days=min_unique_event_days,
-        min_unique_market_windows=min_unique_market_windows,
-        min_unique_collection_runs=min_unique_collection_runs,
-        market_window_hours=market_window_hours,
-        max_same_return_samples=max_same_return_samples,
-        max_return_cluster_ratio=max_return_cluster_ratio,
-        candidate_limit=candidate_limit,
-        limit=limit,
-        persist=False,
+    return await _cached_report(
+        "feature_segment_paper_ab",
+        horizon,
+        min_samples,
+        min_win_rate,
+        min_profit_factor,
+        min_avg_return,
+        dedupe_research_samples,
+        dedupe_bucket_minutes,
+        min_unique_time_buckets,
+        min_unique_event_days,
+        min_unique_market_windows,
+        min_unique_collection_runs,
+        market_window_hours,
+        max_same_return_samples,
+        max_return_cluster_ratio,
+        candidate_limit,
+        limit,
+        compute=lambda: feature_segment_paper_ab(
+            session,
+            horizon=horizon,
+            min_samples=min_samples,
+            min_win_rate=min_win_rate,
+            min_profit_factor=min_profit_factor,
+            min_avg_return=min_avg_return,
+            dedupe_research_samples=dedupe_research_samples,
+            dedupe_bucket_minutes=dedupe_bucket_minutes,
+            min_unique_time_buckets=min_unique_time_buckets,
+            min_unique_event_days=min_unique_event_days,
+            min_unique_market_windows=min_unique_market_windows,
+            min_unique_collection_runs=min_unique_collection_runs,
+            market_window_hours=market_window_hours,
+            max_same_return_samples=max_same_return_samples,
+            max_return_cluster_ratio=max_return_cluster_ratio,
+            candidate_limit=candidate_limit,
+            limit=limit,
+            persist=False,
+        ),
     )
 
 
@@ -403,3 +471,35 @@ async def persist_feature_segment_paper_ab_report(
         limit=limit,
         persist=True,
     )
+
+
+async def _cached_report(
+    *parts: Any,
+    compute: Callable[[], Awaitable[dict[str, object]]],
+) -> dict[str, object]:
+    key = tuple(_cache_part(part) for part in parts)
+    now = time.monotonic()
+    cached = _REPORT_CACHE.get(key)
+    if cached is not None:
+        created_at, payload = cached
+        if now - created_at <= _REPORT_CACHE_SECONDS:
+            return copy.deepcopy({**payload, "cache": _cache_meta(created_at, hit=True)})
+    payload = await compute()
+    _REPORT_CACHE[key] = (now, copy.deepcopy(payload))
+    return {**payload, "cache": _cache_meta(now, hit=False)}
+
+
+def _cache_meta(created_at: float, *, hit: bool) -> dict[str, object]:
+    age = max(0.0, time.monotonic() - created_at)
+    return {
+        "hit": hit,
+        "age_seconds": round(age, 3),
+        "ttl_seconds": _REPORT_CACHE_SECONDS,
+        "remaining_seconds": max(0.0, round(_REPORT_CACHE_SECONDS - age, 3)),
+    }
+
+
+def _cache_part(value: Any) -> Any:
+    if isinstance(value, float):
+        return round(value, 8)
+    return value

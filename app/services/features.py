@@ -83,10 +83,16 @@ NESTED_FEATURE_KEYS: tuple[str, ...] = (
 INDICATOR_SOURCE_KEYS: dict[str, tuple[str, ...]] = {
     "smart_money_cost": ("smart_money_cost",),
     "trend_price": ("order_blocks",),
+    "inst_vwap": ("vwap_series",),
     "liq_heatmap": ("heatmap_data",),
+    "liquidation_fuel": ("liquidation_fuel",),
     "liquidity_sweep": ("liquidity_sweep",),
+    "inst_volume_profile": ("volume_profile",),
+    "hvn_nodes": ("hvn_nodes",),
     "micro_poc": ("micro_poc",),
     "cross_exchange_resonance": ("cross_exchange_resonance",),
+    "imbalance": ("imbalance_series",),
+    "trend_exhaustion": ("trend_exhaustion",),
     "fair_value_gap": ("order_blocks",),
     "cascade_liquidation_zones": ("order_blocks",),
     "retail_stop_loss": ("order_blocks",),
@@ -95,11 +101,7 @@ INDICATOR_SOURCE_KEYS: dict[str, tuple[str, ...]] = {
     "liquidity_vacuum": ("order_blocks",),
 }
 
-CONTEXT_ONLY_INDICATORS: set[str] = {
-    "hvn_nodes",
-    "inst_volume_profile",
-    "liquidation_fuel",
-}
+CONTEXT_ONLY_INDICATORS: set[str] = set()
 
 PRICE_OPTIONAL_INDICATORS: set[str] = {"trend_exhaustion"}
 MIN_STRENGTH_BY_INDICATOR: dict[str, float] = {"trend_exhaustion": 1e-12}
@@ -182,10 +184,19 @@ def extract_feature_events(
     for source_key, source_index, item in _feature_items(snapshot.indicator, raw_payload):
         source_ts = _feature_ts(item)
         event_ts = _aware(snapshot.collected_at)
+        reference_price = _nearest_kline_close(klines, source_ts) or _last_kline_close(klines)
         event_price = _feature_price(item)
         if event_price is None:
-            event_price = _nearest_kline_close(klines, source_ts) or _last_kline_close(klines)
+            event_price = reference_price
         direction = _feature_direction(item)
+        if direction == "neutral":
+            direction = _feature_direction_from_context(
+                snapshot.indicator,
+                source_key,
+                item,
+                event_price=event_price,
+                reference_price=reference_price,
+            )
         subtype = _feature_subtype(item)
         strength = _feature_strength(item)
         if not _is_researchable_event(snapshot.indicator, direction, event_price, strength):
@@ -670,6 +681,13 @@ def _is_feature_item(item: Any) -> bool:
             "high",
             "top_price",
             "bottom_price",
+            "bottom",
+            "top",
+            "volume",
+            "fuel",
+            "total",
+            "accum",
+            "dist",
             "direction",
             "type",
             "side",
@@ -757,6 +775,7 @@ def _feature_price(item: Any) -> float | None:
             "value",
             "close",
             "entry_price",
+            "vwap",
             "top_price",
             "bottom_price",
         ):
@@ -788,6 +807,35 @@ def _feature_direction(item: Any) -> str:
     return "neutral"
 
 
+def _feature_direction_from_context(
+    indicator: str,
+    source_key: str,
+    item: Any,
+    *,
+    event_price: float | None,
+    reference_price: float | None,
+) -> str:
+    series_value = _series_signal_value(item)
+    if source_key.endswith(("imbalance_series", "cvd_series")) and series_value is not None:
+        if series_value > 0:
+            return "long"
+        if series_value < 0:
+            return "short"
+    if indicator in {"trend_exhaustion"} and series_value is not None:
+        if series_value > 0:
+            return "short"
+        if series_value < 0:
+            return "long"
+    if event_price is None or reference_price is None or reference_price <= 0:
+        return "neutral"
+    tolerance = max(reference_price * 0.0005, 1e-12)
+    if event_price < reference_price - tolerance:
+        return "long"
+    if event_price > reference_price + tolerance:
+        return "short"
+    return "neutral"
+
+
 def _feature_subtype(item: Any) -> str:
     if isinstance(item, dict):
         for key in ("type", "subtype", "name", "label", "side", "direction"):
@@ -799,10 +847,13 @@ def _feature_subtype(item: Any) -> str:
 
 def _feature_strength(item: Any) -> float:
     if isinstance(item, dict):
-        for key in ("strength", "score", "confidence", "intensity", "exhaustion", "purity", "volume", "total_vol", "buy_vol", "sell_vol", "size"):
+        for key in ("strength", "score", "confidence", "intensity", "exhaustion", "purity", "volume", "total", "fuel", "accum", "dist", "total_vol", "buy_vol", "sell_vol", "size"):
             value = _positive_float(item.get(key))
             if value is not None:
                 return value
+    series_value = _series_signal_value(item)
+    if series_value is not None:
+        return abs(series_value)
     return 0.0
 
 
@@ -869,6 +920,13 @@ def _last_kline_close(klines: list[dict[str, float]]) -> float | None:
 def _positive_float(value: Any) -> float | None:
     if isinstance(value, (int, float)) and value > 0:
         return float(value)
+    return None
+
+
+def _series_signal_value(item: Any) -> float | None:
+    if isinstance(item, (list, tuple)) and len(item) >= 2 and isinstance(item[1], (int, float)):
+        value = float(item[1])
+        return value if value != 0 else None
     return None
 
 

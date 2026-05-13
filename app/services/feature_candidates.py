@@ -56,6 +56,31 @@ async def feature_candidate_screen(
         min_segments=min_segments,
     )
     pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
+    return _feature_candidate_screen_from_pairs(
+        pairs,
+        horizon=horizon,
+        limit=limit,
+        thresholds=thresholds,
+        persist=False,
+        session=session,
+    ) if not persist else await _feature_candidate_screen_from_pairs_persisted(
+        session,
+        pairs,
+        horizon=horizon,
+        limit=limit,
+        thresholds=thresholds,
+    )
+
+
+def _feature_candidate_screen_from_pairs(
+    pairs: list[FeaturePair],
+    *,
+    horizon: str,
+    limit: int,
+    thresholds: dict[str, Any],
+    persist: bool = False,
+    session: AsyncSession | None = None,
+) -> dict[str, Any]:
     rows = _candidate_rows(pairs, thresholds=thresholds)
     candidates = [row for row in rows if row["paper_ab_ready"]]
     watchlist = [row for row in rows if row["promotion_status"] == "watchlist"]
@@ -74,14 +99,32 @@ async def feature_candidate_screen(
         "all_features": rows,
     }
     if persist:
-        report["experiment_run"] = await _persist_experiment(
-            session,
-            name=f"feature_candidates_{horizon}",
-            scope={"horizon": horizon, "limit": limit, "labeled_count": len(pairs)},
-            params=thresholds,
-            metrics=report,
-            notes="Research-only candidate feature screening; does not affect strategy scoring or trading.",
-        )
+        raise ValueError("Use _feature_candidate_screen_from_pairs_persisted for persisted reports")
+    return report
+
+
+async def _feature_candidate_screen_from_pairs_persisted(
+    session: AsyncSession,
+    pairs: list[FeaturePair],
+    *,
+    horizon: str,
+    limit: int,
+    thresholds: dict[str, Any],
+) -> dict[str, Any]:
+    report = _feature_candidate_screen_from_pairs(
+        pairs,
+        horizon=horizon,
+        limit=limit,
+        thresholds=thresholds,
+    )
+    report["experiment_run"] = await _persist_experiment(
+        session,
+        name=f"feature_candidates_{horizon}",
+        scope={"horizon": horizon, "limit": limit, "labeled_count": len(pairs)},
+        params=thresholds,
+        metrics=report,
+        notes="Research-only candidate feature screening; does not affect strategy scoring or trading.",
+    )
     return report
 
 
@@ -99,21 +142,23 @@ async def feature_paper_ab(
     limit: int = 20000,
     persist: bool = False,
 ) -> dict[str, Any]:
-    candidate_report = await feature_candidate_screen(
-        session,
-        horizon=horizon,
+    thresholds = _thresholds(
         min_samples=min_samples,
         min_win_rate=min_win_rate,
         min_profit_factor=min_profit_factor,
         min_avg_return=min_avg_return,
         segment_min_samples=segment_min_samples,
         min_segments=min_segments,
+    )
+    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
+    candidate_report = _feature_candidate_screen_from_pairs(
+        pairs,
+        horizon=horizon,
         limit=limit,
-        persist=False,
+        thresholds=thresholds,
     )
     selected = candidate_report["candidates"][:candidate_limit]
     selected_keys = {str(row["feature_key"]) for row in selected}
-    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
     candidate_pairs = [item for item in pairs if _feature_key(item[0]) in selected_keys]
     control_pairs = [item for item in pairs if _feature_key(item[0]) not in selected_keys]
     candidate_stats = _pseudo_trade_stats(candidate_pairs)
@@ -203,9 +248,30 @@ async def feature_segment_candidate_screen(
         max_return_cluster_ratio=max_return_cluster_ratio,
     )
     pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
+    return _feature_segment_candidate_screen_from_pairs(
+        pairs,
+        horizon=horizon,
+        limit=limit,
+        thresholds=thresholds,
+    ) if not persist else await _feature_segment_candidate_screen_from_pairs_persisted(
+        session,
+        pairs,
+        horizon=horizon,
+        limit=limit,
+        thresholds=thresholds,
+    )
+
+
+def _feature_segment_candidate_screen_from_pairs(
+    pairs: list[FeaturePair],
+    *,
+    horizon: str,
+    limit: int,
+    thresholds: dict[str, Any],
+) -> dict[str, Any]:
     rows = _segment_candidate_rows(pairs, thresholds=thresholds)
     candidates = [row for row in rows if row["paper_ab_ready"]]
-    report: dict[str, Any] = {
+    return {
         "horizon": horizon,
         "limit": limit,
         "labeled_count": len(pairs),
@@ -220,15 +286,30 @@ async def feature_segment_candidate_screen(
         "by_feature": _segment_candidate_feature_summary(candidates),
         "all_segments": rows,
     }
-    if persist:
-        report["experiment_run"] = await _persist_experiment(
-            session,
-            name=f"feature_segment_candidates_{horizon}",
-            scope={"horizon": horizon, "limit": limit, "labeled_count": len(pairs)},
-            params=thresholds,
-            metrics=report,
-            notes="Research-only segment-aware feature screening; does not affect strategy scoring or trading.",
-        )
+
+
+async def _feature_segment_candidate_screen_from_pairs_persisted(
+    session: AsyncSession,
+    pairs: list[FeaturePair],
+    *,
+    horizon: str,
+    limit: int,
+    thresholds: dict[str, Any],
+) -> dict[str, Any]:
+    report = _feature_segment_candidate_screen_from_pairs(
+        pairs,
+        horizon=horizon,
+        limit=limit,
+        thresholds=thresholds,
+    )
+    report["experiment_run"] = await _persist_experiment(
+        session,
+        name=f"feature_segment_candidates_{horizon}",
+        scope={"horizon": horizon, "limit": limit, "labeled_count": len(pairs)},
+        params=thresholds,
+        metrics=report,
+        notes="Research-only segment-aware feature screening; does not affect strategy scoring or trading.",
+    )
     return report
 
 
@@ -253,13 +334,13 @@ async def feature_segment_paper_ab(
     limit: int = 20000,
     persist: bool = False,
 ) -> dict[str, Any]:
-    segment_report = await feature_segment_candidate_screen(
-        session,
-        horizon=horizon,
+    thresholds = _thresholds(
         min_samples=min_samples,
         min_win_rate=min_win_rate,
         min_profit_factor=min_profit_factor,
         min_avg_return=min_avg_return,
+        segment_min_samples=min_samples,
+        min_segments=1,
         dedupe_research_samples=dedupe_research_samples,
         dedupe_bucket_minutes=dedupe_bucket_minutes,
         min_unique_time_buckets=min_unique_time_buckets,
@@ -269,14 +350,17 @@ async def feature_segment_paper_ab(
         market_window_hours=market_window_hours,
         max_same_return_samples=max_same_return_samples,
         max_return_cluster_ratio=max_return_cluster_ratio,
-        limit=limit,
-        persist=False,
     )
-    thresholds = segment_report["thresholds"]
+    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
+    segment_report = _feature_segment_candidate_screen_from_pairs(
+        pairs,
+        horizon=horizon,
+        limit=limit,
+        thresholds=thresholds,
+    )
     selected = segment_report["candidates"][:candidate_limit]
     selected_keys = {str(row["segment_key"]) for row in selected}
     selected_symbol_timeframes = {str(row["symbol_timeframe"]) for row in selected}
-    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
     raw_candidate_pairs = [item for item in pairs if _segment_key(item[0]) in selected_keys]
     raw_matched_control_pairs = [
         item
