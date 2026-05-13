@@ -264,6 +264,31 @@ async def test_run_task_by_id_executes_segment_feature_paper_ab(session) -> None
 
 
 @pytest.mark.asyncio
+async def test_run_task_by_id_executes_research_report_materialization(session) -> None:
+    await _add_feature_group(session, symbol="BTCUSDT")
+    await _add_feature_group(session, symbol="ETHUSDT")
+    item = TaskRun(
+        task_name="features.research_reports",
+        payload={"min_samples": 6, "limit": 100},
+        result={},
+    )
+    session.add(item)
+    await session.commit()
+
+    result = await run_task_by_id(session, item.id)
+    experiments = await session.execute(select(ExperimentRun))
+
+    assert result["status"] == "completed"
+    assert result["result"]["execution"]["generated_count"] == 4
+    assert {item.name for item in experiments.scalars().all()} == {
+        "feature_candidates_30m",
+        "feature_paper_ab_30m",
+        "feature_segment_candidates_30m",
+        "feature_segment_paper_ab_30m",
+    }
+
+
+@pytest.mark.asyncio
 async def test_run_task_by_id_records_failure(session) -> None:
     item = TaskRun(task_name="unknown.task", payload={}, result={})
     session.add(item)

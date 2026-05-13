@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
-from app.models import FeatureEvent, FeatureLabel, PriceSnapshot, SignalSnapshot
+from app.models import ExperimentRun, FeatureEvent, FeatureLabel, PriceSnapshot, SignalSnapshot
 from app.services.experiment_loop import run_experiment_backfill
 
 
@@ -124,3 +124,52 @@ async def test_experiment_backfill_maintains_default_feature_horizons_independen
     assert result["features"]["labels"]["labels_pending"] == 0
     assert result["features"]["labels"]["horizon_results"]["30m"]["labels_labeled"] == 1
     assert labels.scalar_one().horizon == "30m"
+
+
+@pytest.mark.asyncio
+async def test_experiment_backfill_can_materialize_research_reports(session) -> None:
+    observed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index, symbol in enumerate(["BTCUSDT", "ETHUSDT"]):
+        session.add(
+            SignalSnapshot(
+                symbol=symbol,
+                asset_tier="core",
+                timeframe="short",
+                interval="30m",
+                indicator="inst_choch",
+                endpoint="/api/pro/pro_data",
+                raw_payload={
+                    "klines": [[1_700_000_000_000, 100, 100, 99, 101, 10]],
+                    "inst_choch": [
+                        {"timestamp": 1_700_000_000_000, "price": 100.0, "type": "CHoCH_Bullish"},
+                    ],
+                },
+                summary_payload={},
+                collected_at=observed_at + timedelta(minutes=index),
+            )
+        )
+    session.add_all(
+        [
+            PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=observed_at),
+            PriceSnapshot(symbol="BTCUSDT", price=101.0, raw_payload={}, collected_at=observed_at + timedelta(minutes=30)),
+            PriceSnapshot(symbol="ETHUSDT", price=100.0, raw_payload={}, collected_at=observed_at),
+            PriceSnapshot(symbol="ETHUSDT", price=101.0, raw_payload={}, collected_at=observed_at + timedelta(minutes=30)),
+        ]
+    )
+    await session.commit()
+
+    result = await run_experiment_backfill(
+        session,
+        signal_limit=10,
+        feature_limit=10,
+        feature_label_limit=10,
+        feature_horizons=["30m"],
+        include_research_reports=True,
+        research_report_min_samples=1,
+        research_report_limit=100,
+    )
+    experiments = await session.execute(select(ExperimentRun))
+
+    assert result["research_reports"]["generated_count"] == 4
+    assert result["research_reports"]["error_count"] == 0
+    assert len(experiments.scalars().all()) == 4

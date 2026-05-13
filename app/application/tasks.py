@@ -12,6 +12,7 @@ from app.services.collector import SnapshotCollector
 from app.services.feature_candidates import (
     feature_candidate_screen,
     feature_paper_ab,
+    generate_default_research_reports,
     feature_segment_candidate_screen,
     feature_segment_paper_ab,
 )
@@ -218,6 +219,13 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
             candidate_limit=_payload_int(payload, "candidate_limit", 50),
             limit=_payload_int(payload, "limit", 20000),
             persist=_payload_bool(payload, "persist", True),
+        )
+    if task_name in {"features.research_reports", "features-research-reports"}:
+        return await generate_default_research_reports(
+            session,
+            horizon=_payload_str(payload, "horizon", "30m"),
+            min_samples=_payload_int(payload, "min_samples", 30),
+            limit=_payload_int(payload, "limit", 5000),
         )
     if task_name in {"storage.maintain", "storage-maintain"}:
         return await run_storage_maintenance(

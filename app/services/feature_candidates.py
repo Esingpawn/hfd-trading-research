@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import copy
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from statistics import mean
 from typing import Any, Callable
@@ -30,7 +32,21 @@ DEFAULT_MAX_RETURN_CLUSTER_RATIO = 0.75
 DEFAULT_BALANCED_SAMPLE_DAYS = 14
 
 
-FeaturePair = tuple[FeatureEventModel, FeatureLabel, SignalSnapshot | None, CollectionRun | None]
+@dataclass(frozen=True)
+class SnapshotRef:
+    id: str | None
+    collection_run_id: str | None
+    collected_at: datetime
+
+
+@dataclass(frozen=True)
+class CollectionRunRef:
+    id: str | None
+    started_at: datetime
+    finished_at: datetime | None
+
+
+FeaturePair = tuple[FeatureEventModel, FeatureLabel, SnapshotRef | None, CollectionRunRef | None]
 
 
 async def feature_candidate_screen(
@@ -441,6 +457,125 @@ async def feature_segment_paper_ab(
     return report
 
 
+async def latest_feature_candidate_screen(
+    session: AsyncSession,
+    *,
+    horizon: str = "30m",
+) -> dict[str, Any]:
+    return await _latest_persisted_report(
+        session,
+        name=f"feature_candidates_{horizon}",
+        empty_factory=lambda: _empty_feature_candidate_report(horizon=horizon),
+    )
+
+
+async def latest_feature_paper_ab(
+    session: AsyncSession,
+    *,
+    horizon: str = "30m",
+) -> dict[str, Any]:
+    return await _latest_persisted_report(
+        session,
+        name=f"feature_paper_ab_{horizon}",
+        empty_factory=lambda: _empty_feature_paper_ab_report(horizon=horizon),
+    )
+
+
+async def latest_feature_segment_candidate_screen(
+    session: AsyncSession,
+    *,
+    horizon: str = "30m",
+) -> dict[str, Any]:
+    return await _latest_persisted_report(
+        session,
+        name=f"feature_segment_candidates_{horizon}",
+        empty_factory=lambda: _empty_feature_segment_candidate_report(horizon=horizon),
+    )
+
+
+async def latest_feature_segment_paper_ab(
+    session: AsyncSession,
+    *,
+    horizon: str = "30m",
+) -> dict[str, Any]:
+    return await _latest_persisted_report(
+        session,
+        name=f"feature_segment_paper_ab_{horizon}",
+        empty_factory=lambda: _empty_feature_segment_paper_ab_report(horizon=horizon),
+    )
+
+
+async def generate_default_research_reports(
+    session: AsyncSession,
+    *,
+    horizon: str = "30m",
+    min_samples: int = DEFAULT_MIN_SAMPLES,
+    limit: int = 5000,
+) -> dict[str, Any]:
+    reports: dict[str, Any] = {}
+    errors: list[dict[str, str]] = []
+
+    async def run(name: str, func: Callable[[], Any]) -> None:
+        try:
+            reports[name] = await func()
+        except Exception as exc:  # noqa: BLE001
+            await session.rollback()
+            errors.append({"report": name, "error": str(exc)})
+
+    await run(
+        "feature_candidates",
+        lambda: feature_candidate_screen(
+            session,
+            horizon=horizon,
+            min_samples=min_samples,
+            limit=limit,
+            persist=True,
+        ),
+    )
+    await run(
+        "feature_paper_ab",
+        lambda: feature_paper_ab(
+            session,
+            horizon=horizon,
+            min_samples=min_samples,
+            candidate_limit=20,
+            limit=limit,
+            persist=True,
+        ),
+    )
+    await run(
+        "feature_segment_candidates",
+        lambda: feature_segment_candidate_screen(
+            session,
+            horizon=horizon,
+            min_samples=min_samples,
+            limit=limit,
+            persist=True,
+        ),
+    )
+    await run(
+        "feature_segment_paper_ab",
+        lambda: feature_segment_paper_ab(
+            session,
+            horizon=horizon,
+            min_samples=min_samples,
+            candidate_limit=50,
+            limit=limit,
+            persist=True,
+        ),
+    )
+    return {
+        "enabled": True,
+        "horizon": horizon,
+        "min_samples": min_samples,
+        "limit": limit,
+        "generated_count": len(reports),
+        "error_count": len(errors),
+        "errors": errors,
+        "reports": {name: _report_summary(report) for name, report in reports.items()},
+    }
+
+
 async def _labeled_feature_pairs(
     session: AsyncSession,
     *,
@@ -461,14 +596,14 @@ async def _balanced_labeled_feature_rows(
     *,
     horizon: str,
     limit: int,
-) -> list[tuple[FeatureEventModel, FeatureLabel, SignalSnapshot | None, CollectionRun | None]]:
+) -> list[FeaturePair]:
     if limit <= 0:
         return []
     days = await _labeled_event_days(session, horizon=horizon, limit=min(limit, DEFAULT_BALANCED_SAMPLE_DAYS))
     if not days:
         return []
     per_day_limit = max(1, (limit + len(days) - 1) // len(days))
-    rows: list[tuple[FeatureEventModel, FeatureLabel, SignalSnapshot | None, CollectionRun | None]] = []
+    rows: list[FeaturePair] = []
     seen_event_ids: set[str] = set()
     day_expr = func.date(FeatureEventModel.event_ts)
     for event_day in days:
@@ -497,8 +632,9 @@ async def _labeled_event_days(
     day_expr = func.date(FeatureEventModel.event_ts)
     rows = await session.execute(
         select(day_expr)
+        .select_from(FeatureEventModel)
+        .join(FeatureLabel, FeatureLabel.feature_event_id == FeatureEventModel.id)
         .where(
-            FeatureLabel.feature_event_id == FeatureEventModel.id,
             FeatureLabel.horizon == horizon,
             FeatureLabel.status == "labeled",
         )
@@ -511,11 +647,21 @@ async def _labeled_event_days(
 
 def _labeled_feature_query(horizon: str):
     return (
-        select(FeatureEventModel, FeatureLabel, SignalSnapshot, CollectionRun)
+        select(
+            FeatureEventModel,
+            FeatureLabel,
+            SignalSnapshot.id,
+            SignalSnapshot.collection_run_id,
+            SignalSnapshot.collected_at,
+            CollectionRun.id,
+            CollectionRun.started_at,
+            CollectionRun.finished_at,
+        )
+        .select_from(FeatureEventModel)
+        .join(FeatureLabel, FeatureLabel.feature_event_id == FeatureEventModel.id)
         .outerjoin(SignalSnapshot, SignalSnapshot.id == FeatureEventModel.snapshot_id)
         .outerjoin(CollectionRun, CollectionRun.id == SignalSnapshot.collection_run_id)
         .where(
-            FeatureLabel.feature_event_id == FeatureEventModel.id,
             FeatureLabel.horizon == horizon,
             FeatureLabel.status == "labeled",
         )
@@ -523,12 +669,13 @@ def _labeled_feature_query(horizon: str):
 
 
 def _append_unique_feature_rows(
-    rows: list[tuple[FeatureEventModel, FeatureLabel, SignalSnapshot | None, CollectionRun | None]],
-    candidates: list[tuple[FeatureEventModel, FeatureLabel, SignalSnapshot | None, CollectionRun | None]],
+    rows: list[FeaturePair],
+    candidates: list[Any],
     *,
     seen_event_ids: set[str],
 ) -> None:
-    for item in candidates:
+    for raw_item in candidates:
+        item = _feature_pair_from_row(raw_item)
         event = item[0]
         if event.id in seen_event_ids:
             continue
@@ -536,12 +683,28 @@ def _append_unique_feature_rows(
         rows.append(item)
 
 
-async def _collection_run_windows(session: AsyncSession) -> list[CollectionRun]:
-    rows = await session.execute(select(CollectionRun).order_by(CollectionRun.started_at.desc()).limit(5000))
-    return list(rows.scalars().all())
+def _feature_pair_from_row(item: Any) -> FeaturePair:
+    event = item[0]
+    label = item[1]
+    snapshot = None
+    if item[2] is not None and item[4] is not None:
+        snapshot = SnapshotRef(id=item[2], collection_run_id=item[3], collected_at=item[4])
+    collection_run = None
+    if item[5] is not None and item[6] is not None:
+        collection_run = CollectionRunRef(id=item[5], started_at=item[6], finished_at=item[7])
+    return event, label, snapshot, collection_run
 
 
-def _infer_collection_run(snapshot: SignalSnapshot | None, collection_runs: list[CollectionRun]) -> CollectionRun | None:
+async def _collection_run_windows(session: AsyncSession) -> list[CollectionRunRef]:
+    rows = await session.execute(
+        select(CollectionRun.id, CollectionRun.started_at, CollectionRun.finished_at)
+        .order_by(CollectionRun.started_at.desc())
+        .limit(5000)
+    )
+    return [CollectionRunRef(id=row[0], started_at=row[1], finished_at=row[2]) for row in rows.all()]
+
+
+def _infer_collection_run(snapshot: SnapshotRef | None, collection_runs: list[CollectionRunRef]) -> CollectionRunRef | None:
     if snapshot is None:
         return None
     collected_at = _aware(snapshot.collected_at)
@@ -1040,6 +1203,117 @@ def _segment_candidate_feature_summary(rows: list[dict[str, Any]]) -> list[dict[
     )
 
 
+async def _latest_persisted_report(
+    session: AsyncSession,
+    *,
+    name: str,
+    empty_factory: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    item = await session.scalar(
+        select(ExperimentRun)
+        .where(ExperimentRun.name == name, ExperimentRun.status == "research")
+        .order_by(ExperimentRun.created_at.desc())
+        .limit(1)
+    )
+    if item is None:
+        report = empty_factory()
+        report["materialized"] = False
+        report["generated_at"] = None
+        report["stale_seconds"] = None
+        report["source_experiment_run_id"] = None
+        report["experiment_run"] = None
+        return report
+    report = copy.deepcopy(item.metrics or empty_factory())
+    report["materialized"] = True
+    report["generated_at"] = item.created_at
+    report["stale_seconds"] = max(0.0, (_aware(datetime.now(timezone.utc)) - _aware(item.created_at)).total_seconds())
+    report["source_experiment_run_id"] = item.id
+    report["experiment_run"] = {"id": item.id, "name": item.name, "status": item.status}
+    return report
+
+
+def _empty_feature_candidate_report(*, horizon: str) -> dict[str, Any]:
+    return {
+        "horizon": horizon,
+        "limit": 0,
+        "labeled_count": 0,
+        "feature_group_count": 0,
+        "candidate_count": 0,
+        "watchlist_count": 0,
+        "thresholds": {},
+        "policy": _research_policy(),
+        "candidates": [],
+        "watchlist": [],
+        "rejected_summary": {},
+        "all_features": [],
+        "empty_reason": "no_materialized_report",
+    }
+
+
+def _empty_feature_paper_ab_report(*, horizon: str) -> dict[str, Any]:
+    return {
+        "horizon": horizon,
+        "limit": 0,
+        "candidate_limit": 0,
+        "selected_candidate_count": 0,
+        "selected_feature_keys": [],
+        "thresholds": {},
+        "policy": _research_policy(),
+        "data_quality": {"labeled_count": 0, "status": "no_materialized_report"},
+        "arms": {},
+        "per_candidate": [],
+        "candidate_screen": {},
+        "empty_reason": "no_materialized_report",
+    }
+
+
+def _empty_feature_segment_candidate_report(*, horizon: str) -> dict[str, Any]:
+    return {
+        "horizon": horizon,
+        "limit": 0,
+        "labeled_count": 0,
+        "segment_group_count": 0,
+        "candidate_count": 0,
+        "thresholds": {},
+        "policy": _research_policy(),
+        "quality_summary": {},
+        "risk_summary": {},
+        "candidates": [],
+        "rejected_summary": {},
+        "by_feature": [],
+        "all_segments": [],
+        "empty_reason": "no_materialized_report",
+    }
+
+
+def _empty_feature_segment_paper_ab_report(*, horizon: str) -> dict[str, Any]:
+    return {
+        "horizon": horizon,
+        "limit": 0,
+        "candidate_limit": 0,
+        "selected_candidate_count": 0,
+        "selected_segment_keys": [],
+        "thresholds": {},
+        "policy": _research_policy(),
+        "data_quality": {"labeled_count": 0, "status": "no_materialized_report"},
+        "quality": {},
+        "arms": {},
+        "per_segment": [],
+        "segment_screen": {},
+        "empty_reason": "no_materialized_report",
+    }
+
+
+def _report_summary(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "horizon": report.get("horizon"),
+        "limit": report.get("limit"),
+        "labeled_count": report.get("labeled_count") or (report.get("data_quality") or {}).get("labeled_count"),
+        "candidate_count": report.get("candidate_count") or report.get("selected_candidate_count"),
+        "experiment_run": report.get("experiment_run"),
+    }
+
+
 def _feature_key(event: FeatureEventModel) -> str:
     return f"{event.feature_name}:{event.subtype}:{event.direction}"
 
@@ -1075,8 +1349,8 @@ def _market_window_key(value: datetime, window_hours: int) -> str:
 
 def _collection_run_key(
     event: FeatureEventModel,
-    snapshot: SignalSnapshot | None,
-    collection_run: CollectionRun | None,
+    snapshot: SnapshotRef | None,
+    collection_run: CollectionRunRef | None,
     bucket_minutes: int,
 ) -> str:
     if snapshot is not None and snapshot.collection_run_id:

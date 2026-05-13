@@ -24,6 +24,7 @@ from app.services.collector import SnapshotCollector
 from app.services.feature_candidates import (
     feature_candidate_screen,
     feature_paper_ab,
+    generate_default_research_reports,
     feature_segment_candidate_screen,
     feature_segment_paper_ab,
 )
@@ -354,6 +355,11 @@ def build_parser() -> argparse.ArgumentParser:
     segment_ab.add_argument("--limit", type=int, default=20000)
     segment_ab.add_argument("--persist", action="store_true", help="Save the report as an experiment run")
 
+    research_reports = subparsers.add_parser("features-research-reports", help="Materialize default research reports")
+    research_reports.add_argument("--horizon", choices=["30m", "1h", "4h", "24h"], default="30m")
+    research_reports.add_argument("--min-samples", type=int, default=30)
+    research_reports.add_argument("--limit", type=int, default=5000)
+
     subparsers.add_parser("storage-health", help="Show database storage health")
     storage_maintain = subparsers.add_parser("storage-maintain", help="Run safe database maintenance")
     storage_maintain.add_argument("--indexes", action="store_true", help="Ensure required performance indexes")
@@ -410,6 +416,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-feature-research",
         action="store_true",
         help="Only backfill signal attribution outcomes",
+    )
+    experiment_loop.add_argument(
+        "--no-research-reports",
+        action="store_true",
+        help="Do not periodically materialize feature research reports",
+    )
+    experiment_loop.add_argument(
+        "--research-report-interval-seconds",
+        type=int,
+        default=3600,
+        help="Seconds between materialized research report refreshes",
+    )
+    experiment_loop.add_argument(
+        "--research-report-limit",
+        type=int,
+        default=5000,
+        help="Labeled feature row limit for materialized research reports",
+    )
+    experiment_loop.add_argument(
+        "--research-report-min-samples",
+        type=int,
+        default=30,
+        help="Minimum samples for materialized research candidates",
     )
     experiment_loop.add_argument(
         "--interval-seconds",
@@ -909,6 +938,18 @@ async def run(argv: Sequence[str] | None = None) -> int:
         await engine.dispose()
         return 0
 
+    if args.command == "features-research-reports":
+        async with SessionLocal() as session:
+            result = await generate_default_research_reports(
+                session,
+                horizon=args.horizon,
+                min_samples=args.min_samples,
+                limit=args.limit,
+            )
+        print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
     if args.command == "storage-health":
         async with SessionLocal() as session:
             result = await get_storage_health(session)
@@ -1012,14 +1053,24 @@ async def run(argv: Sequence[str] | None = None) -> int:
             feature_label_limit=args.feature_label_limit,
             feature_horizons=args.feature_horizons,
             feature_research_enabled=not args.no_feature_research,
+            research_reports_enabled=not args.no_research_reports,
+            research_report_interval_seconds=args.research_report_interval_seconds,
+            research_report_limit=args.research_report_limit,
+            research_report_min_samples=args.research_report_min_samples,
         )
         heartbeat_task = _start_runtime_heartbeat("experiment-loop", runtime_meta)
         run_number = 0
+        last_research_report_at = 0.0
         try:
             while True:
                 run_number += 1
                 _touch_runtime("experiment-loop", runtime_meta, run_number=run_number)
                 try:
+                    now = time.monotonic()
+                    include_reports = (
+                        not args.no_research_reports
+                        and (last_research_report_at <= 0 or now - last_research_report_at >= args.research_report_interval_seconds)
+                    )
                     async with SessionLocal() as session:
                         result = await run_experiment_backfill(
                             session,
@@ -1028,7 +1079,13 @@ async def run(argv: Sequence[str] | None = None) -> int:
                             feature_label_limit=args.feature_label_limit,
                             feature_horizons=args.feature_horizons,
                             include_feature_research=not args.no_feature_research,
+                            include_research_reports=include_reports,
+                            research_report_horizon="30m",
+                            research_report_min_samples=args.research_report_min_samples,
+                            research_report_limit=args.research_report_limit,
                         )
+                    if include_reports and not result.get("research_reports", {}).get("error_count"):
+                        last_research_report_at = now
                     print(
                         json.dumps(
                             {
@@ -1037,6 +1094,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
                                 "backfill": result["signals"],
                                 "signals": result["signals"],
                                 "features": result["features"],
+                                "research_reports": result["research_reports"],
                             },
                             ensure_ascii=False,
                         ),

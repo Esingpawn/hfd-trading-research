@@ -14,6 +14,10 @@ from app.services.feature_candidates import (
     feature_paper_ab,
     feature_segment_candidate_screen,
     feature_segment_paper_ab,
+    latest_feature_candidate_screen,
+    latest_feature_paper_ab,
+    latest_feature_segment_candidate_screen,
+    latest_feature_segment_paper_ab,
 )
 from app.services.features import (
     backfill_feature_events,
@@ -178,6 +182,14 @@ async def feature_candidates(
     )
 
 
+@router.get("/features/candidates/latest")
+async def latest_feature_candidates(
+    session: SessionDep,
+    horizon: str = Query(default="30m", pattern="^(30m|1h|4h|24h)$"),
+) -> dict[str, object]:
+    return await latest_feature_candidate_screen(session, horizon=horizon)
+
+
 @router.post("/features/candidates")
 async def persist_feature_candidates(
     session: SessionDep,
@@ -242,6 +254,14 @@ async def feature_paper_ab_report(
             persist=False,
         ),
     )
+
+
+@router.get("/features/paper-ab/latest")
+async def latest_feature_paper_ab_report(
+    session: SessionDep,
+    horizon: str = Query(default="30m", pattern="^(30m|1h|4h|24h)$"),
+) -> dict[str, object]:
+    return await latest_feature_paper_ab(session, horizon=horizon)
 
 
 @router.post("/features/paper-ab")
@@ -328,6 +348,14 @@ async def feature_segment_candidates(
             persist=False,
         ),
     )
+
+
+@router.get("/features/segment-candidates/latest")
+async def latest_feature_segment_candidates(
+    session: SessionDep,
+    horizon: str = Query(default="30m", pattern="^(30m|1h|4h|24h)$"),
+) -> dict[str, object]:
+    return await latest_feature_segment_candidate_screen(session, horizon=horizon)
 
 
 @router.post("/features/segment-candidates")
@@ -429,6 +457,14 @@ async def feature_segment_paper_ab_report(
             persist=False,
         ),
     )
+
+
+@router.get("/features/segment-paper-ab/latest")
+async def latest_feature_segment_paper_ab_report(
+    session: SessionDep,
+    horizon: str = Query(default="30m", pattern="^(30m|1h|4h|24h)$"),
+) -> dict[str, object]:
+    return await latest_feature_segment_paper_ab(session, horizon=horizon)
 
 
 @router.post("/features/segment-paper-ab")

@@ -11,6 +11,8 @@ from app.services.feature_candidates import (
     feature_paper_ab,
     feature_segment_candidate_screen,
     feature_segment_paper_ab,
+    generate_default_research_reports,
+    latest_feature_candidate_screen,
 )
 
 
@@ -132,6 +134,68 @@ async def test_feature_candidate_screen_promotes_stable_feature_and_rejects_weak
     assert "win_rate_below_minimum" in report["all_features"][-1]["rejection_reasons"]
     assert report["experiment_run"]["status"] == "research"
     assert experiments.scalar_one().name == "feature_candidates_30m"
+
+
+@pytest.mark.asyncio
+async def test_latest_feature_candidate_screen_reads_persisted_report(session) -> None:
+    await add_labeled_feature(
+        session,
+        feature_name="inst_choch",
+        subtype="CHoCH_Bullish",
+        returns=[0.012, 0.01, 0.009, 0.008, 0.011, -0.002],
+    )
+    await add_labeled_feature(
+        session,
+        feature_name="inst_choch",
+        subtype="CHoCH_Bullish",
+        returns=[0.012, 0.01, 0.009, 0.008, 0.011, -0.002],
+        symbol="ETHUSDT",
+    )
+    await session.commit()
+
+    missing = await latest_feature_candidate_screen(session, horizon="30m")
+    report = await feature_candidate_screen(
+        session,
+        horizon="30m",
+        min_samples=6,
+        min_win_rate=0.6,
+        min_profit_factor=1.2,
+        segment_min_samples=3,
+        min_segments=2,
+        persist=True,
+    )
+    latest = await latest_feature_candidate_screen(session, horizon="30m")
+
+    assert missing["materialized"] is False
+    assert report["candidate_count"] == 1
+    assert latest["materialized"] is True
+    assert latest["candidate_count"] == 1
+    assert latest["source_experiment_run_id"] is not None
+
+
+@pytest.mark.asyncio
+async def test_generate_default_research_reports_persists_all_reports(session) -> None:
+    await add_labeled_feature(session, feature_name="inst_choch", subtype="CHoCH_Bullish", returns=[0.012] * 6)
+    await add_labeled_feature(
+        session,
+        feature_name="inst_choch",
+        subtype="CHoCH_Bullish",
+        returns=[0.012] * 6,
+        symbol="ETHUSDT",
+    )
+    await session.commit()
+
+    result = await generate_default_research_reports(session, horizon="30m", min_samples=6, limit=100)
+    experiments = await session.execute(select(ExperimentRun))
+
+    assert result["generated_count"] == 4
+    assert result["error_count"] == 0
+    assert {item.name for item in experiments.scalars().all()} == {
+        "feature_candidates_30m",
+        "feature_paper_ab_30m",
+        "feature_segment_candidates_30m",
+        "feature_segment_paper_ab_30m",
+    }
 
 
 @pytest.mark.asyncio

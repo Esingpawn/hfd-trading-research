@@ -77,6 +77,24 @@ SQLITE_INDEX_SPECS: tuple[SqliteIndexSpec, ...] = (
         "feature label backfill and effectiveness scans",
     ),
     SqliteIndexSpec(
+        "ix_feature_labels_horizon_status_event",
+        "feature_labels",
+        "horizon, status, feature_event_id",
+        "materialized research report joins",
+    ),
+    SqliteIndexSpec(
+        "ix_feature_events_event_ts_id",
+        "feature_events",
+        "event_ts, id",
+        "balanced feature report sampling by event day",
+    ),
+    SqliteIndexSpec(
+        "ix_experiment_runs_name_status_created",
+        "experiment_runs",
+        "name, status, created_at DESC",
+        "latest materialized research report lookup",
+    ),
+    SqliteIndexSpec(
         "idx_paper_trades_status_opened",
         "paper_trades",
         "status, opened_at DESC",
