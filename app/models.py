@@ -166,6 +166,40 @@ class PaperTrade(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class ShadowPaperTrade(Base):
+    __tablename__ = "shadow_paper_trades"
+    __table_args__ = (
+        UniqueConstraint("signal_key", name="uq_shadow_paper_trades_signal_key"),
+        Index("ix_shadow_paper_trades_strategy_status", "strategy_name", "status"),
+        Index("ix_shadow_paper_trades_candidate", "candidate_type", "candidate_key"),
+        Index("ix_shadow_paper_trades_symbol_opened", "symbol", "opened_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    strategy_name: Mapped[str] = mapped_column(String(120), index=True)
+    candidate_type: Mapped[str] = mapped_column(String(32), index=True)
+    candidate_key: Mapped[str] = mapped_column(String(240), index=True)
+    signal_key: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    source_experiment_run_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    symbol: Mapped[str] = mapped_column(String(24), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    direction: Mapped[str] = mapped_column(String(16), index=True)
+    entry_price: Mapped[float] = mapped_column(Float)
+    stop_loss: Mapped[float] = mapped_column(Float)
+    take_profit: Mapped[float] = mapped_column(Float)
+    position_size: Mapped[float] = mapped_column(Float, default=1.0)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="open")
+    exit_price: Mapped[float | None] = mapped_column(Float)
+    exit_reason: Mapped[str | None] = mapped_column(String(64))
+    pnl: Mapped[float | None] = mapped_column(Float)
+    r_multiple: Mapped[float | None] = mapped_column(Float)
+    mfe: Mapped[float] = mapped_column(Float, default=0.0)
+    mae: Mapped[float] = mapped_column(Float, default=0.0)
+    context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class BacktestRun(Base):
     __tablename__ = "backtest_runs"
 

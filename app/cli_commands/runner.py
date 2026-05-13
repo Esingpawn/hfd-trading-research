@@ -38,6 +38,7 @@ from app.services.features import (
 )
 from app.services.paper import mark_open_trades, paper_scan
 from app.services.paper_loop import paper_loop_decision
+from app.services.shadow_paper import mark_shadow_paper_trades, shadow_paper_scan
 from app.services.signal_attribution import backfill_signal_outcomes, signal_effectiveness
 from app.services.strategy import evaluate_symbol
 from app.services.telegram import TelegramClient, extract_chat_candidates
@@ -264,6 +265,12 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--notify", action="store_true", help="Send Telegram notifications for opened trades")
 
     subparsers.add_parser("paper-mark", help="Mark open paper trades against latest prices")
+
+    shadow_scan = subparsers.add_parser("shadow-paper-scan", help="Open isolated shadow paper trades from research candidates")
+    shadow_scan.add_argument("--candidate-limit", type=int, default=20)
+    shadow_scan.add_argument("--no-watchlist", action="store_true", help="Only use strict candidates, not watchlist rows")
+
+    subparsers.add_parser("shadow-paper-mark", help="Mark isolated shadow paper trades against latest prices")
 
     signal_backfill = subparsers.add_parser("signals-backfill", help="Backfill signal attribution outcome labels")
     signal_backfill.add_argument("--limit", type=int, default=500)
@@ -773,6 +780,24 @@ async def run(argv: Sequence[str] | None = None) -> int:
     if args.command == "paper-mark":
         async with SessionLocal() as session:
             result = await mark_open_trades(session)
+        print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "shadow-paper-scan":
+        async with SessionLocal() as session:
+            result = await shadow_paper_scan(
+                session,
+                candidate_limit=args.candidate_limit,
+                include_watchlist=not args.no_watchlist,
+            )
+        print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "shadow-paper-mark":
+        async with SessionLocal() as session:
+            result = await mark_shadow_paper_trades(session)
         print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
         await engine.dispose()
         return 0

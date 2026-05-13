@@ -23,6 +23,7 @@ from app.services.features import (
     refresh_feature_research,
 )
 from app.services.paper import mark_open_trades, paper_scan
+from app.services.shadow_paper import mark_shadow_paper_trades, shadow_paper_scan
 from app.services.signal_attribution import backfill_signal_outcomes
 from app.application.storage import run_storage_maintenance
 
@@ -120,6 +121,14 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
         return result.__dict__
     if task_name in {"paper.mark", "paper-mark"}:
         return await mark_open_trades(session)
+    if task_name in {"shadow_paper.scan", "shadow-paper-scan"}:
+        return await shadow_paper_scan(
+            session,
+            candidate_limit=_payload_int(payload, "candidate_limit", 20),
+            include_watchlist=_payload_bool(payload, "include_watchlist", True),
+        )
+    if task_name in {"shadow_paper.mark", "shadow-paper-mark"}:
+        return await mark_shadow_paper_trades(session)
     if task_name in {"signals.backfill", "signals-backfill"}:
         result = await backfill_signal_outcomes(session, limit=int(payload.get("limit") or 500))
         return result.__dict__

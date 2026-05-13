@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.application.tasks import enqueue_task, recent_tasks, run_task_by_id
 from app.api.routers.tasks import _task_enqueue_payload
 from app.db import Base
-from app.models import ExperimentRun, FeatureEvent, FeatureLabel, SignalSnapshot, TaskRun
+from app.models import ExperimentRun, FeatureEvent, FeatureLabel, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TaskRun
 
 
 @pytest.fixture()
@@ -286,6 +286,26 @@ async def test_run_task_by_id_executes_research_report_materialization(session) 
         "feature_segment_candidates_30m",
         "feature_segment_paper_ab_30m",
     }
+
+
+@pytest.mark.asyncio
+async def test_run_task_by_id_executes_shadow_paper_scan_without_real_paper_trade(session) -> None:
+    await _add_feature_group(session, symbol="BTCUSDT")
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=datetime(2026, 1, 1, tzinfo=timezone.utc)))
+    materialize = TaskRun(task_name="features.research_reports", payload={"min_samples": 6, "limit": 100}, result={})
+    session.add(materialize)
+    await session.commit()
+    await run_task_by_id(session, materialize.id)
+    scan = TaskRun(task_name="shadow_paper.scan", payload={"candidate_limit": 5}, result={})
+    session.add(scan)
+    await session.commit()
+
+    result = await run_task_by_id(session, scan.id)
+    shadow_rows = await session.execute(select(ShadowPaperTrade))
+
+    assert result["status"] == "completed"
+    assert result["result"]["execution"]["policy"]["opens_paper_trades"] is False
+    assert len(shadow_rows.scalars().all()) == 1
 
 
 @pytest.mark.asyncio

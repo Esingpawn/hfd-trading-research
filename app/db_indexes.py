@@ -100,4 +100,16 @@ SQLITE_INDEX_SPECS: tuple[SqliteIndexSpec, ...] = (
         "status, opened_at DESC",
         "open-trade marking and recent paper trade display",
     ),
+    SqliteIndexSpec(
+        "ix_shadow_paper_trades_strategy_status",
+        "shadow_paper_trades",
+        "strategy_name, status",
+        "shadow paper performance by candidate strategy",
+    ),
+    SqliteIndexSpec(
+        "ix_shadow_paper_trades_candidate",
+        "shadow_paper_trades",
+        "candidate_type, candidate_key",
+        "shadow paper candidate lookup",
+    ),
 )
