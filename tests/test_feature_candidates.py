@@ -731,6 +731,56 @@ async def test_segment_candidate_sampling_prefers_cross_segment_coverage(session
 
 
 @pytest.mark.asyncio
+async def test_segment_candidate_sampling_fills_diverse_segments_to_min_samples_first(session) -> None:
+    base_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for segment_index in range(20):
+        symbol = f"S{segment_index:02d}USDT"
+        for item_index in range(30):
+            await add_labeled_feature_item(
+                session,
+                feature_name=f"feature_{segment_index:02d}",
+                subtype="diverse",
+                symbol=symbol,
+                timeframe="short",
+                event_ts=base_ts + timedelta(days=item_index % 3, minutes=item_index * 31),
+                return_pct=0.01,
+            )
+    for segment_index in range(40):
+        symbol = f"L{segment_index:02d}USDT"
+        for item_index in range(5):
+            await add_labeled_feature_item(
+                session,
+                feature_name=f"long_tail_{segment_index:02d}",
+                subtype="thin",
+                symbol=symbol,
+                timeframe="short",
+                event_ts=base_ts + timedelta(minutes=segment_index * 10 + item_index),
+                return_pct=0.002,
+            )
+    await session.commit()
+
+    report = await feature_segment_candidate_screen(
+        session,
+        horizon="30m",
+        min_samples=30,
+        min_win_rate=0.6,
+        min_profit_factor=1.2,
+        min_unique_time_buckets=3,
+        min_unique_event_days=2,
+        min_unique_market_windows=2,
+        min_unique_collection_runs=1,
+        max_same_return_samples=60,
+        max_return_cluster_ratio=1.0,
+        limit=300,
+    )
+    full_segments = [row for row in report["all_segments"] if row["sample_count"] >= 30]
+
+    assert report["labeled_count"] == 300
+    assert len(full_segments) == 10
+    assert all(row["feature_name"].startswith("feature_") for row in full_segments)
+
+
+@pytest.mark.asyncio
 async def test_generate_default_research_reports_uses_shared_balanced_sample(session) -> None:
     base_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
     for index in range(40):

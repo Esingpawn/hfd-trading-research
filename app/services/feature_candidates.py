@@ -91,7 +91,7 @@ async def feature_candidate_screen(
         segment_min_samples=segment_min_samples,
         min_segments=min_segments,
     )
-    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
+    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit, coverage_target=min_samples)
     return _feature_candidate_screen_from_pairs(
         pairs,
         horizon=horizon,
@@ -200,7 +200,7 @@ async def feature_paper_ab(
         segment_min_samples=segment_min_samples,
         min_segments=min_segments,
     )
-    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
+    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit, coverage_target=min_samples)
     report = _feature_paper_ab_from_pairs(
         pairs,
         horizon=horizon,
@@ -361,7 +361,7 @@ async def feature_segment_candidate_screen(
         max_same_return_samples=max_same_return_samples,
         max_return_cluster_ratio=max_return_cluster_ratio,
     )
-    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
+    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit, coverage_target=min_samples)
     return _feature_segment_candidate_screen_from_pairs(
         pairs,
         horizon=horizon,
@@ -479,7 +479,7 @@ async def feature_segment_paper_ab(
         max_same_return_samples=max_same_return_samples,
         max_return_cluster_ratio=max_return_cluster_ratio,
     )
-    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
+    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit, coverage_target=min_samples)
     report = _feature_segment_paper_ab_from_pairs(
         pairs,
         horizon=horizon,
@@ -725,7 +725,7 @@ async def generate_default_research_reports(
             "reports": {},
         }
     await _set_research_statement_timeout(session)
-    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
+    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit, coverage_target=min_samples)
     feature_thresholds = _thresholds(
         min_samples=min_samples,
         min_win_rate=DEFAULT_MIN_WIN_RATE,
@@ -883,9 +883,15 @@ async def _labeled_feature_pairs(
     *,
     horizon: str,
     limit: int,
+    coverage_target: int = DEFAULT_SEGMENT_COVERAGE_TARGET,
 ) -> list[FeaturePair]:
     if session.get_bind().dialect.name == "postgresql":
-        row_items = await _coverage_labeled_feature_rows_postgres(session, horizon=horizon, limit=limit)
+        row_items = await _coverage_labeled_feature_rows_postgres(
+            session,
+            horizon=horizon,
+            limit=limit,
+            coverage_target=coverage_target,
+        )
         return [
             _feature_pair_from_row(item)
             for item in row_items
@@ -899,7 +905,7 @@ async def _labeled_feature_pairs(
         for event, label, snapshot, collection_run in row_items
         if isinstance(label.return_pct, (int, float)) and event.direction in {"long", "short"}
     ]
-    return _coverage_sample_pairs(pairs, limit=limit)
+    return _coverage_sample_pairs(pairs, limit=limit, coverage_target=coverage_target)
 
 
 async def _coverage_labeled_feature_rows_postgres(
@@ -907,10 +913,17 @@ async def _coverage_labeled_feature_rows_postgres(
     *,
     horizon: str,
     limit: int,
+    coverage_target: int = DEFAULT_SEGMENT_COVERAGE_TARGET,
 ) -> list[Any]:
     if limit <= 0:
         return []
-    bind_params = {"horizon": horizon, "limit": int(limit), "target": DEFAULT_SEGMENT_COVERAGE_TARGET}
+    coverage_target = max(1, min(int(coverage_target), limit))
+    bind_params = {
+        "horizon": horizon,
+        "limit": int(limit),
+        "target": coverage_target,
+        "market_window_hours": DEFAULT_MARKET_WINDOW_HOURS,
+    }
     ids_result = await session.execute(
         text(
             """
@@ -926,6 +939,18 @@ async def _coverage_labeled_feature_rows_postgres(
                     ss.collection_run_id,
                     date_trunc('minute', fe.event_ts)
                       - ((extract(minute from fe.event_ts)::int % 30) * interval '1 minute') as bucket_ts,
+                    coalesce(
+                        ss.collection_run_id::text,
+                        (
+                            date_trunc('minute', fe.event_ts)
+                            - ((extract(minute from fe.event_ts)::int % 30) * interval '1 minute')
+                        )::text
+                    ) as run_key,
+                    (
+                        fe.event_ts::date::text
+                        || 'T'
+                        || lpad(((extract(hour from fe.event_ts)::int / :market_window_hours) * :market_window_hours)::text, 2, '0')
+                    ) as market_window_key,
                     row_number() over (
                         partition by fe.feature_name, fe.subtype, fe.direction, fe.symbol, fe.timeframe,
                                      date_trunc('minute', fe.event_ts)
@@ -953,10 +978,77 @@ async def _coverage_labeled_feature_rows_postgres(
                     ) as segment_rank
                 from eligible
                 where bucket_rank = 1
+            ), segment_stats as (
+                select
+                    feature_name,
+                    subtype,
+                    direction,
+                    symbol,
+                    timeframe,
+                    count(*) as segment_sample_count,
+                    count(distinct event_ts::date) as event_day_count,
+                    count(distinct market_window_key) as market_window_count,
+                    count(distinct run_key) as collection_run_count,
+                    max(event_ts) as latest_event_ts
+                from bucketed
+                group by feature_name, subtype, direction, symbol, timeframe
+            ), ranked_segments as (
+                select
+                    *,
+                    row_number() over (
+                        order by
+                            case
+                                when segment_sample_count >= :target
+                                 and event_day_count >= 2
+                                 and market_window_count >= 2
+                                 and collection_run_count >= 2 then 0
+                                else 1
+                            end,
+                            least(segment_sample_count, :target) desc,
+                            event_day_count desc,
+                            market_window_count desc,
+                            collection_run_count desc,
+                            latest_event_ts desc,
+                            feature_name,
+                            subtype,
+                            direction,
+                            symbol,
+                            timeframe
+                    ) as segment_order
+                from segment_stats
+            ), ranked_bucketed as (
+                select
+                    b.*,
+                    rs.segment_sample_count,
+                    rs.event_day_count,
+                    rs.market_window_count,
+                    rs.collection_run_count,
+                    rs.segment_order
+                from bucketed b
+                join ranked_segments rs using (feature_name, subtype, direction, symbol, timeframe)
+            ), priority_rows as (
+                select id, 0 as priority, segment_order, segment_rank, event_ts
+                from ranked_bucketed
+                where segment_sample_count >= :target
+                  and event_day_count >= 2
+                  and market_window_count >= 2
+                  and collection_run_count >= 2
+                  and segment_order <= greatest(1, floor(cast(:limit as numeric) / cast(:target as numeric)))::int
+                  and segment_rank <= :target
+            ), fallback_rows as (
+                select id, 1 as priority, segment_order, segment_rank, event_ts
+                from ranked_bucketed rb
+                where not exists (select 1 from priority_rows pr where pr.id = rb.id)
             ), prioritized as (
                 select id
-                from bucketed
+                from (
+                    select * from priority_rows
+                    union all
+                    select * from fallback_rows
+                ) ordered_rows
                 order by
+                    priority,
+                    segment_order,
                     case when segment_rank <= :target then segment_rank else :target + segment_rank end,
                     event_ts desc,
                     id desc
@@ -981,7 +1073,12 @@ def _research_fetch_limit(limit: int) -> int:
     return max(limit, min(DEFAULT_RESEARCH_SAMPLE_MAX_FETCH_ROWS, limit * DEFAULT_RESEARCH_SAMPLE_FETCH_MULTIPLIER))
 
 
-def _coverage_sample_pairs(pairs: list[FeaturePair], *, limit: int) -> list[FeaturePair]:
+def _coverage_sample_pairs(
+    pairs: list[FeaturePair],
+    *,
+    limit: int,
+    coverage_target: int = DEFAULT_SEGMENT_COVERAGE_TARGET,
+) -> list[FeaturePair]:
     if limit <= 0:
         return []
     if len(pairs) <= limit:
@@ -1002,34 +1099,84 @@ def _coverage_sample_pairs(pairs: list[FeaturePair], *, limit: int) -> list[Feat
         segment_items.setdefault(segment, []).append(item)
         available_days.setdefault(segment, set()).add(_day_key(event.event_ts))
         available_runs.setdefault(segment, set()).add(_collection_run_key(event, snapshot, collection_run, DEFAULT_DEDUPE_BUCKET_MINUTES))
-    segments_by_depth = sorted(segment_items, key=lambda key: (len(segment_items[key]), key))
-    for target in _coverage_targets(limit):
+    target = max(1, min(int(coverage_target), limit))
+    segments_by_depth = sorted(
+        segment_items,
+        key=lambda key: _coverage_segment_priority(
+            segment_items[key],
+            available_days=available_days.get(key) or set(),
+            available_runs=available_runs.get(key) or set(),
+            target=target,
+        ),
+        reverse=True,
+    )
+    for segment in _diverse_targetable_segments(
+        segments_by_depth,
+        segment_items=segment_items,
+        available_days=available_days,
+        available_runs=available_runs,
+        target=target,
+    ):
+        _fill_coverage_segment(
+            segment,
+            segment_items=segment_items,
+            selected=selected,
+            selected_ids=selected_ids,
+            segment_counts=segment_counts,
+            segment_bucket_counts=segment_bucket_counts,
+            segment_days=segment_days,
+            segment_runs=segment_runs,
+            available_days=available_days,
+            available_runs=available_runs,
+            desired_count=target,
+            limit=limit,
+        )
+        if len(selected) >= limit:
+            return sorted(selected, key=lambda row: _aware(row[0].event_ts), reverse=True)
+    for segment in _diverse_underfilled_segments(
+        segments_by_depth,
+        segment_items=segment_items,
+        available_days=available_days,
+        available_runs=available_runs,
+        target=target,
+    ):
+        _fill_coverage_segment(
+            segment,
+            segment_items=segment_items,
+            selected=selected,
+            selected_ids=selected_ids,
+            segment_counts=segment_counts,
+            segment_bucket_counts=segment_bucket_counts,
+            segment_days=segment_days,
+            segment_runs=segment_runs,
+            available_days=available_days,
+            available_runs=available_runs,
+            desired_count=min(len(segment_items[segment]), target),
+            limit=limit,
+        )
+        if len(selected) >= limit:
+            return sorted(selected, key=lambda row: _aware(row[0].event_ts), reverse=True)
+    for expansion_target in _coverage_targets(limit, coverage_target=target):
         made_progress = True
         while made_progress:
             made_progress = False
             for segment in segments_by_depth:
-                if segment_counts[segment] >= target:
-                    continue
-                item = _next_coverage_item(
-                    segment_items[segment],
+                before = len(selected)
+                _fill_coverage_segment(
+                    segment,
+                    segment_items=segment_items,
+                    selected=selected,
                     selected_ids=selected_ids,
-                    selected_buckets=segment_bucket_counts,
-                    selected_days=segment_days.setdefault(segment, set()),
-                    selected_runs=segment_runs.setdefault(segment, set()),
-                    available_day_count=len(available_days.get(segment) or ()),
-                    available_run_count=len(available_runs.get(segment) or ()),
-                    target=target,
+                    segment_counts=segment_counts,
+                    segment_bucket_counts=segment_bucket_counts,
+                    segment_days=segment_days,
+                    segment_runs=segment_runs,
+                    available_days=available_days,
+                    available_runs=available_runs,
+                    desired_count=expansion_target,
+                    limit=limit,
                 )
-                if item is None:
-                    continue
-                event, _label, snapshot, collection_run = item
-                selected.append(item)
-                selected_ids.add(event.id)
-                segment_counts[segment] += 1
-                segment_bucket_counts[(segment, _time_bucket_key(event.event_ts, DEFAULT_DEDUPE_BUCKET_MINUTES))] += 1
-                segment_days[segment].add(_day_key(event.event_ts))
-                segment_runs[segment].add(_collection_run_key(event, snapshot, collection_run, DEFAULT_DEDUPE_BUCKET_MINUTES))
-                made_progress = True
+                made_progress = made_progress or len(selected) > before
                 if len(selected) >= limit:
                     return sorted(selected, key=lambda row: _aware(row[0].event_ts), reverse=True)
     for item in ordered:
@@ -1075,8 +1222,95 @@ def _next_coverage_item(
     return fallback
 
 
-def _coverage_targets(limit: int) -> list[int]:
-    target = max(1, min(DEFAULT_SEGMENT_COVERAGE_TARGET, limit))
+def _fill_coverage_segment(
+    segment: str,
+    *,
+    segment_items: dict[str, list[FeaturePair]],
+    selected: list[FeaturePair],
+    selected_ids: set[str],
+    segment_counts: Counter[str],
+    segment_bucket_counts: Counter[tuple[str, str]],
+    segment_days: dict[str, set[str]],
+    segment_runs: dict[str, set[str]],
+    available_days: dict[str, set[str]],
+    available_runs: dict[str, set[str]],
+    desired_count: int,
+    limit: int,
+) -> None:
+    while len(selected) < limit and segment_counts[segment] < desired_count:
+        item = _next_coverage_item(
+            segment_items[segment],
+            selected_ids=selected_ids,
+            selected_buckets=segment_bucket_counts,
+            selected_days=segment_days.setdefault(segment, set()),
+            selected_runs=segment_runs.setdefault(segment, set()),
+            available_day_count=len(available_days.get(segment) or ()),
+            available_run_count=len(available_runs.get(segment) or ()),
+            target=desired_count,
+        )
+        if item is None:
+            return
+        event, _label, snapshot, collection_run = item
+        selected.append(item)
+        selected_ids.add(event.id)
+        segment_counts[segment] += 1
+        segment_bucket_counts[(segment, _time_bucket_key(event.event_ts, DEFAULT_DEDUPE_BUCKET_MINUTES))] += 1
+        segment_days[segment].add(_day_key(event.event_ts))
+        segment_runs[segment].add(_collection_run_key(event, snapshot, collection_run, DEFAULT_DEDUPE_BUCKET_MINUTES))
+
+
+def _diverse_targetable_segments(
+    segments: list[str],
+    *,
+    segment_items: dict[str, list[FeaturePair]],
+    available_days: dict[str, set[str]],
+    available_runs: dict[str, set[str]],
+    target: int,
+) -> list[str]:
+    return [
+        segment
+        for segment in segments
+        if len(segment_items[segment]) >= target
+        and _segment_has_diversity(
+            segment_items[segment],
+            available_days=available_days.get(segment) or set(),
+            available_runs=available_runs.get(segment) or set(),
+        )
+    ]
+
+
+def _diverse_underfilled_segments(
+    segments: list[str],
+    *,
+    segment_items: dict[str, list[FeaturePair]],
+    available_days: dict[str, set[str]],
+    available_runs: dict[str, set[str]],
+    target: int,
+) -> list[str]:
+    return [
+        segment
+        for segment in segments
+        if len(segment_items[segment]) < target
+        and _segment_has_diversity(
+            segment_items[segment],
+            available_days=available_days.get(segment) or set(),
+            available_runs=available_runs.get(segment) or set(),
+        )
+    ]
+
+
+def _segment_has_diversity(
+    items: list[FeaturePair],
+    *,
+    available_days: set[str],
+    available_runs: set[str],
+) -> bool:
+    windows = {_market_window_key(item[0].event_ts, DEFAULT_MARKET_WINDOW_HOURS) for item in items}
+    return len(available_days) >= 2 and len(windows) >= 2 and len(available_runs) >= 2
+
+
+def _coverage_targets(limit: int, *, coverage_target: int = DEFAULT_SEGMENT_COVERAGE_TARGET) -> list[int]:
+    target = max(1, min(int(coverage_target), limit))
     values: list[int] = []
     current = 1
     while current < target:
@@ -1084,6 +1318,29 @@ def _coverage_targets(limit: int) -> list[int]:
         current *= 2
     values.append(target)
     return values
+
+
+def _coverage_segment_priority(
+    items: list[FeaturePair],
+    *,
+    available_days: set[str],
+    available_runs: set[str],
+    target: int = DEFAULT_SEGMENT_COVERAGE_TARGET,
+) -> tuple[int, int, int, int, float, str]:
+    if not items:
+        return (0, 0, 0, 0, 0.0, "")
+    windows = {_market_window_key(item[0].event_ts, DEFAULT_MARKET_WINDOW_HOURS) for item in items}
+    latest_ts = max(_aware(item[0].event_ts).timestamp() for item in items)
+    targetable = 1 if len(items) >= target else 0
+    diversity_ready = 1 if len(available_days) >= 2 and len(windows) >= 2 and len(available_runs) >= 2 else 0
+    return (
+        targetable,
+        diversity_ready,
+        min(len(items), target),
+        len(available_days) + len(windows) + len(available_runs),
+        latest_ts,
+        _segment_key(items[0][0]),
+    )
 
 
 def _coverage_sample_priority(item: FeaturePair) -> tuple[int, int, float]:
