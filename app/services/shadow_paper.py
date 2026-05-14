@@ -10,7 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import PriceSnapshot, ShadowPaperTrade
 from app.services.feature_candidates import latest_feature_segment_candidate_screen
-from app.services.paper import _exit_reason, _pnl
+from app.services.paper import (
+    _extend_take_profit_runner,
+    _pnl,
+    _runner_asset_eligible,
+    _runner_decision,
+    _runner_extension_allowed,
+    _stop_exit_reason,
+    _take_profit_touched,
+)
 from app.services.risk import template_for_tier
 
 
@@ -112,7 +120,16 @@ async def mark_shadow_paper_trades(session: AsyncSession) -> dict[str, Any]:
         pnl = _net_pnl(trade, price, exit_side="mark")
         trade.mfe = max(trade.mfe, pnl)
         trade.mae = min(trade.mae, pnl)
-        exit_reason = _exit_reason(trade, price)
+        previous_stop_loss = trade.stop_loss
+        previous_take_profit = trade.take_profit
+        exit_reason = _stop_exit_reason(trade, price)
+        runner_decision: dict[str, Any] | None = None
+        if exit_reason is None and _take_profit_touched(trade, price):
+            runner_decision = _shadow_runner_decision(trade, price)
+            if runner_decision["extend"]:
+                _extend_take_profit_runner(trade, price)
+            else:
+                exit_reason = "take_profit"
         if exit_reason:
             exit_price = _execution_price(trade.direction, price, side="exit", asset_tier=_asset_tier(trade.symbol))
             pnl = _net_pnl(trade, exit_price, exit_side="executed")
@@ -133,12 +150,34 @@ async def mark_shadow_paper_trades(session: AsyncSession) -> dict[str, Any]:
                     "net_pnl_after_cost": pnl,
                     "total_fee_rate": SHADOW_FEE_RATE * 2,
                     "closed_by_shadow_mark": True,
+                    "runner_decision": runner_decision,
                 },
             )
             closed.append({"id": trade.id, "symbol": trade.symbol, "exit_reason": exit_reason, "pnl": pnl, "mark_pnl": mark_pnl})
         else:
-            trade.context = _merge_context(trade.context, {"last_mark_price": price, "net_mark_pnl_after_cost": pnl})
-            updated.append({"id": trade.id, "symbol": trade.symbol, "pnl": pnl, "mark_pnl": mark_pnl})
+            context_update: dict[str, Any] = {"last_mark_price": price, "net_mark_pnl_after_cost": pnl}
+            payload = {"id": trade.id, "symbol": trade.symbol, "pnl": pnl, "mark_pnl": mark_pnl}
+            if trade.stop_loss != previous_stop_loss or trade.take_profit != previous_take_profit:
+                context_update.update(
+                    {
+                        "runner_decision": runner_decision,
+                        "runner_extended_at": datetime.now(timezone.utc).isoformat(),
+                        "previous_stop_loss": previous_stop_loss,
+                        "previous_take_profit": previous_take_profit,
+                    }
+                )
+                payload.update(
+                    {
+                        "runner_extended": True,
+                        "runner_evidence": runner_decision,
+                        "stop_loss": trade.stop_loss,
+                        "take_profit": trade.take_profit,
+                        "previous_stop_loss": previous_stop_loss,
+                        "previous_take_profit": previous_take_profit,
+                    }
+                )
+            trade.context = _merge_context(trade.context, context_update)
+            updated.append(payload)
     if closed or updated:
         await session.commit()
     return {"closed": closed, "updated": updated, "policy": _shadow_policy()}
@@ -388,10 +427,94 @@ def _signal_key(*, candidate_key: str, symbol: str, direction: str, price: float
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _shadow_runner_decision(trade: ShadowPaperTrade, price: float) -> dict[str, Any]:
+    if not _runner_asset_eligible(trade):
+        return _runner_decision(False, blockers=["asset_not_runner_eligible"])
+    if trade.entry_price <= 0 or price <= 0:
+        return _runner_decision(False, blockers=["invalid_price"])
+    if trade.direction == "long" and price <= trade.entry_price:
+        return _runner_decision(False, blockers=["not_profitable"])
+    if trade.direction == "short" and price >= trade.entry_price:
+        return _runner_decision(False, blockers=["not_profitable"])
+
+    evidence = _shadow_runner_evidence(trade)
+    return _runner_decision(
+        _runner_extension_allowed(evidence),
+        score=evidence["score"],
+        signals=evidence["signals"],
+        blockers=evidence["blockers"],
+    )
+
+
+def _shadow_runner_evidence(trade: ShadowPaperTrade) -> dict[str, Any]:
+    context = trade.context or {}
+    candidate = context.get("candidate_snapshot") if isinstance(context.get("candidate_snapshot"), dict) else {}
+    key_blob = " ".join(
+        str(value or "")
+        for value in (
+            trade.candidate_key,
+            candidate.get("segment_key"),
+            candidate.get("feature_key"),
+            candidate.get("promotion_status"),
+        )
+    ).lower()
+    sample_count = _number(candidate.get("sample_count")) or 0.0
+    raw_sample_count = _number(candidate.get("raw_sample_count")) or 0.0
+    win_rate = _number(candidate.get("win_rate"))
+    profit_factor = _number(candidate.get("profit_factor"))
+    reliability_score = _number(candidate.get("reliability_score"))
+    avg_return = _number(candidate.get("avg_return"))
+
+    trend_feature = any(token in key_blob for token in ("trend", "smart_money", "inst_vwap", "micro_poc", "poc", "volume_profile", "hvn"))
+    liquidity_feature = any(token in key_blob for token in ("liq", "liquidation", "sweep", "heatmap", "stop_loss"))
+    orderflow_feature = any(token in key_blob for token in ("cross_exchange", "imbalance", "orderflow", "ob_decay", "order_blocks"))
+    performance_support = (
+        (profit_factor is not None and profit_factor >= 1.1)
+        or (win_rate is not None and win_rate >= 0.52)
+        or (avg_return is not None and avg_return > 0)
+    )
+    statistical_support = sample_count >= 10 or raw_sample_count >= 30 or (reliability_score is not None and reliability_score >= 0.1)
+    signals = {
+        "same_direction": True,
+        "fresh": True,
+        "score_above_minimum": statistical_support,
+        "execution_ready": performance_support,
+        "dark_flow_target": liquidity_feature or orderflow_feature,
+        "trend_aligned": trend_feature,
+        "liquidity_context": liquidity_feature,
+        "orderflow_confirmed": orderflow_feature,
+        "exhaustion_filter_present": "exhaustion" in key_blob,
+    }
+    blockers: list[str] = []
+    if not statistical_support:
+        blockers.append("insufficient_shadow_candidate_support")
+    if not performance_support:
+        blockers.append("shadow_candidate_performance_weak")
+    if not (trend_feature or liquidity_feature or orderflow_feature):
+        blockers.append("missing_continuation_feature")
+    if not (liquidity_feature or orderflow_feature):
+        blockers.append("missing_flow_confirmation")
+    score = (
+        1.5
+        + 1.0
+        + (1.0 if signals["score_above_minimum"] else 0.0)
+        + (1.25 if signals["execution_ready"] else 0.0)
+        + (1.25 if signals["dark_flow_target"] else 0.0)
+        + (1.25 if signals["trend_aligned"] else 0.0)
+        + (0.9 if signals["liquidity_context"] else 0.0)
+        + (0.9 if signals["orderflow_confirmed"] else 0.0)
+        + (0.4 if signals["exhaustion_filter_present"] else 0.0)
+    )
+    return {"score": round(score, 3), "signals": signals, "blockers": blockers}
+
+
 def _candidate_context(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "segment_key": row.get("segment_key"),
         "feature_key": row.get("feature_key"),
+        "symbol": row.get("symbol"),
+        "timeframe": row.get("timeframe"),
+        "direction": row.get("direction"),
         "sample_count": row.get("sample_count"),
         "raw_sample_count": row.get("raw_sample_count"),
         "win_rate": row.get("win_rate"),
@@ -406,6 +529,12 @@ def _candidate_context(row: dict[str, Any]) -> dict[str, Any]:
         "promotion_status": row.get("promotion_status"),
         "rejection_reasons": row.get("rejection_reasons"),
     }
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
 
 
 def _trade_payload(trade: ShadowPaperTrade) -> dict[str, Any]:

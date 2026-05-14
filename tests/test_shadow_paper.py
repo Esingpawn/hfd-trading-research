@@ -101,6 +101,83 @@ async def test_mark_shadow_paper_trades_closes_take_profit(session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_mark_shadow_paper_trades_extends_high_volatility_runner(session) -> None:
+    session.add(
+        ShadowPaperTrade(
+            strategy_name="shadow_feature_candidates_v1",
+            candidate_type="observation_segment",
+            candidate_key="liquidity_sweep:bullish_sweep:long:HYPEUSDT:long",
+            signal_key="signal-hype-runner",
+            symbol="HYPEUSDT",
+            timeframe="long",
+            direction="long",
+            entry_price=38.0,
+            stop_loss=37.05,
+            take_profit=39.52,
+            position_size=1.0,
+            status="open",
+            context={
+                "candidate_snapshot": {
+                    "segment_key": "liquidity_sweep:bullish_sweep:long:HYPEUSDT:long",
+                    "feature_key": "trend_price.order_blocks:Accumulation:long",
+                    "sample_count": 12,
+                    "raw_sample_count": 80,
+                    "win_rate": 0.58,
+                    "avg_return": 0.014,
+                    "profit_factor": 1.4,
+                    "reliability_score": 0.22,
+                    "promotion_status": "watchlist",
+                },
+                "execution_model": {"mode": "conservative_shadow_paper"},
+            },
+        )
+    )
+    session.add(PriceSnapshot(symbol="HYPEUSDT", price=39.6, raw_payload={}, collected_at=datetime(2026, 1, 1, tzinfo=timezone.utc)))
+    await session.commit()
+
+    mark = await mark_shadow_paper_trades(session)
+    stored = await session.scalar(select(ShadowPaperTrade))
+
+    assert mark["closed"] == []
+    assert mark["updated"][0]["runner_extended"] is True
+    assert mark["updated"][0]["runner_evidence"]["extend"] is True
+    assert stored.status == "open"
+    assert stored.stop_loss > 38.0
+    assert stored.take_profit > 39.6
+    assert stored.context["runner_decision"]["signals"]["trend_aligned"] is True
+
+
+@pytest.mark.asyncio
+async def test_mark_shadow_paper_trades_closes_when_runner_candidate_is_weak(session) -> None:
+    session.add(
+        ShadowPaperTrade(
+            strategy_name="shadow_feature_candidates_v1",
+            candidate_type="observation_segment",
+            candidate_key="weak:unknown:long:HYPEUSDT:long",
+            signal_key="signal-hype-weak",
+            symbol="HYPEUSDT",
+            timeframe="long",
+            direction="long",
+            entry_price=38.0,
+            stop_loss=37.05,
+            take_profit=39.52,
+            position_size=1.0,
+            status="open",
+            context={"candidate_snapshot": {"sample_count": 1, "win_rate": 0.3, "profit_factor": 0.7}},
+        )
+    )
+    session.add(PriceSnapshot(symbol="HYPEUSDT", price=39.6, raw_payload={}, collected_at=datetime(2026, 1, 1, tzinfo=timezone.utc)))
+    await session.commit()
+
+    mark = await mark_shadow_paper_trades(session)
+    stored = await session.scalar(select(ShadowPaperTrade))
+
+    assert mark["closed"][0]["exit_reason"] == "take_profit"
+    assert stored.status == "closed"
+    assert stored.context["runner_decision"]["extend"] is False
+
+
+@pytest.mark.asyncio
 async def test_shadow_paper_stats_groups_by_candidate(session) -> None:
     opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     session.add_all(

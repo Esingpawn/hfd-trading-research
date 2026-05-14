@@ -21,6 +21,7 @@ RUNNER_LOCK_FRACTION = 0.45
 RUNNER_EXTENSION_FRACTION = 0.35
 RUNNER_MIN_EXTENSION_PCT = 0.012
 RUNNER_EVIDENCE_MAX_AGE_MINUTES = 120
+RUNNER_OPENING_EVIDENCE_MAX_AGE_MINUTES = 24 * 60
 RUNNER_EVIDENCE_MIN_SCORE = 5.0
 
 
@@ -414,20 +415,42 @@ async def _take_profit_runner_decision(session: AsyncSession, trade: PaperTrade,
     if trade.direction == "short" and price >= trade.entry_price:
         return _runner_decision(False, blockers=["not_profitable"])
 
-    decision = await _latest_runner_decision(session, trade)
-    if decision is None:
+    latest = await _latest_decision(session, trade.symbol)
+    opening = await session.get(StrategyDecision, trade.strategy_decision_id)
+    if latest and latest.id != getattr(opening, "id", None) and latest.direction != trade.direction:
+        return _runner_decision(
+            False,
+            blockers=["latest_direction_changed"],
+            decision_id=latest.id,
+            decision_created_at=latest.created_at.isoformat() if latest.created_at else None,
+        )
+    if latest and _fresh_runner_decision(latest):
+        evidence = _runner_evidence_from_decision(latest, trade)
+        return _runner_decision_from_evidence(evidence, latest)
+    if opening is None:
         return _runner_decision(False, blockers=["missing_fresh_strategy_decision"])
-    evidence = _runner_evidence_from_decision(decision, trade)
+    evidence = _runner_evidence_from_decision(opening, trade, allow_stale_opening=True)
+    return _runner_decision_from_evidence(evidence, opening)
+
+
+def _runner_decision_from_evidence(evidence: dict[str, Any], decision: StrategyDecision) -> dict[str, Any]:
     return _runner_decision(
-        evidence["score"] >= RUNNER_EVIDENCE_MIN_SCORE
-        and not evidence["blockers"]
-        and (evidence["signals"].get("dark_flow_target") or evidence["signals"].get("trend_aligned"))
-        and (evidence["signals"].get("liquidity_context") or evidence["signals"].get("orderflow_confirmed")),
+        _runner_extension_allowed(evidence),
         score=evidence["score"],
         signals=evidence["signals"],
         blockers=evidence["blockers"],
         decision_id=decision.id,
         decision_created_at=decision.created_at.isoformat() if decision.created_at else None,
+    )
+
+
+def _runner_extension_allowed(evidence: dict[str, Any]) -> bool:
+    signals = evidence.get("signals") or {}
+    return (
+        float(evidence.get("score") or 0.0) >= RUNNER_EVIDENCE_MIN_SCORE
+        and not evidence.get("blockers")
+        and (signals.get("dark_flow_target") or signals.get("trend_aligned"))
+        and (signals.get("liquidity_context") or signals.get("orderflow_confirmed"))
     )
 
 
@@ -441,16 +464,25 @@ async def _latest_runner_decision(session: AsyncSession, trade: PaperTrade) -> S
     return None
 
 
-def _runner_evidence_from_decision(decision: StrategyDecision, trade: PaperTrade) -> dict[str, Any]:
+def _runner_evidence_from_decision(
+    decision: StrategyDecision,
+    trade: PaperTrade,
+    *,
+    allow_stale_opening: bool = False,
+) -> dict[str, Any]:
     risk = decision.risk_payload or {}
     reason = decision.reason or {}
     rules = set(reason.get("rules") or [])
     gate = risk.get("execution_gate") or {}
     target_source = str(risk.get("target_source") or "")
     min_score = float(risk.get("min_score") or template_for_tier(trade.asset_tier).min_score)
+    fresh = _fresh_runner_decision(decision)
+    opening_age_allowed = _opening_evidence_age_allowed(decision, trade)
+    opening_fallback = allow_stale_opening and not fresh and decision.id == trade.strategy_decision_id and opening_age_allowed
     signals = {
         "same_direction": decision.direction == trade.direction,
-        "fresh": _fresh_runner_decision(decision),
+        "fresh": fresh,
+        "opening_evidence_fallback": opening_fallback,
         "score_above_minimum": float(decision.score or 0.0) >= min_score,
         "execution_ready": bool(gate.get("ready")) or decision.decision == "open",
         "dark_flow_target": bool(target_source and target_source != "risk_reward_template"),
@@ -462,11 +494,13 @@ def _runner_evidence_from_decision(decision: StrategyDecision, trade: PaperTrade
     blockers: list[str] = []
     if not signals["same_direction"]:
         blockers.append("latest_direction_changed")
-    if not signals["fresh"]:
+    if not signals["fresh"] and not opening_fallback:
         blockers.append("latest_decision_stale")
+    if allow_stale_opening and decision.id == trade.strategy_decision_id and not opening_age_allowed:
+        blockers.append("opening_evidence_too_old")
     score = (
         (1.5 if signals["same_direction"] else 0.0)
-        + (1.0 if signals["fresh"] else 0.0)
+        + (1.0 if signals["fresh"] else 0.6 if opening_fallback else 0.0)
         + (1.0 if signals["score_above_minimum"] else 0.0)
         + (1.25 if signals["execution_ready"] else 0.0)
         + (1.25 if signals["dark_flow_target"] else 0.0)
@@ -476,6 +510,14 @@ def _runner_evidence_from_decision(decision: StrategyDecision, trade: PaperTrade
         + (0.4 if signals["exhaustion_filter_present"] else 0.0)
     )
     return {"score": round(score, 3), "signals": signals, "blockers": blockers}
+
+
+def _opening_evidence_age_allowed(decision: StrategyDecision, trade: PaperTrade) -> bool:
+    reference = trade.opened_at or decision.created_at
+    if reference is None:
+        return False
+    age_minutes = (datetime.now(timezone.utc) - _aware(reference)).total_seconds() / 60
+    return age_minutes <= RUNNER_OPENING_EVIDENCE_MAX_AGE_MINUTES
 
 
 def _fresh_runner_decision(decision: StrategyDecision) -> bool:

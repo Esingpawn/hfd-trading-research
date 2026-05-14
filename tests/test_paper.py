@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -255,6 +255,76 @@ async def test_mark_open_trades_extends_hype_runner(db_session) -> None:
     assert stored.status == "open"
     assert stored.stop_loss > 38.0
     assert stored.take_profit > 39.6
+
+
+@pytest.mark.asyncio
+async def test_mark_open_trades_can_use_opening_runner_evidence_for_hype(db_session) -> None:
+    opened_at = datetime.now(timezone.utc)
+    db_session.add(
+        runner_decision(
+            decision_id="decision-1",
+            symbol="HYPEUSDT",
+            direction="long",
+            score=91.0,
+            created_at=opened_at - timedelta(hours=3),
+        )
+    )
+    trade = paper_trade(symbol="HYPEUSDT", asset_tier="high_volatility", entry=38.0, stop=37.05, target=39.52)
+    trade.opened_at = opened_at
+    db_session.add(trade)
+    db_session.add(
+        PriceSnapshot(
+            symbol="HYPEUSDT",
+            price=39.6,
+            raw_payload={},
+            collected_at=opened_at,
+        )
+    )
+    await db_session.commit()
+
+    result = await mark_open_trades(db_session)
+    stored = await db_session.scalar(select(PaperTrade).where(PaperTrade.symbol == "HYPEUSDT"))
+
+    assert result["closed"] == []
+    assert result["updated"][0]["runner_extended"] is True
+    assert result["updated"][0]["runner_evidence"]["signals"]["opening_evidence_fallback"] is True
+    assert stored.status == "open"
+    assert stored.stop_loss > 38.0
+    assert stored.take_profit > 39.6
+
+
+@pytest.mark.asyncio
+async def test_mark_open_trades_does_not_use_expired_opening_runner_evidence(db_session) -> None:
+    opened_at = datetime.now(timezone.utc) - timedelta(days=2)
+    db_session.add(
+        runner_decision(
+            decision_id="decision-1",
+            symbol="HYPEUSDT",
+            direction="long",
+            score=91.0,
+            created_at=opened_at,
+        )
+    )
+    trade = paper_trade(symbol="HYPEUSDT", asset_tier="high_volatility", entry=38.0, stop=37.05, target=39.52)
+    trade.opened_at = opened_at
+    db_session.add(trade)
+    db_session.add(
+        PriceSnapshot(
+            symbol="HYPEUSDT",
+            price=39.6,
+            raw_payload={},
+            collected_at=datetime.now(timezone.utc),
+        )
+    )
+    await db_session.commit()
+
+    result = await mark_open_trades(db_session)
+    stored = await db_session.scalar(select(PaperTrade).where(PaperTrade.symbol == "HYPEUSDT"))
+
+    assert result["updated"] == []
+    assert result["closed"][0]["reason"] == "take_profit"
+    assert stored.status == "closed"
+    assert stored.exit_reason == "take_profit"
 
 
 @pytest.mark.asyncio
