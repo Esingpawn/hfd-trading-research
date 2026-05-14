@@ -33,6 +33,9 @@ DEFAULT_MAX_RETURN_CLUSTER_RATIO = 0.75
 DEFAULT_BALANCED_SAMPLE_DAYS = 14
 DEFAULT_MIN_PROFIT_FACTOR_LOWER = 1.0
 DEFAULT_TIME_SPLIT_MIN_SAMPLES = 30
+DEFAULT_RESEARCH_SAMPLE_FETCH_MULTIPLIER = 10
+DEFAULT_RESEARCH_SAMPLE_MAX_FETCH_ROWS = 50000
+DEFAULT_SEGMENT_COVERAGE_TARGET = 30
 CONFIDENCE_Z = 1.96
 
 
@@ -171,6 +174,33 @@ async def feature_paper_ab(
         min_segments=min_segments,
     )
     pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
+    report = _feature_paper_ab_from_pairs(
+        pairs,
+        horizon=horizon,
+        candidate_limit=candidate_limit,
+        limit=limit,
+        thresholds=thresholds,
+    )
+    if persist:
+        report["experiment_run"] = await _persist_experiment(
+            session,
+            name=f"feature_paper_ab_{horizon}",
+            scope={"horizon": horizon, "limit": limit, "candidate_limit": candidate_limit},
+            params=thresholds,
+            metrics=report,
+            notes="Report-only paper A/B using feature labels as pseudo-trades; no PaperTrade rows are opened.",
+        )
+    return report
+
+
+def _feature_paper_ab_from_pairs(
+    pairs: list[FeaturePair],
+    *,
+    horizon: str,
+    candidate_limit: int,
+    limit: int,
+    thresholds: dict[str, Any],
+) -> dict[str, Any]:
     candidate_report = _feature_candidate_screen_from_pairs(
         pairs,
         horizon=horizon,
@@ -217,15 +247,33 @@ async def feature_paper_ab(
             "rejected_summary": candidate_report["rejected_summary"],
         },
     }
-    if persist:
-        report["experiment_run"] = await _persist_experiment(
-            session,
-            name=f"feature_paper_ab_{horizon}",
-            scope={"horizon": horizon, "limit": limit, "candidate_limit": candidate_limit},
-            params=candidate_report["thresholds"],
-            metrics=report,
-            notes="Report-only paper A/B using feature labels as pseudo-trades; no PaperTrade rows are opened.",
-        )
+    return report
+
+
+async def _feature_paper_ab_from_pairs_persisted(
+    session: AsyncSession,
+    pairs: list[FeaturePair],
+    *,
+    horizon: str,
+    candidate_limit: int,
+    limit: int,
+    thresholds: dict[str, Any],
+) -> dict[str, Any]:
+    report = _feature_paper_ab_from_pairs(
+        pairs,
+        horizon=horizon,
+        candidate_limit=candidate_limit,
+        limit=limit,
+        thresholds=thresholds,
+    )
+    report["experiment_run"] = await _persist_experiment(
+        session,
+        name=f"feature_paper_ab_{horizon}",
+        scope={"horizon": horizon, "limit": limit, "candidate_limit": candidate_limit},
+        params=thresholds,
+        metrics=report,
+        notes="Report-only paper A/B using feature labels as pseudo-trades; no PaperTrade rows are opened.",
+    )
     return report
 
 
@@ -372,6 +420,33 @@ async def feature_segment_paper_ab(
         max_return_cluster_ratio=max_return_cluster_ratio,
     )
     pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
+    report = _feature_segment_paper_ab_from_pairs(
+        pairs,
+        horizon=horizon,
+        candidate_limit=candidate_limit,
+        limit=limit,
+        thresholds=thresholds,
+    )
+    if persist:
+        report["experiment_run"] = await _persist_experiment(
+            session,
+            name=f"feature_segment_paper_ab_{horizon}",
+            scope={"horizon": horizon, "limit": limit, "candidate_limit": candidate_limit},
+            params=thresholds,
+            metrics=report,
+            notes="Report-only segment-aware paper A/B using feature labels as pseudo-trades; no PaperTrade rows are opened.",
+        )
+    return report
+
+
+def _feature_segment_paper_ab_from_pairs(
+    pairs: list[FeaturePair],
+    *,
+    horizon: str,
+    candidate_limit: int,
+    limit: int,
+    thresholds: dict[str, Any],
+) -> dict[str, Any]:
     segment_report = _feature_segment_candidate_screen_from_pairs(
         pairs,
         horizon=horizon,
@@ -449,15 +524,33 @@ async def feature_segment_paper_ab(
             "by_feature": segment_report["by_feature"],
         },
     }
-    if persist:
-        report["experiment_run"] = await _persist_experiment(
-            session,
-            name=f"feature_segment_paper_ab_{horizon}",
-            scope={"horizon": horizon, "limit": limit, "candidate_limit": candidate_limit},
-            params=thresholds,
-            metrics=report,
-            notes="Report-only segment-aware paper A/B using feature labels as pseudo-trades; no PaperTrade rows are opened.",
-        )
+    return report
+
+
+async def _feature_segment_paper_ab_from_pairs_persisted(
+    session: AsyncSession,
+    pairs: list[FeaturePair],
+    *,
+    horizon: str,
+    candidate_limit: int,
+    limit: int,
+    thresholds: dict[str, Any],
+) -> dict[str, Any]:
+    report = _feature_segment_paper_ab_from_pairs(
+        pairs,
+        horizon=horizon,
+        candidate_limit=candidate_limit,
+        limit=limit,
+        thresholds=thresholds,
+    )
+    report["experiment_run"] = await _persist_experiment(
+        session,
+        name=f"feature_segment_paper_ab_{horizon}",
+        scope={"horizon": horizon, "limit": limit, "candidate_limit": candidate_limit},
+        params=thresholds,
+        metrics=report,
+        notes="Report-only segment-aware paper A/B using feature labels as pseudo-trades; no PaperTrade rows are opened.",
+    )
     return report
 
 
@@ -518,6 +611,24 @@ async def generate_default_research_reports(
 ) -> dict[str, Any]:
     reports: dict[str, Any] = {}
     errors: list[dict[str, str]] = []
+    _validate_horizon(horizon)
+    pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
+    feature_thresholds = _thresholds(
+        min_samples=min_samples,
+        min_win_rate=DEFAULT_MIN_WIN_RATE,
+        min_profit_factor=DEFAULT_MIN_PROFIT_FACTOR,
+        min_avg_return=DEFAULT_MIN_AVG_RETURN,
+        segment_min_samples=DEFAULT_SEGMENT_MIN_SAMPLES,
+        min_segments=DEFAULT_MIN_SEGMENTS,
+    )
+    segment_thresholds = _thresholds(
+        min_samples=min_samples,
+        min_win_rate=DEFAULT_MIN_WIN_RATE,
+        min_profit_factor=DEFAULT_MIN_PROFIT_FACTOR,
+        min_avg_return=DEFAULT_MIN_AVG_RETURN,
+        segment_min_samples=min_samples,
+        min_segments=1,
+    )
 
     async def run(name: str, func: Callable[[], Any]) -> None:
         try:
@@ -528,44 +639,44 @@ async def generate_default_research_reports(
 
     await run(
         "feature_candidates",
-        lambda: feature_candidate_screen(
+        lambda: _feature_candidate_screen_from_pairs_persisted(
             session,
+            pairs,
             horizon=horizon,
-            min_samples=min_samples,
             limit=limit,
-            persist=True,
+            thresholds=feature_thresholds,
         ),
     )
     await run(
         "feature_paper_ab",
-        lambda: feature_paper_ab(
+        lambda: _feature_paper_ab_from_pairs_persisted(
             session,
+            pairs,
             horizon=horizon,
-            min_samples=min_samples,
             candidate_limit=20,
             limit=limit,
-            persist=True,
+            thresholds=feature_thresholds,
         ),
     )
     await run(
         "feature_segment_candidates",
-        lambda: feature_segment_candidate_screen(
+        lambda: _feature_segment_candidate_screen_from_pairs_persisted(
             session,
+            pairs,
             horizon=horizon,
-            min_samples=min_samples,
             limit=limit,
-            persist=True,
+            thresholds=segment_thresholds,
         ),
     )
     await run(
         "feature_segment_paper_ab",
-        lambda: feature_segment_paper_ab(
+        lambda: _feature_segment_paper_ab_from_pairs_persisted(
             session,
+            pairs,
             horizon=horizon,
-            min_samples=min_samples,
             candidate_limit=50,
             limit=limit,
-            persist=True,
+            thresholds=segment_thresholds,
         ),
     )
     return {
@@ -573,6 +684,7 @@ async def generate_default_research_reports(
         "horizon": horizon,
         "min_samples": min_samples,
         "limit": limit,
+        "labeled_count": len(pairs),
         "generated_count": len(reports),
         "error_count": len(errors),
         "errors": errors,
@@ -586,13 +698,133 @@ async def _labeled_feature_pairs(
     horizon: str,
     limit: int,
 ) -> list[FeaturePair]:
-    row_items = await _balanced_labeled_feature_rows(session, horizon=horizon, limit=limit)
+    fetch_limit = _research_fetch_limit(limit)
+    row_items = await _balanced_labeled_feature_rows(session, horizon=horizon, limit=fetch_limit)
     collection_runs = await _collection_run_windows(session)
-    return [
+    pairs = [
         (event, label, snapshot, collection_run or _infer_collection_run(snapshot, collection_runs))
         for event, label, snapshot, collection_run in row_items
         if isinstance(label.return_pct, (int, float)) and event.direction in {"long", "short"}
     ]
+    return _coverage_sample_pairs(pairs, limit=limit)
+
+
+def _research_fetch_limit(limit: int) -> int:
+    if limit <= 0:
+        return 0
+    return max(limit, min(DEFAULT_RESEARCH_SAMPLE_MAX_FETCH_ROWS, limit * DEFAULT_RESEARCH_SAMPLE_FETCH_MULTIPLIER))
+
+
+def _coverage_sample_pairs(pairs: list[FeaturePair], *, limit: int) -> list[FeaturePair]:
+    if limit <= 0:
+        return []
+    if len(pairs) <= limit:
+        return sorted(pairs, key=lambda row: _aware(row[0].event_ts), reverse=True)
+    selected: list[FeaturePair] = []
+    selected_ids: set[str] = set()
+    segment_counts: Counter[str] = Counter()
+    segment_bucket_counts: Counter[tuple[str, str]] = Counter()
+    segment_days: dict[str, set[str]] = {}
+    segment_runs: dict[str, set[str]] = {}
+    ordered = sorted(pairs, key=lambda row: _coverage_sample_priority(row), reverse=True)
+    segment_items: dict[str, list[FeaturePair]] = {}
+    available_days: dict[str, set[str]] = {}
+    available_runs: dict[str, set[str]] = {}
+    for item in ordered:
+        event, _label, snapshot, collection_run = item
+        segment = _segment_key(event)
+        segment_items.setdefault(segment, []).append(item)
+        available_days.setdefault(segment, set()).add(_day_key(event.event_ts))
+        available_runs.setdefault(segment, set()).add(_collection_run_key(event, snapshot, collection_run, DEFAULT_DEDUPE_BUCKET_MINUTES))
+    segments_by_depth = sorted(segment_items, key=lambda key: (len(segment_items[key]), key))
+    for target in _coverage_targets(limit):
+        made_progress = True
+        while made_progress:
+            made_progress = False
+            for segment in segments_by_depth:
+                if segment_counts[segment] >= target:
+                    continue
+                item = _next_coverage_item(
+                    segment_items[segment],
+                    selected_ids=selected_ids,
+                    selected_buckets=segment_bucket_counts,
+                    selected_days=segment_days.setdefault(segment, set()),
+                    selected_runs=segment_runs.setdefault(segment, set()),
+                    available_day_count=len(available_days.get(segment) or ()),
+                    available_run_count=len(available_runs.get(segment) or ()),
+                    target=target,
+                )
+                if item is None:
+                    continue
+                event, _label, snapshot, collection_run = item
+                selected.append(item)
+                selected_ids.add(event.id)
+                segment_counts[segment] += 1
+                segment_bucket_counts[(segment, _time_bucket_key(event.event_ts, DEFAULT_DEDUPE_BUCKET_MINUTES))] += 1
+                segment_days[segment].add(_day_key(event.event_ts))
+                segment_runs[segment].add(_collection_run_key(event, snapshot, collection_run, DEFAULT_DEDUPE_BUCKET_MINUTES))
+                made_progress = True
+                if len(selected) >= limit:
+                    return sorted(selected, key=lambda row: _aware(row[0].event_ts), reverse=True)
+    for item in ordered:
+        event = item[0]
+        if event.id in selected_ids:
+            continue
+        selected.append(item)
+        selected_ids.add(event.id)
+        if len(selected) >= limit:
+            break
+    return sorted(selected, key=lambda row: _aware(row[0].event_ts), reverse=True)
+
+
+def _next_coverage_item(
+    items: list[FeaturePair],
+    *,
+    selected_ids: set[str],
+    selected_buckets: Counter[tuple[str, str]],
+    selected_days: set[str],
+    selected_runs: set[str],
+    available_day_count: int,
+    available_run_count: int,
+    target: int,
+) -> FeaturePair | None:
+    fallback: FeaturePair | None = None
+    segment = _segment_key(items[0][0]) if items else ""
+    for item in items:
+        event, _label, snapshot, collection_run = item
+        if event.id in selected_ids:
+            continue
+        bucket = _time_bucket_key(event.event_ts, DEFAULT_DEDUPE_BUCKET_MINUTES)
+        if selected_buckets[(segment, bucket)] >= 1:
+            continue
+        day = _day_key(event.event_ts)
+        run_key = _collection_run_key(event, snapshot, collection_run, DEFAULT_DEDUPE_BUCKET_MINUTES)
+        needs_new_day = day in selected_days and len(selected_days) < min(target, available_day_count)
+        needs_new_run = run_key in selected_runs and len(selected_runs) < min(target, available_run_count)
+        if needs_new_day or needs_new_run:
+            if fallback is None:
+                fallback = item
+            continue
+        return item
+    return fallback
+
+
+def _coverage_targets(limit: int) -> list[int]:
+    target = max(1, min(DEFAULT_SEGMENT_COVERAGE_TARGET, limit))
+    values: list[int] = []
+    current = 1
+    while current < target:
+        values.append(current)
+        current *= 2
+    values.append(target)
+    return values
+
+
+def _coverage_sample_priority(item: FeaturePair) -> tuple[int, int, float]:
+    event, _label, snapshot, collection_run = item
+    has_run = 1 if (snapshot and snapshot.collection_run_id) or (collection_run and collection_run.id) else 0
+    has_snapshot = 1 if snapshot is not None else 0
+    return (has_run, has_snapshot, _aware(event.event_ts).timestamp())
 
 
 async def _balanced_labeled_feature_rows(

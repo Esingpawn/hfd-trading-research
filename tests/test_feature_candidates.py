@@ -16,6 +16,51 @@ from app.services.feature_candidates import (
 )
 
 
+async def add_labeled_feature_item(
+    session,
+    *,
+    feature_name: str,
+    subtype: str,
+    symbol: str,
+    timeframe: str,
+    event_ts: datetime,
+    return_pct: float,
+    direction: str = "long",
+) -> None:
+    key_suffix = f"{event_ts.strftime('%Y%m%d%H%M')}-{symbol}-{timeframe}"
+    event = FeatureEvent(
+        snapshot_id=f"snapshot-{feature_name}-{subtype}-{key_suffix}",
+        symbol=symbol,
+        asset_tier="core",
+        timeframe=timeframe,
+        interval="30m",
+        indicator=feature_name.split(".")[0],
+        event_key=f"event-{feature_name}-{subtype}-{direction}-{key_suffix}",
+        feature_name=feature_name,
+        direction=direction,
+        event_ts=event_ts,
+        event_price=100.0,
+        strength=0.7,
+        subtype=subtype,
+        source_payload_key=feature_name,
+        context={},
+    )
+    session.add(event)
+    await session.flush()
+    session.add(
+        FeatureLabel(
+            feature_event_id=event.id,
+            horizon="30m",
+            return_pct=return_pct,
+            mfe=max(return_pct, 0.0) + 0.002,
+            mae=min(return_pct, 0.0) - 0.001,
+            future_price=100.0 * (1 + return_pct),
+            future_at=event.event_ts + timedelta(minutes=30),
+            status="labeled",
+        )
+    )
+
+
 @pytest.fixture()
 async def session():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -636,3 +681,83 @@ async def test_feature_candidate_reliability_score_discounts_tiny_samples(sessio
 
     assert row["sample_count"] == 1
     assert row["reliability_score"] < 0.1
+
+
+@pytest.mark.asyncio
+async def test_segment_candidate_sampling_prefers_cross_segment_coverage(session) -> None:
+    base_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(60):
+        await add_labeled_feature_item(
+            session,
+            feature_name="micro_poc",
+            subtype="crowded",
+            symbol="BTCUSDT",
+            timeframe="short",
+            event_ts=base_ts + timedelta(minutes=index * 31),
+            return_pct=0.01,
+        )
+    for index in range(6):
+        await add_labeled_feature_item(
+            session,
+            feature_name="inst_vwap",
+            subtype="thin",
+            symbol="ETHUSDT",
+            timeframe="short",
+            event_ts=base_ts + timedelta(days=index, minutes=index * 31),
+            return_pct=0.012,
+        )
+    await session.commit()
+
+    report = await feature_segment_candidate_screen(
+        session,
+        horizon="30m",
+        min_samples=6,
+        min_win_rate=0.6,
+        min_profit_factor=1.2,
+        min_unique_time_buckets=3,
+        min_unique_event_days=2,
+        min_unique_market_windows=2,
+        min_unique_collection_runs=1,
+        max_same_return_samples=60,
+        max_return_cluster_ratio=1.0,
+        limit=12,
+    )
+    rows = {row["segment_key"]: row for row in report["all_segments"]}
+
+    assert rows["inst_vwap:thin:long:ETHUSDT:short"]["sample_count"] == 6
+    assert rows["inst_vwap:thin:long:ETHUSDT:short"]["quality"]["unique_event_day_count"] == 6
+    assert rows["micro_poc:crowded:long:BTCUSDT:short"]["sample_count"] == 6
+
+
+@pytest.mark.asyncio
+async def test_generate_default_research_reports_uses_shared_balanced_sample(session) -> None:
+    base_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(40):
+        await add_labeled_feature_item(
+            session,
+            feature_name="micro_poc",
+            subtype="crowded",
+            symbol="BTCUSDT",
+            timeframe="short",
+            event_ts=base_ts + timedelta(minutes=index * 31),
+            return_pct=0.01,
+        )
+    for index in range(6):
+        await add_labeled_feature_item(
+            session,
+            feature_name="inst_vwap",
+            subtype="thin",
+            symbol="ETHUSDT",
+            timeframe="short",
+            event_ts=base_ts + timedelta(days=index, minutes=index * 31),
+            return_pct=0.012,
+        )
+    await session.commit()
+
+    result = await generate_default_research_reports(session, horizon="30m", min_samples=6, limit=12)
+    segment_experiment = await session.scalar(select(ExperimentRun).where(ExperimentRun.name == "feature_segment_candidates_30m"))
+    rows = {row["segment_key"]: row for row in segment_experiment.metrics["all_segments"]}
+
+    assert result["labeled_count"] == 12
+    assert result["reports"]["feature_candidates"]["candidate_count"] == 0
+    assert rows["inst_vwap:thin:long:ETHUSDT:short"]["sample_count"] == 6
