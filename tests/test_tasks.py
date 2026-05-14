@@ -289,6 +289,25 @@ async def test_run_task_by_id_executes_research_report_materialization(session) 
 
 
 @pytest.mark.asyncio
+async def test_run_task_by_id_caps_research_report_materialization_limit(session) -> None:
+    await _add_feature_group(session, symbol="BTCUSDT")
+    item = TaskRun(
+        task_name="features.research_reports",
+        payload={"min_samples": 6, "limit": 999999},
+        result={},
+    )
+    session.add(item)
+    await session.commit()
+
+    result = await run_task_by_id(session, item.id)
+
+    execution = result["result"]["execution"]
+    assert execution["requested_limit"] == 999999
+    assert execution["limit"] == 5000
+    assert execution["reports"]["feature_candidates"]["limit_capped"] is True
+
+
+@pytest.mark.asyncio
 async def test_run_task_by_id_executes_data_quality_report(session) -> None:
     item = TaskRun(task_name="data_quality.report", payload={}, result={})
     session.add(item)

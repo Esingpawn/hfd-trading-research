@@ -778,3 +778,27 @@ async def test_generate_default_research_reports_caps_requested_limit(session) -
     assert result["requested_limit"] == 999999
     assert result["limit"] == 5000
     assert result["generated_count"] == 4
+    assert result["reports"]["feature_candidates"]["requested_limit"] == 999999
+    assert result["reports"]["feature_candidates"]["limit"] == 5000
+    assert result["reports"]["feature_candidates"]["limit_capped"] is True
+
+
+@pytest.mark.asyncio
+async def test_research_report_entrypoints_cap_requested_limit(session) -> None:
+    await add_labeled_feature(
+        session,
+        feature_name="inst_choch",
+        subtype="CHoCH_Bullish",
+        returns=[0.012] * 8,
+    )
+    await session.commit()
+
+    candidate_report = await feature_candidate_screen(session, horizon="30m", min_samples=6, limit=999999)
+    paper_report = await feature_paper_ab(session, horizon="30m", min_samples=6, limit=999999)
+    segment_report = await feature_segment_candidate_screen(session, horizon="30m", min_samples=6, limit=999999)
+    segment_paper_report = await feature_segment_paper_ab(session, horizon="30m", min_samples=6, limit=999999)
+
+    for report in [candidate_report, paper_report, segment_report, segment_paper_report]:
+        assert report["requested_limit"] == 999999
+        assert report["limit"] == 5000
+        assert report["limit_capped"] is True

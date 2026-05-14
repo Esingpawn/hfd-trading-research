@@ -36,7 +36,8 @@ DEFAULT_TIME_SPLIT_MIN_SAMPLES = 30
 DEFAULT_RESEARCH_SAMPLE_FETCH_MULTIPLIER = 10
 DEFAULT_RESEARCH_SAMPLE_MAX_FETCH_ROWS = 50000
 DEFAULT_SEGMENT_COVERAGE_TARGET = 30
-DEFAULT_RESEARCH_REPORT_MAX_LIMIT = 5000
+DEFAULT_RESEARCH_QUERY_MAX_LIMIT = 5000
+DEFAULT_RESEARCH_REPORT_MAX_LIMIT = DEFAULT_RESEARCH_QUERY_MAX_LIMIT
 DEFAULT_RESEARCH_REPORT_STATEMENT_TIMEOUT_MS = 45000
 RESEARCH_REPORT_ADVISORY_LOCK_ID = 78234901
 CONFIDENCE_Z = 1.96
@@ -73,6 +74,8 @@ async def feature_candidate_screen(
     persist: bool = False,
 ) -> dict[str, Any]:
     _validate_horizon(horizon)
+    requested_limit = int(limit)
+    limit = _bounded_research_limit(requested_limit)
     thresholds = _thresholds(
         min_samples=min_samples,
         min_win_rate=min_win_rate,
@@ -86,6 +89,7 @@ async def feature_candidate_screen(
         pairs,
         horizon=horizon,
         limit=limit,
+        requested_limit=requested_limit,
         thresholds=thresholds,
         persist=False,
         session=session,
@@ -94,6 +98,7 @@ async def feature_candidate_screen(
         pairs,
         horizon=horizon,
         limit=limit,
+        requested_limit=requested_limit,
         thresholds=thresholds,
     )
 
@@ -103,6 +108,7 @@ def _feature_candidate_screen_from_pairs(
     *,
     horizon: str,
     limit: int,
+    requested_limit: int | None = None,
     thresholds: dict[str, Any],
     persist: bool = False,
     session: AsyncSession | None = None,
@@ -113,6 +119,8 @@ def _feature_candidate_screen_from_pairs(
     report: dict[str, Any] = {
         "horizon": horizon,
         "limit": limit,
+        "requested_limit": requested_limit if requested_limit is not None else limit,
+        "limit_capped": requested_limit is not None and requested_limit != limit,
         "labeled_count": len(pairs),
         "feature_group_count": len(rows),
         "candidate_count": len(candidates),
@@ -135,18 +143,25 @@ async def _feature_candidate_screen_from_pairs_persisted(
     *,
     horizon: str,
     limit: int,
+    requested_limit: int | None = None,
     thresholds: dict[str, Any],
 ) -> dict[str, Any]:
     report = _feature_candidate_screen_from_pairs(
         pairs,
         horizon=horizon,
         limit=limit,
+        requested_limit=requested_limit,
         thresholds=thresholds,
     )
     report["experiment_run"] = await _persist_experiment(
         session,
         name=f"feature_candidates_{horizon}",
-        scope={"horizon": horizon, "limit": limit, "labeled_count": len(pairs)},
+        scope={
+            "horizon": horizon,
+            "requested_limit": requested_limit if requested_limit is not None else limit,
+            "limit": limit,
+            "labeled_count": len(pairs),
+        },
         params=thresholds,
         metrics=report,
         notes="Research-only candidate feature screening; does not affect strategy scoring or trading.",
@@ -168,6 +183,8 @@ async def feature_paper_ab(
     limit: int = 20000,
     persist: bool = False,
 ) -> dict[str, Any]:
+    requested_limit = int(limit)
+    limit = _bounded_research_limit(requested_limit)
     thresholds = _thresholds(
         min_samples=min_samples,
         min_win_rate=min_win_rate,
@@ -182,13 +199,19 @@ async def feature_paper_ab(
         horizon=horizon,
         candidate_limit=candidate_limit,
         limit=limit,
+        requested_limit=requested_limit,
         thresholds=thresholds,
     )
     if persist:
         report["experiment_run"] = await _persist_experiment(
             session,
             name=f"feature_paper_ab_{horizon}",
-            scope={"horizon": horizon, "limit": limit, "candidate_limit": candidate_limit},
+            scope={
+                "horizon": horizon,
+                "requested_limit": requested_limit,
+                "limit": limit,
+                "candidate_limit": candidate_limit,
+            },
             params=thresholds,
             metrics=report,
             notes="Report-only paper A/B using feature labels as pseudo-trades; no PaperTrade rows are opened.",
@@ -202,12 +225,14 @@ def _feature_paper_ab_from_pairs(
     horizon: str,
     candidate_limit: int,
     limit: int,
+    requested_limit: int | None = None,
     thresholds: dict[str, Any],
 ) -> dict[str, Any]:
     candidate_report = _feature_candidate_screen_from_pairs(
         pairs,
         horizon=horizon,
         limit=limit,
+        requested_limit=requested_limit,
         thresholds=thresholds,
     )
     selected = candidate_report["candidates"][:candidate_limit]
@@ -219,6 +244,8 @@ def _feature_paper_ab_from_pairs(
     report: dict[str, Any] = {
         "horizon": horizon,
         "limit": limit,
+        "requested_limit": requested_limit if requested_limit is not None else limit,
+        "limit_capped": requested_limit is not None and requested_limit != limit,
         "candidate_limit": candidate_limit,
         "selected_candidate_count": len(selected),
         "selected_feature_keys": [row["feature_key"] for row in selected],
@@ -260,6 +287,7 @@ async def _feature_paper_ab_from_pairs_persisted(
     horizon: str,
     candidate_limit: int,
     limit: int,
+    requested_limit: int | None = None,
     thresholds: dict[str, Any],
 ) -> dict[str, Any]:
     report = _feature_paper_ab_from_pairs(
@@ -267,12 +295,18 @@ async def _feature_paper_ab_from_pairs_persisted(
         horizon=horizon,
         candidate_limit=candidate_limit,
         limit=limit,
+        requested_limit=requested_limit,
         thresholds=thresholds,
     )
     report["experiment_run"] = await _persist_experiment(
         session,
         name=f"feature_paper_ab_{horizon}",
-        scope={"horizon": horizon, "limit": limit, "candidate_limit": candidate_limit},
+        scope={
+            "horizon": horizon,
+            "requested_limit": requested_limit if requested_limit is not None else limit,
+            "limit": limit,
+            "candidate_limit": candidate_limit,
+        },
         params=thresholds,
         metrics=report,
         notes="Report-only paper A/B using feature labels as pseudo-trades; no PaperTrade rows are opened.",
@@ -301,6 +335,8 @@ async def feature_segment_candidate_screen(
     persist: bool = False,
 ) -> dict[str, Any]:
     _validate_horizon(horizon)
+    requested_limit = int(limit)
+    limit = _bounded_research_limit(requested_limit)
     thresholds = _thresholds(
         min_samples=min_samples,
         min_win_rate=min_win_rate,
@@ -323,12 +359,14 @@ async def feature_segment_candidate_screen(
         pairs,
         horizon=horizon,
         limit=limit,
+        requested_limit=requested_limit,
         thresholds=thresholds,
     ) if not persist else await _feature_segment_candidate_screen_from_pairs_persisted(
         session,
         pairs,
         horizon=horizon,
         limit=limit,
+        requested_limit=requested_limit,
         thresholds=thresholds,
     )
 
@@ -338,6 +376,7 @@ def _feature_segment_candidate_screen_from_pairs(
     *,
     horizon: str,
     limit: int,
+    requested_limit: int | None = None,
     thresholds: dict[str, Any],
 ) -> dict[str, Any]:
     rows = _segment_candidate_rows(pairs, thresholds=thresholds)
@@ -345,6 +384,8 @@ def _feature_segment_candidate_screen_from_pairs(
     return {
         "horizon": horizon,
         "limit": limit,
+        "requested_limit": requested_limit if requested_limit is not None else limit,
+        "limit_capped": requested_limit is not None and requested_limit != limit,
         "labeled_count": len(pairs),
         "segment_group_count": len(rows),
         "candidate_count": len(candidates),
@@ -365,18 +406,25 @@ async def _feature_segment_candidate_screen_from_pairs_persisted(
     *,
     horizon: str,
     limit: int,
+    requested_limit: int | None = None,
     thresholds: dict[str, Any],
 ) -> dict[str, Any]:
     report = _feature_segment_candidate_screen_from_pairs(
         pairs,
         horizon=horizon,
         limit=limit,
+        requested_limit=requested_limit,
         thresholds=thresholds,
     )
     report["experiment_run"] = await _persist_experiment(
         session,
         name=f"feature_segment_candidates_{horizon}",
-        scope={"horizon": horizon, "limit": limit, "labeled_count": len(pairs)},
+        scope={
+            "horizon": horizon,
+            "requested_limit": requested_limit if requested_limit is not None else limit,
+            "limit": limit,
+            "labeled_count": len(pairs),
+        },
         params=thresholds,
         metrics=report,
         notes="Research-only segment-aware feature screening; does not affect strategy scoring or trading.",
@@ -405,6 +453,8 @@ async def feature_segment_paper_ab(
     limit: int = 20000,
     persist: bool = False,
 ) -> dict[str, Any]:
+    requested_limit = int(limit)
+    limit = _bounded_research_limit(requested_limit)
     thresholds = _thresholds(
         min_samples=min_samples,
         min_win_rate=min_win_rate,
@@ -428,13 +478,19 @@ async def feature_segment_paper_ab(
         horizon=horizon,
         candidate_limit=candidate_limit,
         limit=limit,
+        requested_limit=requested_limit,
         thresholds=thresholds,
     )
     if persist:
         report["experiment_run"] = await _persist_experiment(
             session,
             name=f"feature_segment_paper_ab_{horizon}",
-            scope={"horizon": horizon, "limit": limit, "candidate_limit": candidate_limit},
+            scope={
+                "horizon": horizon,
+                "requested_limit": requested_limit,
+                "limit": limit,
+                "candidate_limit": candidate_limit,
+            },
             params=thresholds,
             metrics=report,
             notes="Report-only segment-aware paper A/B using feature labels as pseudo-trades; no PaperTrade rows are opened.",
@@ -448,12 +504,14 @@ def _feature_segment_paper_ab_from_pairs(
     horizon: str,
     candidate_limit: int,
     limit: int,
+    requested_limit: int | None = None,
     thresholds: dict[str, Any],
 ) -> dict[str, Any]:
     segment_report = _feature_segment_candidate_screen_from_pairs(
         pairs,
         horizon=horizon,
         limit=limit,
+        requested_limit=requested_limit,
         thresholds=thresholds,
     )
     selected = segment_report["candidates"][:candidate_limit]
@@ -475,6 +533,8 @@ def _feature_segment_paper_ab_from_pairs(
     report: dict[str, Any] = {
         "horizon": horizon,
         "limit": limit,
+        "requested_limit": requested_limit if requested_limit is not None else limit,
+        "limit_capped": requested_limit is not None and requested_limit != limit,
         "candidate_limit": candidate_limit,
         "selected_candidate_count": len(selected),
         "selected_segment_keys": [row["segment_key"] for row in selected],
@@ -537,6 +597,7 @@ async def _feature_segment_paper_ab_from_pairs_persisted(
     horizon: str,
     candidate_limit: int,
     limit: int,
+    requested_limit: int | None = None,
     thresholds: dict[str, Any],
 ) -> dict[str, Any]:
     report = _feature_segment_paper_ab_from_pairs(
@@ -544,12 +605,18 @@ async def _feature_segment_paper_ab_from_pairs_persisted(
         horizon=horizon,
         candidate_limit=candidate_limit,
         limit=limit,
+        requested_limit=requested_limit,
         thresholds=thresholds,
     )
     report["experiment_run"] = await _persist_experiment(
         session,
         name=f"feature_segment_paper_ab_{horizon}",
-        scope={"horizon": horizon, "limit": limit, "candidate_limit": candidate_limit},
+        scope={
+            "horizon": horizon,
+            "requested_limit": requested_limit if requested_limit is not None else limit,
+            "limit": limit,
+            "candidate_limit": candidate_limit,
+        },
         params=thresholds,
         metrics=report,
         notes="Report-only segment-aware paper A/B using feature labels as pseudo-trades; no PaperTrade rows are opened.",
@@ -613,7 +680,7 @@ async def generate_default_research_reports(
     limit: int = 5000,
 ) -> dict[str, Any]:
     requested_limit = int(limit)
-    limit = min(max(1, requested_limit), DEFAULT_RESEARCH_REPORT_MAX_LIMIT)
+    limit = _bounded_research_limit(requested_limit)
     reports: dict[str, Any] = {}
     errors: list[dict[str, str]] = []
     _validate_horizon(horizon)
@@ -665,6 +732,7 @@ async def generate_default_research_reports(
             pairs,
             horizon=horizon,
             limit=limit,
+            requested_limit=requested_limit,
             thresholds=feature_thresholds,
         ),
     )
@@ -676,6 +744,7 @@ async def generate_default_research_reports(
             horizon=horizon,
             candidate_limit=20,
             limit=limit,
+            requested_limit=requested_limit,
             thresholds=feature_thresholds,
         ),
     )
@@ -686,6 +755,7 @@ async def generate_default_research_reports(
             pairs,
             horizon=horizon,
             limit=limit,
+            requested_limit=requested_limit,
             thresholds=segment_thresholds,
         ),
     )
@@ -697,6 +767,7 @@ async def generate_default_research_reports(
             horizon=horizon,
             candidate_limit=50,
             limit=limit,
+            requested_limit=requested_limit,
             thresholds=segment_thresholds,
         ),
     )
@@ -719,6 +790,10 @@ async def _try_research_report_lock(session: AsyncSession) -> bool:
         return True
     value = await session.scalar(text("select pg_try_advisory_lock(:lock_id)"), {"lock_id": RESEARCH_REPORT_ADVISORY_LOCK_ID})
     return bool(value)
+
+
+def _bounded_research_limit(limit: int) -> int:
+    return min(max(1, int(limit)), DEFAULT_RESEARCH_QUERY_MAX_LIMIT)
 
 
 async def _set_research_statement_timeout(session: AsyncSession) -> None:
@@ -1831,7 +1906,9 @@ def _report_summary(report: dict[str, Any]) -> dict[str, Any]:
         candidate_count = report.get("selected_candidate_count")
     return {
         "horizon": report.get("horizon"),
+        "requested_limit": report.get("requested_limit"),
         "limit": report.get("limit"),
+        "limit_capped": report.get("limit_capped"),
         "labeled_count": report.get("labeled_count") or (report.get("data_quality") or {}).get("labeled_count"),
         "candidate_count": candidate_count,
         "experiment_run": report.get("experiment_run"),
