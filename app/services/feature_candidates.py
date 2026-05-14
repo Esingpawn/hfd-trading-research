@@ -1099,12 +1099,14 @@ def _reliability_score(
 ) -> float | None:
     if trade_count <= 0:
         return None
-    return (
+    sample_factor = min(trade_count / DEFAULT_TIME_SPLIT_MIN_SAMPLES, 1.0)
+    edge_score = (
         min(trade_count / 100.0, 1.0) * 0.25
         + max(avg_return_lower or 0.0, 0.0) * 25.0
         + min(max((profit_factor_lower or 0.0) / 2.0, 0.0), 1.0) * 0.35
         + min(max(win_rate_lower or 0.0, 0.0), 1.0) * 0.15
     )
+    return sample_factor * edge_score
 
 
 def _arm_edge(candidate: dict[str, Any], control: dict[str, Any]) -> dict[str, Any]:
@@ -1475,11 +1477,14 @@ def _empty_feature_segment_paper_ab_report(*, horizon: str) -> dict[str, Any]:
 
 
 def _report_summary(report: dict[str, Any]) -> dict[str, Any]:
+    candidate_count = report.get("candidate_count")
+    if candidate_count is None:
+        candidate_count = report.get("selected_candidate_count")
     return {
         "horizon": report.get("horizon"),
         "limit": report.get("limit"),
         "labeled_count": report.get("labeled_count") or (report.get("data_quality") or {}).get("labeled_count"),
-        "candidate_count": report.get("candidate_count") or report.get("selected_candidate_count"),
+        "candidate_count": candidate_count,
         "experiment_run": report.get("experiment_run"),
     }
 

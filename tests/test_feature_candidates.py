@@ -613,3 +613,26 @@ async def test_segment_candidate_reports_time_split_validation(session) -> None:
     assert row["time_split"]["status"] == "decayed"
     assert "decayed" in row["rejection_reasons"]
     assert row["time_split"]["splits"]["recent"]["avg_return"] < 0
+
+
+@pytest.mark.asyncio
+async def test_feature_candidate_reliability_score_discounts_tiny_samples(session) -> None:
+    await add_labeled_feature(
+        session,
+        feature_name="micro_poc",
+        subtype="single_win",
+        returns=[0.05],
+    )
+    await session.commit()
+
+    report = await feature_segment_candidate_screen(
+        session,
+        horizon="30m",
+        min_samples=30,
+        max_same_return_samples=30,
+        max_return_cluster_ratio=1.0,
+    )
+    row = report["all_segments"][0]
+
+    assert row["sample_count"] == 1
+    assert row["reliability_score"] < 0.1
