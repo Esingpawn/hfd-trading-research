@@ -14,6 +14,13 @@ from app.services.signal_attribution import backfill_signal_outcomes
 from app.services.telegram import TelegramClient
 
 
+RUNNER_TIERS = {"high_volatility"}
+RUNNER_SYMBOLS = {"DOGEUSDT", "HYPEUSDT", "ZECUSDT"}
+RUNNER_LOCK_FRACTION = 0.45
+RUNNER_EXTENSION_FRACTION = 0.35
+RUNNER_MIN_EXTENSION_PCT = 0.012
+
+
 @dataclass
 class PaperScanResult:
     opened: list[dict[str, Any]] = field(default_factory=list)
@@ -160,6 +167,8 @@ async def mark_open_trades(session: AsyncSession) -> dict[str, Any]:
         pnl = _pnl(trade.direction, trade.entry_price, price)
         trade.mfe = max(trade.mfe, pnl)
         trade.mae = min(trade.mae, pnl)
+        previous_stop_loss = trade.stop_loss
+        previous_take_profit = trade.take_profit
         exit_reason = _exit_reason(trade, price)
         if exit_reason:
             trade.status = "closed"
@@ -172,7 +181,18 @@ async def mark_open_trades(session: AsyncSession) -> dict[str, Any]:
             closed.append({"trade_id": trade.id, "symbol": trade.symbol, "reason": exit_reason, "pnl_pct": pnl})
             await _notify_safe(_format_close_message(trade, pnl, exit_reason))
         else:
-            updated.append({"trade_id": trade.id, "symbol": trade.symbol, "pnl_pct": pnl})
+            payload = {"trade_id": trade.id, "symbol": trade.symbol, "pnl_pct": pnl}
+            if trade.stop_loss != previous_stop_loss or trade.take_profit != previous_take_profit:
+                payload.update(
+                    {
+                        "runner_extended": True,
+                        "stop_loss": trade.stop_loss,
+                        "take_profit": trade.take_profit,
+                        "previous_stop_loss": previous_stop_loss,
+                        "previous_take_profit": previous_take_profit,
+                    }
+                )
+            updated.append(payload)
     await session.commit()
     attribution = await backfill_signal_outcomes(session, limit=500)
     return {"closed": closed, "updated": updated, "attribution": attribution.__dict__}
@@ -347,17 +367,61 @@ def _pnl(direction: str, entry: float, price: float) -> float:
 
 
 def _exit_reason(trade: PaperTrade, price: float) -> str | None:
+    stop_reason = _stop_exit_reason(trade, price)
+    if stop_reason:
+        return stop_reason
+    if _take_profit_touched(trade, price):
+        if _extend_take_profit_runner(trade, price):
+            return None
+        return "take_profit"
+    return None
+
+
+def _stop_exit_reason(trade: PaperTrade, price: float) -> str | None:
     if trade.direction == "long":
         if price <= trade.stop_loss:
-            return "stop_loss"
-        if price >= trade.take_profit:
-            return "take_profit"
+            return "trailing_stop" if trade.stop_loss > trade.entry_price else "stop_loss"
     else:
         if price >= trade.stop_loss:
-            return "stop_loss"
-        if price <= trade.take_profit:
-            return "take_profit"
+            return "trailing_stop" if trade.stop_loss < trade.entry_price else "stop_loss"
     return None
+
+
+def _take_profit_touched(trade: PaperTrade, price: float) -> bool:
+    if trade.direction == "long":
+        return price >= trade.take_profit
+    if trade.direction == "short":
+        return price <= trade.take_profit
+    return False
+
+
+def _extend_take_profit_runner(trade: PaperTrade, price: float) -> bool:
+    if not _runner_enabled(trade):
+        return False
+    if trade.entry_price <= 0 or price <= 0:
+        return False
+    if trade.direction == "long" and price <= trade.entry_price:
+        return False
+    if trade.direction == "short" and price >= trade.entry_price:
+        return False
+    profit_distance = abs(price - trade.entry_price)
+    extension = max(profit_distance * RUNNER_EXTENSION_FRACTION, trade.entry_price * RUNNER_MIN_EXTENSION_PCT)
+    if trade.direction == "long":
+        locked_stop = trade.entry_price + profit_distance * RUNNER_LOCK_FRACTION
+        trade.stop_loss = max(trade.stop_loss, locked_stop)
+        trade.take_profit = max(trade.take_profit, price + extension)
+        return True
+    locked_stop = trade.entry_price - profit_distance * RUNNER_LOCK_FRACTION
+    trade.stop_loss = min(trade.stop_loss, locked_stop)
+    trade.take_profit = min(trade.take_profit, price - extension)
+    return True
+
+
+def _runner_enabled(trade: PaperTrade) -> bool:
+    tier = str(getattr(trade, "asset_tier", "") or "")
+    if tier in RUNNER_TIERS:
+        return True
+    return str(getattr(trade, "symbol", "") or "").upper() in RUNNER_SYMBOLS
 
 
 def _journal(decision: StrategyDecision) -> dict[str, Any]:

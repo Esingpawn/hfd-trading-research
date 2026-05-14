@@ -1,8 +1,13 @@
-import pytest
+from datetime import datetime, timezone
 
-from app.models import StrategyDecision
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.db import Base
+from app.models import PaperTrade, PriceSnapshot, StrategyDecision
 from app.api.shared import _confirmation_from_items
-from app.services.paper import _collection_run_id, _confirmation_for_symbol, _record_paper_scan_status
+from app.services.paper import _collection_run_id, _confirmation_for_symbol, _exit_reason, mark_open_trades, _record_paper_scan_status
 
 
 def risk_payload(
@@ -61,6 +66,17 @@ class DecisionSession(DummySession):
         return ScalarRows(self.items)
 
 
+@pytest.fixture()
+async def db_session():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        yield session
+    await engine.dispose()
+
+
 def decision(
     risk_payload: dict | None = None,
     *,
@@ -78,6 +94,29 @@ def decision(
         decision=decision_value,
         reason={},
         risk_payload=risk_payload or {"entry_price": 100.0},
+    )
+
+
+def paper_trade(
+    *,
+    symbol: str = "BTCUSDT",
+    asset_tier: str = "core",
+    direction: str = "long",
+    entry: float = 100.0,
+    stop: float = 98.0,
+    target: float = 104.0,
+) -> PaperTrade:
+    return PaperTrade(
+        strategy_decision_id="decision-1",
+        strategy_name="strategy",
+        strategy_version="v1",
+        symbol=symbol,
+        asset_tier=asset_tier,
+        direction=direction,
+        entry_price=entry,
+        stop_loss=stop,
+        take_profit=target,
+        position_size=1.0,
     )
 
 
@@ -123,6 +162,55 @@ def test_collection_run_id_reads_scan_context() -> None:
     item = decision({"paper_scan_context": {"collection_run_id": "run-2"}})
 
     assert _collection_run_id(item) == "run-2"
+
+
+def test_core_trade_still_exits_at_take_profit() -> None:
+    trade = paper_trade(symbol="BTCUSDT", asset_tier="core", entry=100.0, stop=98.0, target=104.0)
+
+    assert _exit_reason(trade, 104.5) == "take_profit"
+    assert trade.stop_loss == 98.0
+    assert trade.take_profit == 104.0
+
+
+def test_high_volatility_trade_extends_first_take_profit() -> None:
+    trade = paper_trade(symbol="HYPEUSDT", asset_tier="high_volatility", entry=38.0, stop=37.05, target=39.52)
+
+    assert _exit_reason(trade, 39.6) is None
+    assert trade.stop_loss > 38.0
+    assert trade.take_profit > 39.6
+
+
+def test_high_volatility_runner_exits_on_trailing_stop() -> None:
+    trade = paper_trade(symbol="HYPEUSDT", asset_tier="high_volatility", entry=38.0, stop=37.05, target=39.52)
+    assert _exit_reason(trade, 39.6) is None
+    trailing_stop = trade.stop_loss
+
+    assert _exit_reason(trade, trailing_stop) == "trailing_stop"
+
+
+@pytest.mark.asyncio
+async def test_mark_open_trades_extends_hype_runner(db_session) -> None:
+    db_session.add(
+        paper_trade(symbol="HYPEUSDT", asset_tier="high_volatility", entry=38.0, stop=37.05, target=39.52)
+    )
+    db_session.add(
+        PriceSnapshot(
+            symbol="HYPEUSDT",
+            price=39.6,
+            raw_payload={},
+            collected_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+    )
+    await db_session.commit()
+
+    result = await mark_open_trades(db_session)
+    stored = await db_session.scalar(select(PaperTrade).where(PaperTrade.symbol == "HYPEUSDT"))
+
+    assert result["closed"] == []
+    assert result["updated"][0]["runner_extended"] is True
+    assert stored.status == "open"
+    assert stored.stop_loss > 38.0
+    assert stored.take_profit > 39.6
 
 
 @pytest.mark.asyncio
