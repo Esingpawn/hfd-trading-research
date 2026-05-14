@@ -5,11 +5,15 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from sqlalchemy import select
 from fastapi import APIRouter, Query
 
 from app.api.deps import SessionDep
+from app.application.tasks import enqueue_task
+from app.models import TaskRun
 from app.services.experiment_effectiveness import experiment_feature_effectiveness
 from app.services.feature_candidates import (
+    DEFAULT_RESEARCH_QUERY_MAX_LIMIT,
     feature_candidate_screen,
     feature_paper_ab,
     feature_segment_candidate_screen,
@@ -34,6 +38,7 @@ router = APIRouter()
 
 _REPORT_CACHE_SECONDS = 300.0
 _REPORT_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, object]]] = {}
+_RESEARCH_REFRESH_ACTIVE_STATUSES = {"queued", "recorded", "running"}
 
 
 @router.post("/signals/backfill")
@@ -133,6 +138,42 @@ async def refresh_features(
         horizons=horizons,
         min_samples=min_samples,
     )
+
+
+@router.post("/features/research-reports/refresh")
+async def refresh_research_reports(
+    session: SessionDep,
+    horizon: str = Query(default="30m", pattern="^(30m|1h|4h|24h)$"),
+    min_samples: int = Query(default=30, ge=1, le=5000),
+    limit: int = Query(default=DEFAULT_RESEARCH_QUERY_MAX_LIMIT, ge=1, le=100000),
+) -> dict[str, object]:
+    requested_limit = int(limit)
+    effective_limit = min(max(1, requested_limit), DEFAULT_RESEARCH_QUERY_MAX_LIMIT)
+    active = await _active_research_report_task(session, horizon=horizon)
+    if active is not None:
+        return {
+            "status": "already_running",
+            "task_run_id": active.id,
+            "task_status": active.status,
+            "horizon": horizon,
+            "min_samples": min_samples,
+            "requested_limit": requested_limit,
+            "limit": effective_limit,
+            "limit_capped": requested_limit != effective_limit,
+        }
+    result = await enqueue_task(
+        session,
+        task_name="features.research_reports",
+        payload={"horizon": horizon, "min_samples": min_samples, "limit": requested_limit},
+    )
+    return {
+        **result,
+        "horizon": horizon,
+        "min_samples": min_samples,
+        "requested_limit": requested_limit,
+        "limit": effective_limit,
+        "limit_capped": requested_limit != effective_limit,
+    }
 
 
 @router.get("/features/effectiveness")
@@ -539,3 +580,17 @@ def _cache_part(value: Any) -> Any:
     if isinstance(value, float):
         return round(value, 8)
     return value
+
+
+async def _active_research_report_task(session: SessionDep, *, horizon: str) -> TaskRun | None:
+    rows = await session.execute(
+        select(TaskRun)
+        .where(TaskRun.task_name == "features.research_reports", TaskRun.status.in_(_RESEARCH_REFRESH_ACTIVE_STATUSES))
+        .order_by(TaskRun.queued_at.desc())
+        .limit(20)
+    )
+    for item in rows.scalars():
+        payload = item.payload or {}
+        if str(payload.get("horizon") or "30m") == horizon:
+            return item
+    return None

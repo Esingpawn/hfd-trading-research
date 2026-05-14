@@ -32,6 +32,7 @@ def test_expected_api_routes_are_registered() -> None:
         ("POST", "/features/labels/backfill"),
         ("POST", "/features/reset"),
         ("POST", "/features/refresh"),
+        ("POST", "/features/research-reports/refresh"),
         ("GET", "/features/effectiveness"),
         ("GET", "/features/candidates"),
         ("GET", "/features/candidates/latest"),

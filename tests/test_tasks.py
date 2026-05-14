@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.application.tasks import enqueue_task, recent_tasks, run_task_by_id
+from app.api.routers.signals import refresh_research_reports
 from app.api.routers.tasks import _task_enqueue_payload
 from app.db import Base
 from app.models import ExperimentRun, FeatureEvent, FeatureLabel, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TaskRun
@@ -305,6 +306,40 @@ async def test_run_task_by_id_caps_research_report_materialization_limit(session
     assert execution["requested_limit"] == 999999
     assert execution["limit"] == 5000
     assert execution["reports"]["feature_candidates"]["limit_capped"] is True
+
+
+@pytest.mark.asyncio
+async def test_refresh_research_reports_enqueues_capped_background_task(session) -> None:
+    result = await refresh_research_reports(session, horizon="30m", min_samples=30, limit=999999)
+    item = await session.get(TaskRun, result["task_run_id"])
+
+    assert result["status"] == "recorded"
+    assert result["requested_limit"] == 999999
+    assert result["limit"] == 5000
+    assert result["limit_capped"] is True
+    assert item is not None
+    assert item.task_name == "features.research_reports"
+    assert item.payload == {"horizon": "30m", "min_samples": 30, "limit": 999999}
+
+
+@pytest.mark.asyncio
+async def test_refresh_research_reports_reuses_active_task(session) -> None:
+    existing = TaskRun(
+        task_name="features.research_reports",
+        status="queued",
+        payload={"horizon": "30m", "min_samples": 30, "limit": 5000},
+        result={},
+    )
+    session.add(existing)
+    await session.commit()
+
+    result = await refresh_research_reports(session, horizon="30m", min_samples=30, limit=100000)
+    tasks = await session.execute(select(TaskRun).where(TaskRun.task_name == "features.research_reports"))
+
+    assert result["status"] == "already_running"
+    assert result["task_run_id"] == existing.id
+    assert result["limit"] == 5000
+    assert len(tasks.scalars().all()) == 1
 
 
 @pytest.mark.asyncio
