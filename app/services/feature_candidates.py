@@ -8,7 +8,7 @@ from math import sqrt
 from statistics import mean
 from typing import Any, Callable
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CollectionRun, ExperimentRun, FeatureEvent as FeatureEventModel, FeatureLabel, SignalSnapshot
@@ -34,7 +34,7 @@ DEFAULT_BALANCED_SAMPLE_DAYS = 14
 DEFAULT_MIN_PROFIT_FACTOR_LOWER = 1.0
 DEFAULT_TIME_SPLIT_MIN_SAMPLES = 30
 DEFAULT_RESEARCH_SAMPLE_FETCH_MULTIPLIER = 10
-DEFAULT_RESEARCH_SAMPLE_MAX_FETCH_ROWS = 200000
+DEFAULT_RESEARCH_SAMPLE_MAX_FETCH_ROWS = 50000
 DEFAULT_SEGMENT_COVERAGE_TARGET = 30
 CONFIDENCE_Z = 1.96
 
@@ -698,6 +698,13 @@ async def _labeled_feature_pairs(
     horizon: str,
     limit: int,
 ) -> list[FeaturePair]:
+    if session.get_bind().dialect.name == "postgresql":
+        row_items = await _coverage_labeled_feature_rows_postgres(session, horizon=horizon, limit=limit)
+        return [
+            _feature_pair_from_row(item)
+            for item in row_items
+            if isinstance(item[1].return_pct, (int, float)) and item[0].direction in {"long", "short"}
+        ]
     fetch_limit = _research_fetch_limit(limit)
     row_items = await _balanced_labeled_feature_rows(session, horizon=horizon, limit=fetch_limit)
     collection_runs = await _collection_run_windows(session)
@@ -707,6 +714,79 @@ async def _labeled_feature_pairs(
         if isinstance(label.return_pct, (int, float)) and event.direction in {"long", "short"}
     ]
     return _coverage_sample_pairs(pairs, limit=limit)
+
+
+async def _coverage_labeled_feature_rows_postgres(
+    session: AsyncSession,
+    *,
+    horizon: str,
+    limit: int,
+) -> list[Any]:
+    if limit <= 0:
+        return []
+    bind_params = {"horizon": horizon, "limit": int(limit), "target": DEFAULT_SEGMENT_COVERAGE_TARGET}
+    ids_result = await session.execute(
+        text(
+            """
+            with eligible as (
+                select
+                    fe.id,
+                    fe.feature_name,
+                    fe.subtype,
+                    fe.direction,
+                    fe.symbol,
+                    fe.timeframe,
+                    fe.event_ts,
+                    ss.collection_run_id,
+                    date_trunc('minute', fe.event_ts)
+                      - ((extract(minute from fe.event_ts)::int % 30) * interval '1 minute') as bucket_ts,
+                    row_number() over (
+                        partition by fe.feature_name, fe.subtype, fe.direction, fe.symbol, fe.timeframe,
+                                     date_trunc('minute', fe.event_ts)
+                                       - ((extract(minute from fe.event_ts)::int % 30) * interval '1 minute')
+                        order by
+                            case when ss.collection_run_id is null then 0 else 1 end desc,
+                            fe.event_ts desc,
+                            fe.id desc
+                    ) as bucket_rank
+                from feature_events fe
+                join feature_labels fl on fl.feature_event_id = fe.id
+                left join signal_snapshots ss on ss.id = fe.snapshot_id
+                where fl.horizon = :horizon
+                  and fl.status = 'labeled'
+                  and fl.return_pct is not null
+                  and fe.direction in ('long', 'short')
+            ), bucketed as (
+                select *,
+                    row_number() over (
+                        partition by feature_name, subtype, direction, symbol, timeframe
+                        order by
+                            case when collection_run_id is null then 0 else 1 end desc,
+                            event_ts desc,
+                            id desc
+                    ) as segment_rank
+                from eligible
+                where bucket_rank = 1
+            ), prioritized as (
+                select id
+                from bucketed
+                order by
+                    case when segment_rank <= :target then segment_rank else :target + segment_rank end,
+                    event_ts desc,
+                    id desc
+                limit :limit
+            )
+            select id from prioritized
+            """
+        ),
+        bind_params,
+    )
+    ids = [str(item[0]) for item in ids_result.all() if item[0] is not None]
+    if not ids:
+        return []
+    order_map = {item_id: index for index, item_id in enumerate(ids)}
+    rows = await session.execute(_labeled_feature_query(horizon).where(FeatureEventModel.id.in_(ids)))
+    return sorted(rows.all(), key=lambda row: order_map.get(str(row[0].id), len(order_map)))
 
 
 def _research_fetch_limit(limit: int) -> int:
