@@ -9,6 +9,7 @@ def test_task_enqueue_exposes_research_quality_params() -> None:
     assert "dedupe_research_samples" in query_params
     assert "min_unique_event_days" in query_params
     assert "min_unique_collection_runs" in query_params
+    assert "replay_limit" in query_params
 
 
 def test_expected_api_routes_are_registered() -> None:
@@ -24,6 +25,7 @@ def test_expected_api_routes_are_registered() -> None:
         ("GET", "/paper/trades"),
         ("POST", "/shadow-paper/scan"),
         ("POST", "/shadow-paper/mark"),
+        ("POST", "/shadow-paper/replay"),
         ("GET", "/shadow-paper/trades"),
         ("GET", "/shadow-paper/stats"),
         ("POST", "/signals/backfill"),

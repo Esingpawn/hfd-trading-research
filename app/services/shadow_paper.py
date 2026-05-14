@@ -5,11 +5,12 @@ from datetime import datetime, timezone
 from statistics import mean
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import PriceSnapshot, ShadowPaperTrade
+from app.models import FeatureEvent, FeatureLabel, PriceSnapshot, ShadowPaperTrade
 from app.services.feature_candidates import latest_feature_segment_candidate_screen
+from app.services.features import FEATURE_HORIZONS
 from app.services.paper import (
     _extend_take_profit_runner,
     _pnl,
@@ -33,24 +34,21 @@ PROMOTION_MIN_CLOSED_TRADES = 30
 PROMOTION_MIN_WIN_RATE = 0.52
 PROMOTION_MIN_PROFIT_FACTOR = 1.25
 PROMOTION_MAX_DRAWDOWN = 0.12
+DEFAULT_SHADOW_REPLAY_LIMIT = 500
 
 
 async def shadow_paper_scan(
     session: AsyncSession,
     *,
-    candidate_limit: int = 20,
+    candidate_limit: int = 50,
     include_watchlist: bool = True,
 ) -> dict[str, Any]:
     report = await latest_feature_segment_candidate_screen(session, horizon="30m")
     source_experiment_run_id = report.get("source_experiment_run_id")
-    candidates = list(report.get("candidates") or [])
-    candidate_type = "segment_candidate"
-    if include_watchlist and not candidates:
-        candidates = list(report.get("all_segments") or [])
-        candidate_type = "observation_segment"
+    candidates = _shadow_candidate_rows(report, candidate_limit=candidate_limit, include_watchlist=include_watchlist)
     opened: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
-    for row in candidates[: max(0, candidate_limit)]:
+    for row, candidate_type in candidates:
         symbol = str(row.get("symbol") or "")
         direction = str(row.get("direction") or "")
         timeframe = str(row.get("timeframe") or "")
@@ -101,6 +99,90 @@ async def shadow_paper_scan(
         "strategy_name": SHADOW_STRATEGY_NAME,
         "source_experiment_run_id": source_experiment_run_id,
         "opened": opened,
+        "skipped": skipped,
+        "policy": _shadow_policy(),
+    }
+
+
+async def shadow_paper_replay(
+    session: AsyncSession,
+    *,
+    horizon: str = "30m",
+    limit: int = DEFAULT_SHADOW_REPLAY_LIMIT,
+    candidate_limit: int = 50,
+    include_watchlist: bool = True,
+) -> dict[str, Any]:
+    if horizon not in FEATURE_HORIZONS:
+        raise ValueError(f"unsupported horizon: {horizon}")
+    report = await latest_feature_segment_candidate_screen(session, horizon=horizon)
+    source_experiment_run_id = report.get("source_experiment_run_id")
+    candidate_rows = _shadow_candidate_rows(
+        report,
+        candidate_limit=candidate_limit,
+        include_watchlist=include_watchlist,
+    )
+    if not candidate_rows:
+        return {
+            "strategy_name": SHADOW_STRATEGY_NAME,
+            "horizon": horizon,
+            "requested_limit": limit,
+            "candidate_limit": candidate_limit,
+            "source_experiment_run_id": source_experiment_run_id,
+            "inserted": 0,
+            "duplicates": 0,
+            "skipped": [{"reason": "no_shadow_candidates"}],
+            "policy": _shadow_policy(),
+        }
+    pairs = await _replay_feature_pairs(
+        session,
+        candidate_rows=candidate_rows,
+        horizon=horizon,
+        limit=max(1, limit) * 3,
+    )
+    planned = []
+    for event, label, row, candidate_type in pairs:
+        planned.append(
+            _replay_plan(
+                event,
+                label,
+                row=row,
+                candidate_type=candidate_type,
+                source_experiment_run_id=str(source_experiment_run_id) if source_experiment_run_id else None,
+                horizon=horizon,
+            )
+        )
+    planned = [item for item in planned if item is not None]
+    signal_keys = [item["signal_key"] for item in planned]
+    existing_keys = await _existing_shadow_signal_keys(session, signal_keys)
+    inserted = 0
+    duplicates = 0
+    skipped: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for item in planned:
+        if inserted >= max(0, limit):
+            break
+        signal_key = item["signal_key"]
+        if signal_key in existing_keys or signal_key in seen_keys:
+            duplicates += 1
+            continue
+        seen_keys.add(signal_key)
+        session.add(item["trade"])
+        inserted += 1
+    if inserted:
+        await session.commit()
+    elif planned:
+        await session.rollback()
+    return {
+        "strategy_name": SHADOW_STRATEGY_NAME,
+        "horizon": horizon,
+        "requested_limit": limit,
+        "candidate_limit": candidate_limit,
+        "source_experiment_run_id": source_experiment_run_id,
+        "candidate_rows": len(candidate_rows),
+        "pairs_scanned": len(pairs),
+        "planned": len(planned),
+        "inserted": inserted,
+        "duplicates": duplicates,
         "skipped": skipped,
         "policy": _shadow_policy(),
     }
@@ -282,6 +364,215 @@ def _symbol_group_key(trade: ShadowPaperTrade) -> tuple[str, str]:
     return (trade.symbol, trade.direction)
 
 
+def _shadow_candidate_rows(
+    report: dict[str, Any],
+    *,
+    candidate_limit: int,
+    include_watchlist: bool,
+) -> list[tuple[dict[str, Any], str]]:
+    rows: list[tuple[dict[str, Any], str]] = []
+    seen: set[str] = set()
+    for row in report.get("candidates") or []:
+        key = str(row.get("segment_key") or row.get("feature_key") or "")
+        if key and key not in seen:
+            rows.append((row, "segment_candidate"))
+            seen.add(key)
+    if include_watchlist:
+        for row in report.get("all_segments") or []:
+            key = str(row.get("segment_key") or row.get("feature_key") or "")
+            if key and key not in seen:
+                rows.append((row, "observation_segment"))
+                seen.add(key)
+    return rows[: max(0, candidate_limit)]
+
+
+async def _replay_feature_pairs(
+    session: AsyncSession,
+    *,
+    candidate_rows: list[tuple[dict[str, Any], str]],
+    horizon: str,
+    limit: int,
+) -> list[tuple[FeatureEvent, FeatureLabel, dict[str, Any], str]]:
+    specs = [_candidate_spec(row, candidate_type) for row, candidate_type in candidate_rows]
+    specs = [item for item in specs if item is not None]
+    if not specs:
+        return []
+    filters = [
+        and_(
+            FeatureEvent.feature_name == spec["feature_name"],
+            FeatureEvent.subtype == spec["subtype"],
+            FeatureEvent.direction == spec["direction"],
+            FeatureEvent.symbol == spec["symbol"],
+            FeatureEvent.timeframe == spec["timeframe"],
+        )
+        for spec in specs
+    ]
+    query = (
+        select(FeatureEvent, FeatureLabel)
+        .where(
+            FeatureLabel.feature_event_id == FeatureEvent.id,
+            FeatureLabel.horizon == horizon,
+            FeatureLabel.status == "labeled",
+            FeatureLabel.return_pct.is_not(None),
+            FeatureEvent.direction.in_(["long", "short"]),
+            or_(*filters),
+        )
+        .order_by(FeatureEvent.event_ts.desc())
+        .limit(max(1, limit))
+    )
+    result = await session.execute(query)
+    spec_by_key = {item["segment_key"]: item for item in specs}
+    pairs: list[tuple[FeatureEvent, FeatureLabel, dict[str, Any], str]] = []
+    for event, label in result.all():
+        key = _segment_key_from_event(event)
+        spec = spec_by_key.get(key)
+        if spec is None:
+            continue
+        pairs.append((event, label, spec["row"], spec["candidate_type"]))
+    return pairs
+
+
+def _candidate_spec(row: dict[str, Any], candidate_type: str) -> dict[str, Any] | None:
+    feature_name = row.get("feature_name")
+    subtype = row.get("subtype")
+    direction = row.get("direction")
+    symbol = row.get("symbol")
+    timeframe = row.get("timeframe")
+    if not all(isinstance(item, str) and item for item in (feature_name, subtype, direction, symbol, timeframe)):
+        return None
+    return {
+        "feature_name": feature_name,
+        "subtype": subtype,
+        "direction": direction,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "segment_key": f"{feature_name}:{subtype}:{direction}:{symbol}:{timeframe}",
+        "candidate_type": candidate_type,
+        "row": row,
+    }
+
+
+def _segment_key_from_event(event: FeatureEvent) -> str:
+    return f"{event.feature_name}:{event.subtype}:{event.direction}:{event.symbol}:{event.timeframe}"
+
+
+async def _existing_shadow_signal_keys(session: AsyncSession, signal_keys: list[str]) -> set[str]:
+    if not signal_keys:
+        return set()
+    rows = await session.execute(select(ShadowPaperTrade.signal_key).where(ShadowPaperTrade.signal_key.in_(signal_keys)))
+    return {str(item) for item in rows.scalars().all()}
+
+
+def _replay_plan(
+    event: FeatureEvent,
+    label: FeatureLabel,
+    *,
+    row: dict[str, Any],
+    candidate_type: str,
+    source_experiment_run_id: str | None,
+    horizon: str,
+) -> dict[str, Any] | None:
+    return_pct = _number(label.return_pct)
+    if return_pct is None:
+        return None
+    entry_mark = _replay_entry_mark(event, label, return_pct)
+    if entry_mark is None or entry_mark <= 0:
+        return None
+    exit_mark = _replay_exit_mark(event.direction, entry_mark, label, return_pct)
+    if exit_mark is None or exit_mark <= 0:
+        return None
+    asset_tier = event.asset_tier or _asset_tier(event.symbol)
+    entry_price = _execution_price(event.direction, entry_mark, side="entry", asset_tier=asset_tier)
+    exit_price = _execution_price(event.direction, exit_mark, side="exit", asset_tier=asset_tier)
+    levels = _shadow_levels(event.direction, entry_price, asset_tier)
+    pnl = _pnl(event.direction, entry_price, exit_price) - SHADOW_FEE_RATE * 2
+    stop_pct = abs(entry_price - levels["stop_loss"]) / entry_price if entry_price else 0.0
+    candidate_key = str(row.get("segment_key") or _segment_key_from_event(event))
+    signal_key = _replay_signal_key(event_id=event.id, label_id=label.id, horizon=horizon, candidate_key=candidate_key)
+    opened_at = _aware(event.event_ts)
+    closed_at = _aware(label.future_at) if label.future_at else opened_at + FEATURE_HORIZONS[horizon]
+    trade = ShadowPaperTrade(
+        strategy_name=SHADOW_STRATEGY_NAME,
+        candidate_type=candidate_type,
+        candidate_key=candidate_key,
+        signal_key=signal_key,
+        source_experiment_run_id=source_experiment_run_id,
+        symbol=event.symbol,
+        timeframe=event.timeframe,
+        direction=event.direction,
+        entry_price=entry_price,
+        stop_loss=levels["stop_loss"],
+        take_profit=levels["take_profit"],
+        position_size=1.0,
+        status="closed",
+        exit_price=exit_price,
+        exit_reason=_replay_exit_reason(pnl),
+        pnl=pnl,
+        r_multiple=pnl / stop_pct if stop_pct else 0.0,
+        mfe=_number(label.mfe) if _number(label.mfe) is not None else pnl,
+        mae=_number(label.mae) if _number(label.mae) is not None else pnl,
+        opened_at=opened_at,
+        closed_at=closed_at,
+        context={
+            "research_only": True,
+            "historical_replay": True,
+            "opens_paper_trades": False,
+            "opens_live_orders": False,
+            "horizon": horizon,
+            "feature_event_id": event.id,
+            "feature_label_id": label.id,
+            "mark_price_at_signal": entry_mark,
+            "exit_mark_price": exit_mark,
+            "gross_label_return": return_pct,
+            "net_pnl_after_cost": pnl,
+            "total_fee_rate": SHADOW_FEE_RATE * 2,
+            "execution_model": _execution_model(asset_tier),
+            "candidate_snapshot": _candidate_context(row),
+            "replay_model": "feature_label_horizon_return_with_fee_and_slippage",
+        },
+    )
+    return {"signal_key": signal_key, "trade": trade}
+
+
+def _replay_entry_mark(event: FeatureEvent, label: FeatureLabel, return_pct: float) -> float | None:
+    if isinstance(event.event_price, (int, float)) and event.event_price > 0:
+        return float(event.event_price)
+    future_price = _number(label.future_price)
+    if future_price is None or future_price <= 0:
+        return None
+    if event.direction == "long":
+        denominator = 1 + return_pct
+    else:
+        denominator = 1 - return_pct
+    if denominator <= 0:
+        return None
+    return future_price / denominator
+
+
+def _replay_exit_mark(direction: str, entry_mark: float, label: FeatureLabel, return_pct: float) -> float | None:
+    future_price = _number(label.future_price)
+    if future_price is not None and future_price > 0:
+        return future_price
+    if direction == "long":
+        return entry_mark * (1 + return_pct)
+    if direction == "short":
+        return entry_mark * (1 - return_pct)
+    return None
+
+
+def _replay_exit_reason(pnl: float) -> str:
+    if pnl > 0:
+        return "historical_horizon_win"
+    if pnl < 0:
+        return "historical_horizon_loss"
+    return "historical_horizon_flat"
+
+
+def _replay_signal_key(*, event_id: str, label_id: str, horizon: str, candidate_key: str) -> str:
+    raw = f"{SHADOW_STRATEGY_NAME}:historical_replay:{candidate_key}:{event_id}:{label_id}:{horizon}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 async def _latest_price(session: AsyncSession, symbol: str) -> float | None:
     row = await session.scalar(
         select(PriceSnapshot.price).where(PriceSnapshot.symbol == symbol).order_by(PriceSnapshot.created_at.desc()).limit(1)
@@ -425,6 +716,12 @@ def _asset_tier(symbol: str) -> str:
 def _signal_key(*, candidate_key: str, symbol: str, direction: str, price: float) -> str:
     raw = f"{SHADOW_STRATEGY_NAME}:{candidate_key}:{symbol}:{direction}:{round(price, 6)}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _shadow_runner_decision(trade: ShadowPaperTrade, price: float) -> dict[str, Any]:

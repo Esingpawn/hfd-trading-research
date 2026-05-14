@@ -24,7 +24,7 @@ from app.services.features import (
     refresh_feature_research,
 )
 from app.services.paper import mark_open_trades, paper_scan
-from app.services.shadow_paper import mark_shadow_paper_trades, shadow_paper_promotion_report, shadow_paper_scan
+from app.services.shadow_paper import mark_shadow_paper_trades, shadow_paper_promotion_report, shadow_paper_replay, shadow_paper_scan
 from app.services.signal_attribution import backfill_signal_outcomes
 from app.services.telegram import TelegramClient
 from app.application.storage import run_storage_maintenance
@@ -222,7 +222,15 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
     if task_name in {"shadow_paper.scan", "shadow-paper-scan"}:
         return await shadow_paper_scan(
             session,
-            candidate_limit=_payload_int(payload, "candidate_limit", 20),
+            candidate_limit=_payload_int(payload, "candidate_limit", 50),
+            include_watchlist=_payload_bool(payload, "include_watchlist", True),
+        )
+    if task_name in {"shadow_paper.replay", "shadow-paper-replay"}:
+        return await shadow_paper_replay(
+            session,
+            horizon=_payload_str(payload, "horizon", "30m"),
+            limit=_payload_int(payload, "limit", 500),
+            candidate_limit=_payload_int(payload, "candidate_limit", 50),
             include_watchlist=_payload_bool(payload, "include_watchlist", True),
         )
     if task_name in {"shadow_paper.mark", "shadow-paper-mark"}:
@@ -364,6 +372,7 @@ async def _research_acceleration_cycle(session: AsyncSession, payload: dict[str,
     label_limit = _payload_int(payload, "label_limit", 1000)
     report_limit = _payload_int(payload, "report_limit", 5000)
     candidate_limit = _payload_int(payload, "candidate_limit", 50)
+    replay_limit = _payload_int(payload, "replay_limit", 500)
     result: dict[str, Any] = {
         "policy": {
             "opens_live_orders": False,
@@ -396,6 +405,13 @@ async def _research_acceleration_cycle(session: AsyncSession, payload: dict[str,
         max_age_seconds=0,
     )
     result["steps"]["shadow_mark"] = await mark_shadow_paper_trades(session)
+    result["steps"]["shadow_replay"] = await shadow_paper_replay(
+        session,
+        horizon=horizon,
+        limit=replay_limit,
+        candidate_limit=candidate_limit,
+        include_watchlist=_payload_bool(payload, "include_watchlist", True),
+    )
     result["steps"]["shadow_scan"] = await shadow_paper_scan(
         session,
         candidate_limit=candidate_limit,

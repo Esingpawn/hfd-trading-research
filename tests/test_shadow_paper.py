@@ -1,12 +1,12 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
-from app.models import ExperimentRun, PriceSnapshot, ShadowPaperTrade
-from app.services.shadow_paper import SHADOW_FEE_RATE, mark_shadow_paper_trades, shadow_paper_scan, shadow_paper_stats
+from app.models import ExperimentRun, FeatureEvent, FeatureLabel, PaperTrade, PriceSnapshot, ShadowPaperTrade
+from app.services.shadow_paper import SHADOW_FEE_RATE, mark_shadow_paper_trades, shadow_paper_replay, shadow_paper_scan, shadow_paper_stats
 
 
 @pytest.fixture()
@@ -63,6 +63,30 @@ async def test_shadow_paper_scan_uses_materialized_watchlist_without_real_trade(
     assert trades[0].status == "open"
     assert trades[0].entry_price > 100.0
     assert trades[0].context["execution_model"]["entry_and_exit_use_worse_price"] is True
+
+
+@pytest.mark.asyncio
+async def test_shadow_paper_replay_creates_closed_historical_trades_without_real_paper(session) -> None:
+    await add_replay_segment_report(session)
+    await add_labeled_replay_features(session, returns=[0.02, 0.015, -0.004])
+    await session.commit()
+
+    result = await shadow_paper_replay(session, horizon="30m", limit=10, candidate_limit=5)
+    replay_again = await shadow_paper_replay(session, horizon="30m", limit=10, candidate_limit=5)
+    shadow_rows = await session.execute(select(ShadowPaperTrade).order_by(ShadowPaperTrade.opened_at))
+    paper_rows = await session.execute(select(PaperTrade))
+    trades = shadow_rows.scalars().all()
+
+    assert result["policy"]["opens_live_orders"] is False
+    assert result["policy"]["opens_paper_trades"] is False
+    assert result["inserted"] == 3
+    assert replay_again["inserted"] == 0
+    assert replay_again["duplicates"] == 3
+    assert len(trades) == 3
+    assert {trade.status for trade in trades} == {"closed"}
+    assert {trade.context["historical_replay"] for trade in trades} == {True}
+    assert max(float(trade.pnl or 0.0) for trade in trades) == pytest.approx(0.02 - SHADOW_FEE_RATE * 2, rel=0.2)
+    assert paper_rows.scalars().all() == []
 
 
 @pytest.mark.asyncio
@@ -290,3 +314,72 @@ async def test_shadow_paper_promotion_marks_ready_candidates(session) -> None:
     assert len(ready) == 1
     assert ready[0]["candidate_key"] == "candidate-ready"
     assert ready[0]["promotion_blockers"] == []
+
+
+async def add_replay_segment_report(session) -> None:
+    session.add(
+        ExperimentRun(
+            name="feature_segment_candidates_30m",
+            status="research",
+            scope={},
+            params={},
+            metrics={
+                "candidates": [],
+                "all_segments": [
+                    {
+                        "segment_key": "liquidity_sweep:bullish_sweep:long:HYPEUSDT:long",
+                        "feature_key": "liquidity_sweep:bullish_sweep:long",
+                        "feature_name": "liquidity_sweep",
+                        "subtype": "bullish_sweep",
+                        "symbol": "HYPEUSDT",
+                        "timeframe": "long",
+                        "direction": "long",
+                        "sample_count": 30,
+                        "raw_sample_count": 80,
+                        "win_rate": 0.6,
+                        "avg_return": 0.012,
+                        "profit_factor": 1.6,
+                        "promotion_status": "watchlist",
+                    }
+                ],
+            },
+            notes="test",
+        )
+    )
+
+
+async def add_labeled_replay_features(session, *, returns: list[float]) -> None:
+    base_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index, return_pct in enumerate(returns):
+        event_ts = base_ts + timedelta(minutes=index * 31)
+        event = FeatureEvent(
+            snapshot_id=f"snapshot-replay-{index}",
+            symbol="HYPEUSDT",
+            asset_tier="high_volatility",
+            timeframe="long",
+            interval="30m",
+            indicator="liquidity_sweep",
+            event_key=f"event-replay-{index}",
+            feature_name="liquidity_sweep",
+            direction="long",
+            event_ts=event_ts,
+            event_price=100.0,
+            strength=0.8,
+            subtype="bullish_sweep",
+            source_payload_key="liquidity_sweep",
+            context={},
+        )
+        session.add(event)
+        await session.flush()
+        session.add(
+            FeatureLabel(
+                feature_event_id=event.id,
+                horizon="30m",
+                return_pct=return_pct,
+                mfe=max(return_pct, 0.0) + 0.002,
+                mae=min(return_pct, 0.0) - 0.001,
+                future_price=100.0 * (1 + return_pct),
+                future_at=event_ts + timedelta(minutes=30),
+                status="labeled",
+            )
+        )

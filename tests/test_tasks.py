@@ -8,7 +8,7 @@ from app.application.tasks import enqueue_task, reap_stale_tasks, recent_tasks, 
 from app.api.routers.signals import refresh_research_reports
 from app.api.routers.tasks import _task_enqueue_payload
 from app.db import Base
-from app.models import ExperimentRun, FeatureEvent, FeatureLabel, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TaskRun
+from app.models import ExperimentRun, FeatureEvent, FeatureLabel, PaperTrade, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TaskRun
 
 
 @pytest.fixture()
@@ -566,7 +566,32 @@ async def test_run_task_by_id_executes_shadow_paper_scan_without_real_paper_trad
 
     assert result["status"] == "completed"
     assert result["result"]["execution"]["policy"]["opens_paper_trades"] is False
-    assert len(shadow_rows.scalars().all()) == 1
+    shadow_trades = shadow_rows.scalars().all()
+    assert len(shadow_trades) >= 1
+    assert all(item.status == "open" for item in shadow_trades)
+
+
+@pytest.mark.asyncio
+async def test_run_task_by_id_executes_shadow_paper_replay_without_real_paper_trade(session) -> None:
+    await _add_feature_group(session, symbol="HYPEUSDT")
+    materialize = TaskRun(task_name="features.research_reports", payload={"min_samples": 6, "limit": 100}, result={})
+    session.add(materialize)
+    await session.commit()
+    await run_task_by_id(session, materialize.id)
+    replay = TaskRun(task_name="shadow_paper.replay", payload={"limit": 10, "candidate_limit": 5}, result={})
+    session.add(replay)
+    await session.commit()
+
+    result = await run_task_by_id(session, replay.id)
+    shadow_rows = await session.execute(select(ShadowPaperTrade))
+    paper_rows = await session.execute(select(PaperTrade))
+
+    assert result["status"] == "completed"
+    assert result["result"]["execution"]["policy"]["opens_live_orders"] is False
+    assert result["result"]["execution"]["policy"]["opens_paper_trades"] is False
+    assert result["result"]["execution"]["inserted"] >= 1
+    assert all(item.status == "closed" for item in shadow_rows.scalars().all())
+    assert paper_rows.scalars().all() == []
 
 
 @pytest.mark.asyncio
@@ -595,9 +620,12 @@ async def test_run_task_by_id_executes_research_acceleration_cycle(session) -> N
     execution = result["result"]["execution"]
     assert execution["policy"]["opens_live_orders"] is False
     assert execution["steps"]["research_reports"]["generated_count"] == 4
+    assert execution["steps"]["shadow_replay"]["policy"]["opens_paper_trades"] is False
     assert execution["steps"]["shadow_scan"]["policy"]["opens_paper_trades"] is False
     assert execution["steps"]["shadow_promotion"]["promotion"]["criteria"]["cost_model_required"] is True
-    assert len(shadow_rows.scalars().all()) == 1
+    shadow_trades = shadow_rows.scalars().all()
+    assert len(shadow_trades) >= 1
+    assert any(item.context.get("historical_replay") for item in shadow_trades)
 
 
 @pytest.mark.asyncio

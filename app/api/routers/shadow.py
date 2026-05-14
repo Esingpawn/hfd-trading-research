@@ -6,6 +6,7 @@ from app.api.deps import SessionDep
 from app.services.shadow_paper import (
     mark_shadow_paper_trades,
     shadow_paper_promotion_report,
+    shadow_paper_replay,
     shadow_paper_scan,
     shadow_paper_stats,
     shadow_paper_trades,
@@ -26,6 +27,23 @@ async def run_shadow_paper_scan(
 @router.post("/shadow-paper/mark")
 async def run_shadow_paper_mark(session: SessionDep) -> dict[str, object]:
     return await mark_shadow_paper_trades(session)
+
+
+@router.post("/shadow-paper/replay")
+async def run_shadow_paper_replay(
+    session: SessionDep,
+    horizon: str = Query(default="30m", pattern="^(30m|1h|4h|24h)$"),
+    limit: int = Query(default=500, ge=1, le=5000),
+    candidate_limit: int = Query(default=50, ge=1, le=500),
+    include_watchlist: bool = Query(default=True),
+) -> dict[str, object]:
+    return await shadow_paper_replay(
+        session,
+        horizon=horizon,
+        limit=limit,
+        candidate_limit=candidate_limit,
+        include_watchlist=include_watchlist,
+    )
 
 
 @router.get("/shadow-paper/trades")
