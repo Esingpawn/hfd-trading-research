@@ -259,6 +259,8 @@ async def backfill_feature_events(
         query = query.where(SignalSnapshot.indicator.in_(indicators))
     result = await session.execute(query)
     snapshots = result.scalars().all()
+    if commit:
+        await session.commit()
 
     payloads_missing = 0
     extracted_count = 0
@@ -306,11 +308,23 @@ async def backfill_feature_events(
                 }
             )
         if insert_rows:
+            needs_count_probe = _feature_event_insert_count_needs_probe(session)
+            existing_before = (
+                await _existing_feature_event_count(session, [row["event_key"] for row in insert_rows])
+                if needs_count_probe
+                else 0
+            )
             rowcount = await _insert_feature_event_rows(session, insert_rows)
+            if rowcount < 0:
+                if needs_count_probe:
+                    existing_after = await _existing_feature_event_count(session, [row["event_key"] for row in insert_rows])
+                    rowcount = max(0, existing_after - existing_before)
+                else:
+                    rowcount = 0
             inserted += rowcount
             duplicates += len(insert_rows) - rowcount
-    if commit and inserted:
-        await session.commit()
+            if commit:
+                await session.commit()
     return FeatureEventBackfillResult(
         snapshots_scanned=len(snapshots),
         payloads_missing=payloads_missing,
@@ -325,6 +339,9 @@ async def _insert_feature_event_rows(session: AsyncSession, rows: list[dict[str,
     if dialect_name == "postgresql":
         stmt = postgresql_insert(FeatureEventModel).values(rows)
         stmt = stmt.on_conflict_do_nothing(index_elements=["event_key"])
+        stmt = stmt.returning(FeatureEventModel.id)
+        result = await session.execute(stmt)
+        return len(result.scalars().all())
     elif dialect_name == "sqlite":
         stmt = sqlite_insert(FeatureEventModel).values(rows)
         stmt = stmt.on_conflict_do_nothing(index_elements=["event_key"])
@@ -340,6 +357,19 @@ async def _insert_feature_event_rows(session: AsyncSession, rows: list[dict[str,
         return len(pending)
     result = await session.execute(stmt)
     return int(result.rowcount or 0)
+
+
+async def _existing_feature_event_count(session: AsyncSession, event_keys: list[str]) -> int:
+    if not event_keys:
+        return 0
+    rows = await session.execute(
+        select(func.count()).select_from(FeatureEventModel).where(FeatureEventModel.event_key.in_(event_keys))
+    )
+    return int(rows.scalar_one() or 0)
+
+
+def _feature_event_insert_count_needs_probe(session: AsyncSession) -> bool:
+    return session.get_bind().dialect.name not in {"postgresql", "sqlite"}
 
 
 async def backfill_feature_labels(

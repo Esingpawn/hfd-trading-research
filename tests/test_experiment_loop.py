@@ -120,6 +120,7 @@ async def test_experiment_backfill_maintains_default_feature_horizons_independen
     labels = await session.execute(select(FeatureLabel))
 
     assert result["features"]["horizons"] == ["30m", "1h", "4h", "24h"]
+    assert result["features"]["commit_strategy"] == "stage_commits_by_signal_events_and_horizon"
     assert result["features"]["labels"]["labels_labeled"] == 1
     assert result["features"]["labels"]["labels_pending"] == 0
     assert result["features"]["labels"]["horizon_results"]["30m"]["labels_labeled"] == 1

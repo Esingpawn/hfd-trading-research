@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.services import features as features_module
 from app.db import Base
 from app.models import FeatureEvent, FeatureLabel, PriceSnapshot, SignalSnapshot
 from app.services.features import (
@@ -195,6 +196,37 @@ async def test_backfill_feature_events_deduplicates_recollected_same_event(sessi
     assert result.events_inserted == 1
     assert result.duplicates == 1
     assert len(stored.scalars().all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_backfill_feature_events_counts_unknown_rowcount_by_existing_delta(session, monkeypatch) -> None:
+    rows = klines()
+    item = snapshot(
+        {
+            "klines": rows,
+            "inst_choch": [
+                {"timestamp": rows[1][0], "price": rows[1][2], "type": "CHoCH_Bullish"},
+                {"timestamp": rows[2][0], "price": rows[2][2], "type": "BOS_Bullish"},
+            ],
+        }
+    )
+    session.add(item)
+    await session.commit()
+    original_insert = features_module._insert_feature_event_rows
+
+    async def insert_then_unknown_rowcount(db_session, insert_rows):
+        await original_insert(db_session, insert_rows)
+        return -1
+
+    monkeypatch.setattr(features_module, "_insert_feature_event_rows", insert_then_unknown_rowcount)
+    monkeypatch.setattr(features_module, "_feature_event_insert_count_needs_probe", lambda db_session: True)
+
+    result = await features_module.backfill_feature_events(session, limit=10)
+    stored = await session.execute(select(FeatureEvent))
+
+    assert result.events_inserted == 2
+    assert result.duplicates == 0
+    assert len(stored.scalars().all()) == 2
 
 
 @pytest.mark.asyncio
