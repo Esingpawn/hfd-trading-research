@@ -63,28 +63,50 @@ async def run_task_by_id(session: AsyncSession, task_run_id: str) -> dict[str, A
 
 
 async def run_task_record(session: AsyncSession, item: TaskRun) -> dict[str, Any]:
+    item_id = item.id
+    task_name = item.task_name
+    payload = dict(item.payload or {})
+    initial_result = dict(item.result or {})
+    queued_at = item.queued_at
     item.status = "running"
-    item.started_at = _utc_now()
+    started_at = _utc_now()
+    item.started_at = started_at
     item.error = None
     await session.commit()
     try:
-        result = await execute_task(session, item.task_name, item.payload or {})
+        result = await execute_task(session, task_name, payload)
     except Exception as exc:  # noqa: BLE001
+        error = str(exc)
         await session.rollback()
-        item = await session.get(TaskRun, item.id)
-        if item is None:
+        stored = await session.get(TaskRun, item_id)
+        if stored is None:
             raise
-        item.status = "failed"
-        item.error = str(exc)
-        item.finished_at = _utc_now()
+        stored.status = "failed"
+        stored.error = error
+        stored.finished_at = _utc_now()
         await session.commit()
-        await _notify_task_failure(item)
+        await _notify_task_failure(task_name=task_name, item_id=item_id, error=error)
         raise
-    item.status = "completed"
-    item.result = _json_safe({**(item.result or {}), "execution": result})
-    item.finished_at = _utc_now()
+    stored = await session.get(TaskRun, item_id)
+    if stored is None:
+        raise ValueError(f"task_run not found after execution: {item_id}")
+    stored_result = _json_safe({**initial_result, "execution": result})
+    finished_at = _utc_now()
+    stored.status = "completed"
+    stored.result = stored_result
+    stored.finished_at = finished_at
     await session.commit()
-    return task_payload(item)
+    return {
+        "id": item_id,
+        "task_name": task_name,
+        "status": "completed",
+        "payload": payload,
+        "result": stored_result,
+        "error": None,
+        "queued_at": queued_at,
+        "started_at": started_at,
+        "finished_at": finished_at,
+    }
 
 
 async def execute_task(session: AsyncSession, task_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -272,16 +294,16 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def _notify_task_failure(item: TaskRun) -> None:
+async def _notify_task_failure(*, task_name: str, item_id: str, error: str) -> None:
     client = TelegramClient()
     if not client.configured or not client.chat_id:
         return
     try:
         await client.send_message(
             "HFD task failed\n"
-            f"task: {item.task_name}\n"
-            f"id: {item.id}\n"
-            f"error: {(item.error or '')[:500]}"
+            f"task: {task_name}\n"
+            f"id: {item_id}\n"
+            f"error: {error[:500]}"
         )
     except Exception:
         return

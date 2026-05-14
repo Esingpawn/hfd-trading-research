@@ -1,4 +1,5 @@
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.application import tasks
@@ -64,5 +65,41 @@ async def test_task_failure_notification_is_best_effort(tmp_path, monkeypatch) -
 
         assert sent
         assert "unknown.task" in sent[0]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_task_failure_records_status_with_expiring_session(tmp_path, monkeypatch) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'worker.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=True)
+
+    class FakeTelegramClient:
+        configured = False
+        chat_id = None
+
+    monkeypatch.setattr(tasks, "TelegramClient", FakeTelegramClient)
+    try:
+        async with session_factory() as session:
+            item = TaskRun(task_name="unknown.task", payload={}, result={})
+            session.add(item)
+            await session.flush()
+            task_run_id = item.id
+            await session.commit()
+
+        with pytest.raises(ValueError, match="unsupported task_name"):
+            await run_task_message_once(
+                {"task_run_id": task_run_id},
+                session_factory=session_factory,
+            )
+
+        async with session_factory() as session:
+            stored = await session.scalar(select(TaskRun).where(TaskRun.id == task_run_id))
+
+        assert stored is not None
+        assert stored.status == "failed"
+        assert "unsupported task_name" in str(stored.error)
     finally:
         await engine.dispose()
