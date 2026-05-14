@@ -2489,7 +2489,7 @@
     async function queueResearchReportRefresh() {
       try {
         log("正在排队刷新研究报告...");
-        const data = await api("/features/research-reports/refresh?horizon=30m&min_samples=30&limit=100000", { method:"POST" });
+        const data = await api("/features/research-reports/refresh?horizon=30m&min_samples=30&limit=100000&force=true", { method:"POST" });
         state.researchRefresh = data;
         const status = data.status === "already_running" ? "已有刷新任务运行中" : "刷新任务已入队";
         const cap = data.limit_capped ? `，请求 ${fmt(data.requested_limit, 0)} 已截断` : "";

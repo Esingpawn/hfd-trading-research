@@ -239,6 +239,7 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
             horizon=_payload_str(payload, "horizon", "30m"),
             min_samples=_payload_int(payload, "min_samples", 30),
             limit=_payload_int(payload, "limit", 5000),
+            max_age_seconds=0 if _payload_bool(payload, "force", False) else _payload_int(payload, "max_age_seconds", 3600),
         )
     if task_name in {"data_quality.report", "data-quality-report"}:
         return await data_quality_report(session)

@@ -149,6 +149,7 @@ async def refresh_research_reports(
     horizon: str = Query(default="30m", pattern="^(30m|1h|4h|24h)$"),
     min_samples: int = Query(default=30, ge=1, le=5000),
     limit: int = Query(default=DEFAULT_RESEARCH_QUERY_MAX_LIMIT, ge=1, le=100000),
+    force: bool = True,
 ) -> dict[str, object]:
     requested_limit = int(limit)
     effective_limit = min(max(1, requested_limit), DEFAULT_RESEARCH_QUERY_MAX_LIMIT)
@@ -163,11 +164,12 @@ async def refresh_research_reports(
             "requested_limit": requested_limit,
             "limit": effective_limit,
             "limit_capped": requested_limit != effective_limit,
+            "force": force,
         }
     result = await enqueue_task(
         session,
         task_name="features.research_reports",
-        payload={"horizon": horizon, "min_samples": min_samples, "limit": requested_limit},
+        payload={"horizon": horizon, "min_samples": min_samples, "limit": requested_limit, "force": force},
     )
     return {
         **result,
@@ -176,6 +178,7 @@ async def refresh_research_reports(
         "requested_limit": requested_limit,
         "limit": effective_limit,
         "limit_capped": requested_limit != effective_limit,
+        "force": force,
     }
 
 

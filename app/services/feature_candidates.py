@@ -818,7 +818,7 @@ async def research_report_freshness(
     max_age_seconds: int | None = None,
 ) -> dict[str, Any]:
     _validate_horizon(horizon)
-    max_age = int(max_age_seconds or DEFAULT_RESEARCH_REPORT_MAX_AGE_SECONDS)
+    max_age = DEFAULT_RESEARCH_REPORT_MAX_AGE_SECONDS if max_age_seconds is None else int(max_age_seconds)
     now = datetime.now(timezone.utc)
     names = [f"{name}_{horizon}" for name in DEFAULT_RESEARCH_REPORT_NAMES]
     rows = await session.execute(

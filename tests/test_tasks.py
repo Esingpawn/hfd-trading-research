@@ -327,6 +327,31 @@ async def test_run_task_by_id_caps_research_report_materialization_limit(session
 
 
 @pytest.mark.asyncio
+async def test_run_task_by_id_forces_research_report_materialization(session) -> None:
+    await _add_feature_group(session, symbol="BTCUSDT")
+    first = TaskRun(
+        task_name="features.research_reports",
+        payload={"min_samples": 6, "limit": 100},
+        result={},
+    )
+    session.add(first)
+    await session.commit()
+    await run_task_by_id(session, first.id)
+    second = TaskRun(
+        task_name="features.research_reports",
+        payload={"min_samples": 6, "limit": 100, "force": True},
+        result={},
+    )
+    session.add(second)
+    await session.commit()
+
+    result = await run_task_by_id(session, second.id)
+
+    assert result["result"]["execution"]["generated_count"] == 4
+    assert result["result"]["execution"].get("skip_reason") is None
+
+
+@pytest.mark.asyncio
 async def test_refresh_research_reports_enqueues_capped_background_task(session) -> None:
     result = await refresh_research_reports(session, horizon="30m", min_samples=30, limit=999999)
     item = await session.get(TaskRun, result["task_run_id"])
@@ -337,7 +362,7 @@ async def test_refresh_research_reports_enqueues_capped_background_task(session)
     assert result["limit_capped"] is True
     assert item is not None
     assert item.task_name == "features.research_reports"
-    assert item.payload == {"horizon": "30m", "min_samples": 30, "limit": 999999}
+    assert item.payload == {"horizon": "30m", "min_samples": 30, "limit": 999999, "force": True}
 
 
 @pytest.mark.asyncio

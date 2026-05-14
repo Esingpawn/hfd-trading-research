@@ -6,5 +6,6 @@ def test_dashboard_exposes_background_research_refresh() -> None:
 
     assert "queueResearchReportRefresh" in html
     assert "/features/research-reports/refresh" in html
+    assert "force=true" in html
     assert "researchReportMeta" in html
     assert "researchLimitMeta" in html
