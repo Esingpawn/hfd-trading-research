@@ -441,7 +441,7 @@ def build_parser() -> argparse.ArgumentParser:
     experiment_loop.add_argument(
         "--research-report-limit",
         type=int,
-        default=5000,
+        default=20000,
         help="Labeled feature row limit for materialized research reports",
     )
     experiment_loop.add_argument(
