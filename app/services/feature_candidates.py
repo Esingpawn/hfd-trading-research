@@ -886,7 +886,12 @@ async def _labeled_feature_pairs(
     coverage_target: int = DEFAULT_SEGMENT_COVERAGE_TARGET,
 ) -> list[FeaturePair]:
     fetch_limit = _research_fetch_limit(limit)
-    row_items = await _balanced_labeled_feature_rows(session, horizon=horizon, limit=fetch_limit)
+    row_items = await _balanced_labeled_feature_rows(
+        session,
+        horizon=horizon,
+        limit=fetch_limit,
+        coverage_target=coverage_target,
+    )
     collection_runs = await _collection_run_windows(session)
     pairs = [
         (event, label, snapshot, collection_run or _infer_collection_run(snapshot, collection_runs))
@@ -1184,9 +1189,17 @@ async def _balanced_labeled_feature_rows(
     *,
     horizon: str,
     limit: int,
+    coverage_target: int = DEFAULT_SEGMENT_COVERAGE_TARGET,
 ) -> list[FeaturePair]:
     if limit <= 0:
         return []
+    if session.get_bind().dialect.name == "postgresql":
+        return await _bucketed_labeled_feature_rows_postgres(
+            session,
+            horizon=horizon,
+            limit=limit,
+            coverage_target=coverage_target,
+        )
     days = await _labeled_event_days(session, horizon=horizon, limit=min(limit, DEFAULT_BALANCED_SAMPLE_DAYS))
     if not days:
         return []
@@ -1209,6 +1222,76 @@ async def _balanced_labeled_feature_rows(
         result = await session.execute(fill_query)
         _append_unique_feature_rows(rows, result.all(), seen_event_ids=seen_event_ids)
     return sorted(rows, key=lambda row: _aware(row[0].event_ts), reverse=True)[:limit]
+
+
+async def _bucketed_labeled_feature_rows_postgres(
+    session: AsyncSession,
+    *,
+    horizon: str,
+    limit: int,
+    coverage_target: int = DEFAULT_SEGMENT_COVERAGE_TARGET,
+) -> list[FeaturePair]:
+    days = await _labeled_event_days(session, horizon=horizon, limit=DEFAULT_BALANCED_SAMPLE_DAYS)
+    if not days:
+        return []
+    rows: list[FeaturePair] = []
+    seen_event_ids: set[str] = set()
+    bucket_minutes = DEFAULT_DEDUPE_BUCKET_MINUTES
+    max_buckets = max(int(coverage_target) * 8, (limit + 749) // 750)
+    now = datetime.now(timezone.utc)
+    scanned_buckets = 0
+    for bucket_start in _iter_day_buckets(days, bucket_minutes=bucket_minutes):
+        if bucket_start > now:
+            continue
+        scanned_buckets += 1
+        bucket_end = bucket_start + timedelta(minutes=bucket_minutes)
+        result = await session.execute(
+            _labeled_feature_query(horizon)
+            .where(
+                FeatureEventModel.event_ts >= bucket_start,
+                FeatureEventModel.event_ts < bucket_end,
+                FeatureLabel.return_pct.isnot(None),
+                FeatureEventModel.direction.in_(("long", "short")),
+            )
+            .distinct(
+                FeatureEventModel.feature_name,
+                FeatureEventModel.subtype,
+                FeatureEventModel.direction,
+                FeatureEventModel.symbol,
+                FeatureEventModel.timeframe,
+            )
+            .order_by(
+                FeatureEventModel.feature_name,
+                FeatureEventModel.subtype,
+                FeatureEventModel.direction,
+                FeatureEventModel.symbol,
+                FeatureEventModel.timeframe,
+                SignalSnapshot.collection_run_id.isnot(None).desc(),
+                FeatureEventModel.event_ts.desc(),
+                FeatureEventModel.id.desc(),
+            )
+        )
+        _append_unique_feature_rows(rows, result.all(), seen_event_ids=seen_event_ids)
+        if len(rows) >= limit or scanned_buckets >= max_buckets:
+            break
+    if len(rows) < limit:
+        fill_query = _labeled_feature_query(horizon).order_by(FeatureEventModel.event_ts.desc()).limit(limit - len(rows))
+        if seen_event_ids:
+            fill_query = fill_query.where(~FeatureEventModel.id.in_(seen_event_ids))
+        result = await session.execute(fill_query)
+        _append_unique_feature_rows(rows, result.all(), seen_event_ids=seen_event_ids)
+    return sorted(rows, key=lambda row: _aware(row[0].event_ts), reverse=True)[:limit]
+
+
+def _iter_day_buckets(days: list[Any], *, bucket_minutes: int) -> list[datetime]:
+    buckets_per_day = max(1, (24 * 60) // max(1, int(bucket_minutes)))
+    starts: list[datetime] = []
+    for item in days:
+        day = _aware(item).date() if isinstance(item, datetime) else item
+        day_start = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+        for index in range(buckets_per_day - 1, -1, -1):
+            starts.append(day_start + timedelta(minutes=index * bucket_minutes))
+    return starts
 
 
 async def _labeled_event_days(
