@@ -41,7 +41,7 @@ _REPORT_CACHE_SECONDS = 300.0
 _REPORT_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, object]]] = {}
 _RESEARCH_REFRESH_ACTIVE_STATUSES = {"queued", "recorded", "running"}
 _RESEARCH_REFRESH_QUEUED_GRACE_SECONDS = 120
-_RESEARCH_REFRESH_RUNNING_GRACE_SECONDS = 3600
+_RESEARCH_REFRESH_RUNNING_GRACE_SECONDS = 300
 
 
 @router.post("/signals/backfill")
