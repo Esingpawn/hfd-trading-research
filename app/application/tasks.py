@@ -24,7 +24,7 @@ from app.services.features import (
     refresh_feature_research,
 )
 from app.services.paper import mark_open_trades, paper_scan
-from app.services.shadow_paper import mark_shadow_paper_trades, shadow_paper_scan
+from app.services.shadow_paper import mark_shadow_paper_trades, shadow_paper_promotion_report, shadow_paper_scan
 from app.services.signal_attribution import backfill_signal_outcomes
 from app.services.telegram import TelegramClient
 from app.application.storage import run_storage_maintenance
@@ -155,6 +155,10 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
         )
     if task_name in {"shadow_paper.mark", "shadow-paper-mark"}:
         return await mark_shadow_paper_trades(session)
+    if task_name in {"shadow_paper.promotion", "shadow-paper-promotion"}:
+        return await shadow_paper_promotion_report(session)
+    if task_name in {"research.accelerate", "research-accelerate"}:
+        return await _research_acceleration_cycle(session, payload)
     if task_name in {"signals.backfill", "signals-backfill"}:
         result = await backfill_signal_outcomes(session, limit=int(payload.get("limit") or 500))
         return result.__dict__
@@ -274,6 +278,53 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
             optimize=bool(payload.get("optimize", False)),
         )
     raise ValueError(f"unsupported task_name: {task_name}")
+
+
+async def _research_acceleration_cycle(session: AsyncSession, payload: dict[str, Any]) -> dict[str, Any]:
+    horizon = _payload_str(payload, "horizon", "30m")
+    feature_limit = _payload_int(payload, "feature_limit", _payload_int(payload, "limit", 500))
+    label_limit = _payload_int(payload, "label_limit", 1000)
+    report_limit = _payload_int(payload, "report_limit", 5000)
+    candidate_limit = _payload_int(payload, "candidate_limit", 50)
+    result: dict[str, Any] = {
+        "policy": {
+            "opens_live_orders": False,
+            "opens_paper_trades": False,
+            "uses_shadow_paper_only": True,
+            "purpose": "increase research sample coverage and promotion evidence",
+        },
+        "steps": {},
+    }
+    feature_events = await backfill_feature_events(
+        session,
+        limit=feature_limit,
+        indicators=_optional_str_list(payload.get("indicators")),
+    )
+    result["steps"]["feature_events"] = feature_events.__dict__
+    feature_labels = await backfill_feature_labels(
+        session,
+        limit=label_limit,
+        horizons=_optional_str_list(payload.get("horizons")) or [horizon],
+        refresh_labeled=_payload_bool(payload, "refresh_labeled", False),
+    )
+    result["steps"]["feature_labels"] = feature_labels.__dict__
+    signal_labels = await backfill_signal_outcomes(session, limit=_payload_int(payload, "signal_limit", 1000))
+    result["steps"]["signal_labels"] = signal_labels.__dict__
+    result["steps"]["research_reports"] = await generate_default_research_reports(
+        session,
+        horizon=horizon,
+        min_samples=_payload_int(payload, "min_samples", 30),
+        limit=report_limit,
+        max_age_seconds=0,
+    )
+    result["steps"]["shadow_mark"] = await mark_shadow_paper_trades(session)
+    result["steps"]["shadow_scan"] = await shadow_paper_scan(
+        session,
+        candidate_limit=candidate_limit,
+        include_watchlist=_payload_bool(payload, "include_watchlist", True),
+    )
+    result["steps"]["shadow_promotion"] = await shadow_paper_promotion_report(session)
+    return result
 
 
 def task_payload(item: TaskRun) -> dict[str, Any]:

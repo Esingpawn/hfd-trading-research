@@ -15,6 +15,16 @@ from app.services.risk import template_for_tier
 
 
 SHADOW_STRATEGY_NAME = "shadow_feature_candidates_v1"
+SHADOW_FEE_RATE = 0.0004
+SHADOW_SLIPPAGE_RATE_BY_TIER = {
+    "core": 0.0002,
+    "mainstream": 0.00035,
+    "high_volatility": 0.0007,
+}
+PROMOTION_MIN_CLOSED_TRADES = 30
+PROMOTION_MIN_WIN_RATE = 0.52
+PROMOTION_MIN_PROFIT_FACTOR = 1.25
+PROMOTION_MAX_DRAWDOWN = 0.12
 
 
 async def shadow_paper_scan(
@@ -49,7 +59,8 @@ async def shadow_paper_scan(
             skipped.append({"candidate_key": candidate_key, "symbol": symbol, "reason": "missing_price"})
             continue
         asset_tier = _asset_tier(symbol)
-        levels = _shadow_levels(direction, price, asset_tier)
+        entry_price = _execution_price(direction, price, side="entry", asset_tier=asset_tier)
+        levels = _shadow_levels(direction, entry_price, asset_tier)
         signal_key = _signal_key(candidate_key=candidate_key, symbol=symbol, direction=direction, price=price)
         trade = ShadowPaperTrade(
             strategy_name=SHADOW_STRATEGY_NAME,
@@ -60,7 +71,7 @@ async def shadow_paper_scan(
             symbol=symbol,
             timeframe=timeframe,
             direction=direction,
-            entry_price=price,
+            entry_price=entry_price,
             stop_loss=levels["stop_loss"],
             take_profit=levels["take_profit"],
             position_size=1.0,
@@ -68,6 +79,8 @@ async def shadow_paper_scan(
             context={
                 "research_only": True,
                 "opens_paper_trades": False,
+                "mark_price_at_signal": price,
+                "execution_model": _execution_model(asset_tier),
                 "candidate_snapshot": _candidate_context(row),
             },
         )
@@ -95,21 +108,37 @@ async def mark_shadow_paper_trades(session: AsyncSession) -> dict[str, Any]:
         price = await _latest_price(session, trade.symbol)
         if price is None:
             continue
-        pnl = _pnl(trade.direction, trade.entry_price, price)
+        mark_pnl = _pnl(trade.direction, trade.entry_price, price)
+        pnl = _net_pnl(trade, price, exit_side="mark")
         trade.mfe = max(trade.mfe, pnl)
         trade.mae = min(trade.mae, pnl)
         exit_reason = _exit_reason(trade, price)
         if exit_reason:
+            exit_price = _execution_price(trade.direction, price, side="exit", asset_tier=_asset_tier(trade.symbol))
+            pnl = _net_pnl(trade, exit_price, exit_side="executed")
             trade.status = "closed"
-            trade.exit_price = price
+            trade.exit_price = exit_price
             trade.exit_reason = exit_reason
             trade.pnl = pnl
             stop_pct = abs(trade.entry_price - trade.stop_loss) / trade.entry_price
             trade.r_multiple = pnl / stop_pct if stop_pct else 0.0
             trade.closed_at = datetime.now(timezone.utc)
-            closed.append({"id": trade.id, "symbol": trade.symbol, "exit_reason": exit_reason, "pnl": pnl})
+            trade.context = _merge_context(
+                trade.context,
+                {
+                    "last_mark_price": price,
+                    "exit_mark_price": price,
+                    "exit_execution_price": exit_price,
+                    "gross_pnl_before_cost": _pnl(trade.direction, trade.entry_price, exit_price),
+                    "net_pnl_after_cost": pnl,
+                    "total_fee_rate": SHADOW_FEE_RATE * 2,
+                    "closed_by_shadow_mark": True,
+                },
+            )
+            closed.append({"id": trade.id, "symbol": trade.symbol, "exit_reason": exit_reason, "pnl": pnl, "mark_pnl": mark_pnl})
         else:
-            updated.append({"id": trade.id, "symbol": trade.symbol, "pnl": pnl})
+            trade.context = _merge_context(trade.context, {"last_mark_price": price, "net_mark_pnl_after_cost": pnl})
+            updated.append({"id": trade.id, "symbol": trade.symbol, "pnl": pnl, "mark_pnl": mark_pnl})
     if closed or updated:
         await session.commit()
     return {"closed": closed, "updated": updated, "policy": _shadow_policy()}
@@ -124,12 +153,24 @@ async def shadow_paper_stats(session: AsyncSession) -> dict[str, Any]:
     rows = await session.execute(select(ShadowPaperTrade))
     trades = rows.scalars().all()
     totals = _trade_stats(trades)
+    by_candidate = _grouped_trade_stats(trades, key_func=_candidate_group_key)[:20]
     return {
         "strategy_name": SHADOW_STRATEGY_NAME,
         **totals,
-        "by_candidate": _grouped_trade_stats(trades, key_func=_candidate_group_key)[:20],
+        "by_candidate": by_candidate,
         "by_symbol": _grouped_trade_stats(trades, key_func=_symbol_group_key)[:20],
+        "promotion": _promotion_report(by_candidate),
         "policy": _shadow_policy(),
+    }
+
+
+async def shadow_paper_promotion_report(session: AsyncSession) -> dict[str, Any]:
+    stats = await shadow_paper_stats(session)
+    return {
+        "strategy_name": stats["strategy_name"],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "promotion": stats["promotion"],
+        "policy": stats["policy"],
     }
 
 
@@ -150,6 +191,8 @@ def _trade_stats(trades: list[ShadowPaperTrade]) -> dict[str, Any]:
         "profit_factor": gross_win / gross_loss if gross_loss else (999.0 if gross_win else None),
         "gross_win": gross_win,
         "gross_loss": gross_loss,
+        "max_drawdown": _max_drawdown([float(item.pnl or 0.0) for item in closed]),
+        "execution_model": _execution_model("mixed"),
         "latest_opened_at": max(opened_times) if opened_times else None,
         "latest_closed_at": max(closed_times) if closed_times else None,
     }
@@ -238,6 +281,99 @@ def _shadow_levels(direction: str, entry_price: float, asset_tier: str) -> dict[
     }
 
 
+def _execution_price(direction: str, price: float, *, side: str, asset_tier: str) -> float:
+    slippage = _slippage_rate(asset_tier)
+    if side == "entry":
+        worse = 1 + slippage if direction == "long" else 1 - slippage
+    else:
+        worse = 1 - slippage if direction == "long" else 1 + slippage
+    return price * worse
+
+
+def _net_pnl(trade: ShadowPaperTrade, price: float, *, exit_side: str) -> float:
+    gross = _pnl(trade.direction, trade.entry_price, price)
+    fee_cost = SHADOW_FEE_RATE if exit_side == "mark" else SHADOW_FEE_RATE * 2
+    return gross - fee_cost
+
+
+def _slippage_rate(asset_tier: str) -> float:
+    return SHADOW_SLIPPAGE_RATE_BY_TIER.get(asset_tier, SHADOW_SLIPPAGE_RATE_BY_TIER["high_volatility"])
+
+
+def _execution_model(asset_tier: str) -> dict[str, Any]:
+    return {
+        "fee_rate_per_side": SHADOW_FEE_RATE,
+        "round_trip_fee_rate": SHADOW_FEE_RATE * 2,
+        "slippage_rate": _slippage_rate(asset_tier),
+        "entry_and_exit_use_worse_price": True,
+        "mode": "conservative_shadow_paper",
+    }
+
+
+def _merge_context(current: dict[str, Any] | None, updates: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(current or {})
+    execution_model = payload.get("execution_model") if isinstance(payload.get("execution_model"), dict) else {}
+    payload.update(updates)
+    if execution_model and "execution_model" not in updates:
+        payload["execution_model"] = execution_model
+    return payload
+
+
+def _max_drawdown(returns: list[float]) -> float:
+    equity = 1.0
+    peak = 1.0
+    drawdown = 0.0
+    for value in returns:
+        equity *= 1 + value
+        peak = max(peak, equity)
+        if peak:
+            drawdown = max(drawdown, (peak - equity) / peak)
+    return drawdown
+
+
+def _promotion_report(candidate_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    rows = []
+    for row in candidate_rows:
+        status, blockers = _promotion_status(row)
+        rows.append({**row, "promotion_status": status, "promotion_blockers": blockers})
+    return {
+        "criteria": {
+            "min_closed_trades": PROMOTION_MIN_CLOSED_TRADES,
+            "min_win_rate": PROMOTION_MIN_WIN_RATE,
+            "min_profit_factor": PROMOTION_MIN_PROFIT_FACTOR,
+            "max_drawdown": PROMOTION_MAX_DRAWDOWN,
+            "cost_model_required": True,
+        },
+        "ready": [row for row in rows if row["promotion_status"] == "ready_for_paper_weight"],
+        "watchlist": [row for row in rows if row["promotion_status"] == "watchlist"],
+        "rejected": [row for row in rows if row["promotion_status"] == "reject_or_pause"],
+        "all": rows,
+    }
+
+
+def _promotion_status(row: dict[str, Any]) -> tuple[str, list[str]]:
+    blockers: list[str] = []
+    closed = int(row.get("closed_trades") or 0)
+    win_rate = row.get("win_rate")
+    profit_factor = row.get("profit_factor")
+    max_drawdown = float(row.get("max_drawdown") or 0.0)
+    if closed < PROMOTION_MIN_CLOSED_TRADES:
+        blockers.append("insufficient_closed_trades")
+    if not isinstance(win_rate, (int, float)) or float(win_rate) < PROMOTION_MIN_WIN_RATE:
+        blockers.append("win_rate_below_threshold")
+    if not isinstance(profit_factor, (int, float)) or float(profit_factor) < PROMOTION_MIN_PROFIT_FACTOR:
+        blockers.append("profit_factor_below_threshold")
+    if max_drawdown > PROMOTION_MAX_DRAWDOWN:
+        blockers.append("drawdown_above_threshold")
+    if not blockers:
+        return "ready_for_paper_weight", []
+    if closed >= PROMOTION_MIN_CLOSED_TRADES:
+        return "reject_or_pause", blockers
+    if closed >= max(5, PROMOTION_MIN_CLOSED_TRADES // 3) and blockers != ["insufficient_closed_trades"]:
+        return "watchlist", blockers
+    return "observing", blockers
+
+
 def _asset_tier(symbol: str) -> str:
     coin = symbol.removesuffix("USDT")
     if coin in {"BTC", "ETH"}:
@@ -305,4 +441,6 @@ def _shadow_policy() -> dict[str, Any]:
         "opens_live_orders": False,
         "sends_entry_notifications": False,
         "isolated_table": "shadow_paper_trades",
+        "uses_fee_and_slippage": True,
+        "default_execution_model": _execution_model("mixed"),
     }

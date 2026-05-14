@@ -9,3 +9,12 @@ def test_dashboard_exposes_background_research_refresh() -> None:
     assert "force=true" in html
     assert "researchReportMeta" in html
     assert "researchLimitMeta" in html
+
+
+def test_dashboard_exposes_shadow_promotion_and_cost_model() -> None:
+    html = Path("app/web/dashboard.html").read_text(encoding="utf-8")
+
+    assert "shadowPromotion" in html
+    assert "uses_fee_and_slippage" in html
+    assert "promotion_status" in html
+    assert "最大回撤" in html

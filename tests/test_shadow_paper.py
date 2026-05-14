@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
 from app.models import ExperimentRun, PriceSnapshot, ShadowPaperTrade
-from app.services.shadow_paper import mark_shadow_paper_trades, shadow_paper_scan, shadow_paper_stats
+from app.services.shadow_paper import SHADOW_FEE_RATE, mark_shadow_paper_trades, shadow_paper_scan, shadow_paper_stats
 
 
 @pytest.fixture()
@@ -61,6 +61,8 @@ async def test_shadow_paper_scan_uses_materialized_watchlist_without_real_trade(
     assert trades[0].candidate_type == "observation_segment"
     assert result["opened"][0]["id"] == trades[0].id
     assert trades[0].status == "open"
+    assert trades[0].entry_price > 100.0
+    assert trades[0].context["execution_model"]["entry_and_exit_use_worse_price"] is True
 
 
 @pytest.mark.asyncio
@@ -91,8 +93,11 @@ async def test_mark_shadow_paper_trades_closes_take_profit(session) -> None:
 
     assert mark["closed"][0]["exit_reason"] == "take_profit"
     assert stored.status == "closed"
+    assert stored.pnl == pytest.approx(((103.0 * (1 - 0.0002)) - 100.0) / 100.0 - SHADOW_FEE_RATE * 2)
+    assert stored.context["exit_execution_price"] < 103.0
     assert stats["closed_trades"] == 1
     assert stats["policy"]["opens_live_orders"] is False
+    assert stats["policy"]["uses_fee_and_slippage"] is True
 
 
 @pytest.mark.asyncio
@@ -169,4 +174,42 @@ async def test_shadow_paper_stats_groups_by_candidate(session) -> None:
     assert candidate_a["closed_trades"] == 2
     assert candidate_a["win_rate"] == 0.5
     assert candidate_a["profit_factor"] == 2.0
+    assert candidate_a["max_drawdown"] > 0
     assert stats["by_symbol"][0]["symbol"] in {"BTCUSDT", "ETHUSDT"}
+
+
+@pytest.mark.asyncio
+async def test_shadow_paper_promotion_marks_ready_candidates(session) -> None:
+    opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(30):
+        pnl = 0.02 if index < 20 else -0.01
+        session.add(
+            ShadowPaperTrade(
+                strategy_name="shadow_feature_candidates_v1",
+                candidate_type="segment_candidate",
+                candidate_key="candidate-ready",
+                signal_key=f"signal-ready-{index}",
+                symbol="BTCUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=100.0,
+                stop_loss=99.0,
+                take_profit=102.0,
+                position_size=1.0,
+                status="closed",
+                exit_price=102.0 if pnl > 0 else 99.0,
+                exit_reason="take_profit" if pnl > 0 else "stop_loss",
+                pnl=pnl,
+                opened_at=opened_at,
+                closed_at=opened_at,
+                context={"execution_model": {"mode": "conservative_shadow_paper"}},
+            )
+        )
+    await session.commit()
+
+    stats = await shadow_paper_stats(session)
+
+    ready = stats["promotion"]["ready"]
+    assert len(ready) == 1
+    assert ready[0]["candidate_key"] == "candidate-ready"
+    assert ready[0]["promotion_blockers"] == []

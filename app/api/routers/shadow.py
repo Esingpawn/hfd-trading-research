@@ -5,6 +5,7 @@ from fastapi import APIRouter, Query
 from app.api.deps import SessionDep
 from app.services.shadow_paper import (
     mark_shadow_paper_trades,
+    shadow_paper_promotion_report,
     shadow_paper_scan,
     shadow_paper_stats,
     shadow_paper_trades,
@@ -38,3 +39,8 @@ async def list_shadow_paper_trades(
 @router.get("/shadow-paper/stats")
 async def get_shadow_paper_stats(session: SessionDep) -> dict[str, object]:
     return await shadow_paper_stats(session)
+
+
+@router.get("/shadow-paper/promotion")
+async def get_shadow_paper_promotion(session: SessionDep) -> dict[str, object]:
+    return await shadow_paper_promotion_report(session)

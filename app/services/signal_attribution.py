@@ -103,11 +103,7 @@ async def backfill_signal_outcomes(
             )
             labels[f"price_{horizon}"] = price.price
             labels[f"price_{horizon}_at"] = price.collected_at.isoformat()
-        mfe, mae = await _mfe_mae(session, observation)
-        if mfe is not None:
-            labels["mfe"] = mfe
-        if mae is not None:
-            labels["mae"] = mae
+        labels.update(await _path_metrics(session, observation))
         observation.labels = labels
         observation.status = "labeled" if complete else "partial"
         observation.updated_at = utc_now()
@@ -203,6 +199,15 @@ def _observations_from_decision(decision: StrategyDecision) -> list[SignalObserv
                     "rules": reason.get("rules") or [],
                     "stage": risk.get("opportunity_stage") or reason.get("opportunity_stage") or {},
                     "execution_gate": risk.get("execution_gate") or {},
+                    "entry_plan": risk.get("entry_plan") or {},
+                    "frozen_trade_plan": ((risk.get("entry_plan") or {}).get("frozen_snapshot") or {}),
+                    "trade_levels": {
+                        "entry_price": risk.get("entry_price"),
+                        "stop_loss": risk.get("stop_loss"),
+                        "take_profit": risk.get("take_profit"),
+                        "risk_reward_ratio": (risk.get("entry_plan") or {}).get("risk_reward_ratio"),
+                    },
+                    "score_breakdown": risk.get("score_breakdown") or {},
                 },
                 observed_at=_aware(decision.created_at),
             )
@@ -234,10 +239,10 @@ async def _price_at_or_after(
     return rows.scalar_one_or_none()
 
 
-async def _mfe_mae(
+async def _path_metrics(
     session: AsyncSession,
     observation: SignalObservation,
-) -> tuple[float | None, float | None]:
+) -> dict[str, Any]:
     end_at = observation.observed_at + HORIZONS["24h"]
     rows = await session.execute(
         select(PriceSnapshot)
@@ -250,12 +255,88 @@ async def _mfe_mae(
     )
     prices = rows.scalars().all()
     if not prices or observation.price_at_signal is None:
-        return None, None
+        return {}
     returns = [
         _directional_return(observation.direction, float(observation.price_at_signal), price.price)
         for price in prices
     ]
-    return max(returns), min(returns)
+    metrics: dict[str, Any] = {"mfe": max(returns), "mae": min(returns)}
+    levels = _tracking_levels(observation)
+    if levels is None:
+        return metrics
+    first_hit = _first_level_hit(observation, prices, levels)
+    metrics["path_24h"] = {
+        "first_hit": first_hit["first_hit"],
+        "first_hit_at": first_hit.get("first_hit_at"),
+        "minutes_to_first_hit": first_hit.get("minutes_to_first_hit"),
+        "stop_loss": levels["stop_loss"],
+        "take_profit": levels["take_profit"],
+        "entry_reference_price": levels.get("entry_reference_price"),
+    }
+    metrics["first_hit_24h"] = first_hit["first_hit"]
+    metrics["hit_take_profit_before_stop_24h"] = first_hit["first_hit"] == "take_profit"
+    metrics["path_outcome_24h"] = _path_outcome(first_hit["first_hit"], metrics["mfe"], metrics["mae"])
+    return metrics
+
+
+async def _mfe_mae(
+    session: AsyncSession,
+    observation: SignalObservation,
+) -> tuple[float | None, float | None]:
+    metrics = await _path_metrics(session, observation)
+    return _float_or_none(metrics.get("mfe")), _float_or_none(metrics.get("mae"))
+
+
+def _tracking_levels(observation: SignalObservation) -> dict[str, float] | None:
+    context = observation.context or {}
+    plan = context.get("entry_plan") if isinstance(context.get("entry_plan"), dict) else {}
+    frozen = plan.get("frozen_snapshot") if isinstance(plan.get("frozen_snapshot"), dict) else {}
+    levels = context.get("trade_levels") if isinstance(context.get("trade_levels"), dict) else {}
+    stop_loss = _float_or_none(plan.get("stop_loss")) or _float_or_none(frozen.get("stop_loss")) or _float_or_none(levels.get("stop_loss"))
+    take_profit = _float_or_none(plan.get("take_profit")) or _float_or_none(frozen.get("take_profit")) or _float_or_none(levels.get("take_profit"))
+    if stop_loss is None or take_profit is None:
+        return None
+    return {
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "entry_reference_price": _float_or_none(plan.get("entry_reference_price"))
+        or _float_or_none(frozen.get("entry_reference_price"))
+        or _float_or_none(levels.get("entry_price"))
+        or _float_or_none(observation.price_at_signal),
+    }
+
+
+def _first_level_hit(
+    observation: SignalObservation,
+    prices: list[PriceSnapshot],
+    levels: dict[str, float],
+) -> dict[str, Any]:
+    for price in prices:
+        if observation.direction == "short":
+            hit = "stop_loss" if price.price >= levels["stop_loss"] else "take_profit" if price.price <= levels["take_profit"] else None
+        else:
+            hit = "stop_loss" if price.price <= levels["stop_loss"] else "take_profit" if price.price >= levels["take_profit"] else None
+        if hit:
+            return {
+                "first_hit": hit,
+                "first_hit_at": price.collected_at.isoformat(),
+                "minutes_to_first_hit": round(max((_aware(price.collected_at) - _aware(observation.observed_at)).total_seconds() / 60, 0.0), 2),
+            }
+    return {"first_hit": "none"}
+
+
+def _path_outcome(first_hit: str, mfe: float | None, mae: float | None) -> str:
+    if first_hit == "take_profit":
+        return "target_first"
+    if first_hit == "stop_loss":
+        return "stop_first"
+    if mfe is not None and mae is not None and mfe > 0 and mae < 0:
+        return "mixed_no_level_hit"
+    if mfe is not None and mfe > 0:
+        return "favorable_no_level_hit"
+    if mae is not None and mae < 0:
+        return "adverse_no_level_hit"
+    return "flat_no_level_hit"
 
 
 def _group_effectiveness(

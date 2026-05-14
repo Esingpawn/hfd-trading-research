@@ -2026,6 +2026,8 @@
       const featureSegmentPaperAb = state.featureSegmentPaperAb || {};
       const shadowPaperStats = state.shadowPaperStats || {};
       const shadowPaperTrades = state.shadowPaperTrades || [];
+      const shadowPromotion = shadowPaperStats.promotion || {};
+      const shadowCriteria = shadowPromotion.criteria || {};
       const signals = data.signals || [];
       const roles = data.roles || [];
       const weights = weightData.weights || [];
@@ -2180,6 +2182,10 @@
         ["胜率", pct(shadowPaperStats.win_rate, 1)],
         ["平均盈亏", coloredPct(shadowPaperStats.avg_pnl)],
         ["收益因子", fmt(shadowPaperStats.profit_factor, 2)],
+        ["最大回撤", pct(shadowPaperStats.max_drawdown, 1)],
+        ["执行成本", shadowPaperStats.policy && shadowPaperStats.policy.uses_fee_and_slippage ? `<span class="green">已扣费滑点</span>` : `<span class="amber">未扣成本</span>`],
+        ["晋级门槛", `${fmt(shadowCriteria.min_closed_trades || 30, 0)} 笔 / PF ${fmt(shadowCriteria.min_profit_factor || 1.25, 2)}`],
+        ["可晋级", fmt((shadowPromotion.ready || []).length, 0)],
         ["候选组", fmt((shadowPaperStats.by_candidate || []).length, 0)],
         ["隔离", shadowPaperStats.policy && shadowPaperStats.policy.opens_paper_trades === false ? `<span class="green">仅研究</span>` : `<span class="amber">待确认</span>`]
       ]));
@@ -2199,7 +2205,9 @@
         { label:"观察/已结", render: row => `${fmt(row.total_trades || 0, 0)} / ${fmt(row.closed_trades || 0, 0)}` },
         { label:"胜率", render: row => pct(row.win_rate, 1) },
         { label:"平均盈亏", render: row => coloredPct(row.avg_pnl) },
-        { label:"PF", render: row => fmt(row.profit_factor, 2) }
+        { label:"PF", render: row => fmt(row.profit_factor, 2) },
+        { label:"回撤", render: row => pct(row.max_drawdown, 1) },
+        { label:"晋级", render: row => tag(row.promotion_status === "ready_for_paper_weight" ? "ok" : row.promotion_status === "reject_or_pause" ? "bad" : "warn", esc(row.promotion_status || "observing")) }
       ], "暂无候选影子统计"));
       setHtml("indicatorCatalog", table(catalog, [
         { label:"暗流指标", render: row => esc(row.hfd_name) },

@@ -460,6 +460,37 @@ async def test_run_task_by_id_executes_shadow_paper_scan_without_real_paper_trad
 
 
 @pytest.mark.asyncio
+async def test_run_task_by_id_executes_research_acceleration_cycle(session) -> None:
+    await _add_feature_group(session, symbol="BTCUSDT")
+    await _add_feature_group(session, symbol="ETHUSDT")
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=datetime(2026, 1, 1, tzinfo=timezone.utc)))
+    item = TaskRun(
+        task_name="research.accelerate",
+        payload={
+            "horizon": "30m",
+            "feature_limit": 20,
+            "label_limit": 20,
+            "report_limit": 100,
+            "candidate_limit": 5,
+            "min_samples": 6,
+        },
+        result={},
+    )
+    session.add(item)
+    await session.commit()
+
+    result = await run_task_by_id(session, item.id)
+    shadow_rows = await session.execute(select(ShadowPaperTrade))
+
+    execution = result["result"]["execution"]
+    assert execution["policy"]["opens_live_orders"] is False
+    assert execution["steps"]["research_reports"]["generated_count"] == 4
+    assert execution["steps"]["shadow_scan"]["policy"]["opens_paper_trades"] is False
+    assert execution["steps"]["shadow_promotion"]["promotion"]["criteria"]["cost_model_required"] is True
+    assert len(shadow_rows.scalars().all()) == 1
+
+
+@pytest.mark.asyncio
 async def test_run_task_by_id_records_failure(session) -> None:
     item = TaskRun(task_name="unknown.task", payload={}, result={})
     session.add(item)

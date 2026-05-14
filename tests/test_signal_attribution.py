@@ -35,6 +35,20 @@ def decision(created_at: datetime) -> StrategyDecision:
         reason={"rules": ["long_term_direction"], "states": [{"bias": "long"}]},
         risk_payload={
             "price_at_signal": 100.0,
+            "entry_price": 100.0,
+            "stop_loss": 98.0,
+            "take_profit": 104.0,
+            "entry_plan": {
+                "entry_reference_price": 100.0,
+                "stop_loss": 98.0,
+                "take_profit": 104.0,
+                "risk_reward_ratio": 2.0,
+                "frozen_snapshot": {
+                    "entry_reference_price": 100.0,
+                    "stop_loss": 98.0,
+                    "take_profit": 104.0,
+                },
+            },
             "modules": [
                 {"name": "长期方向", "points": 25, "detail": "长期偏多", "status": "ok"},
                 {"name": "订单流确认", "points": 10, "detail": "订单流存在", "status": "ok"},
@@ -88,6 +102,33 @@ async def test_backfill_signal_outcomes_labels_future_returns(session) -> None:
     assert report["signals"][0]["sample_count"] == 1
     assert report["signals"][0]["avg_return"] == pytest.approx(0.04)
     assert report["roles"][0]["sample_count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_backfill_signal_outcomes_records_first_target_or_stop_path(session) -> None:
+    observed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    item = decision(observed_at)
+    session.add(item)
+    await session.flush()
+    observations = await record_signal_observations(session, item)
+    for minutes, price in [(0, 100.0), (10, 101.0), (20, 104.5), (30, 103.0), (60, 102.0), (240, 105.0), (1440, 106.0)]:
+        session.add(
+            PriceSnapshot(
+                symbol="BTCUSDT",
+                price=price,
+                raw_payload={},
+                collected_at=observed_at + timedelta(minutes=minutes),
+            )
+        )
+    await session.commit()
+
+    await backfill_signal_outcomes(session)
+
+    labels = observations[0].labels
+    assert labels["first_hit_24h"] == "take_profit"
+    assert labels["hit_take_profit_before_stop_24h"] is True
+    assert labels["path_24h"]["minutes_to_first_hit"] == 20
+    assert observations[0].context["frozen_trade_plan"]["stop_loss"] == 98.0
 
 
 @pytest.mark.asyncio
