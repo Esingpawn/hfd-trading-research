@@ -36,6 +36,9 @@ DEFAULT_TIME_SPLIT_MIN_SAMPLES = 30
 DEFAULT_RESEARCH_SAMPLE_FETCH_MULTIPLIER = 10
 DEFAULT_RESEARCH_SAMPLE_MAX_FETCH_ROWS = 50000
 DEFAULT_SEGMENT_COVERAGE_TARGET = 30
+DEFAULT_RESEARCH_REPORT_MAX_LIMIT = 5000
+DEFAULT_RESEARCH_REPORT_STATEMENT_TIMEOUT_MS = 45000
+RESEARCH_REPORT_ADVISORY_LOCK_ID = 78234901
 CONFIDENCE_Z = 1.96
 
 
@@ -609,9 +612,27 @@ async def generate_default_research_reports(
     min_samples: int = DEFAULT_MIN_SAMPLES,
     limit: int = 5000,
 ) -> dict[str, Any]:
+    requested_limit = int(limit)
+    limit = min(max(1, requested_limit), DEFAULT_RESEARCH_REPORT_MAX_LIMIT)
     reports: dict[str, Any] = {}
     errors: list[dict[str, str]] = []
     _validate_horizon(horizon)
+    lock_acquired = await _try_research_report_lock(session)
+    if not lock_acquired:
+        return {
+            "enabled": True,
+            "status": "skipped",
+            "skip_reason": "research_report_already_running",
+            "horizon": horizon,
+            "min_samples": min_samples,
+            "requested_limit": requested_limit,
+            "limit": limit,
+            "generated_count": 0,
+            "error_count": 0,
+            "errors": [],
+            "reports": {},
+        }
+    await _set_research_statement_timeout(session)
     pairs = await _labeled_feature_pairs(session, horizon=horizon, limit=limit)
     feature_thresholds = _thresholds(
         min_samples=min_samples,
@@ -683,6 +704,7 @@ async def generate_default_research_reports(
         "enabled": True,
         "horizon": horizon,
         "min_samples": min_samples,
+        "requested_limit": requested_limit,
         "limit": limit,
         "labeled_count": len(pairs),
         "generated_count": len(reports),
@@ -690,6 +712,21 @@ async def generate_default_research_reports(
         "errors": errors,
         "reports": {name: _report_summary(report) for name, report in reports.items()},
     }
+
+
+async def _try_research_report_lock(session: AsyncSession) -> bool:
+    if session.get_bind().dialect.name != "postgresql":
+        return True
+    value = await session.scalar(text("select pg_try_advisory_lock(:lock_id)"), {"lock_id": RESEARCH_REPORT_ADVISORY_LOCK_ID})
+    return bool(value)
+
+
+async def _set_research_statement_timeout(session: AsyncSession) -> None:
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    await session.execute(
+        text(f"set statement_timeout = {int(DEFAULT_RESEARCH_REPORT_STATEMENT_TIMEOUT_MS)}"),
+    )
 
 
 async def _labeled_feature_pairs(

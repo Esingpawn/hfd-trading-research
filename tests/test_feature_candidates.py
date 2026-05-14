@@ -761,3 +761,20 @@ async def test_generate_default_research_reports_uses_shared_balanced_sample(ses
     assert result["labeled_count"] == 12
     assert result["reports"]["feature_candidates"]["candidate_count"] == 0
     assert rows["inst_vwap:thin:long:ETHUSDT:short"]["sample_count"] == 6
+
+
+@pytest.mark.asyncio
+async def test_generate_default_research_reports_caps_requested_limit(session) -> None:
+    await add_labeled_feature(
+        session,
+        feature_name="inst_choch",
+        subtype="CHoCH_Bullish",
+        returns=[0.012] * 8,
+    )
+    await session.commit()
+
+    result = await generate_default_research_reports(session, horizon="30m", min_samples=6, limit=999999)
+
+    assert result["requested_limit"] == 999999
+    assert result["limit"] == 5000
+    assert result["generated_count"] == 4
