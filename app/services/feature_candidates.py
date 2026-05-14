@@ -41,6 +41,7 @@ DEFAULT_RESEARCH_QUERY_MAX_LIMIT = 5000
 DEFAULT_RESEARCH_QUERY_ENV_MAX_LIMIT = 100000
 DEFAULT_RESEARCH_REPORT_MAX_LIMIT = DEFAULT_RESEARCH_QUERY_MAX_LIMIT
 DEFAULT_RESEARCH_REPORT_STATEMENT_TIMEOUT_MS = 45000
+DEFAULT_RESEARCH_REPORT_STATEMENT_TIMEOUT_ENV_MAX_MS = 300000
 DEFAULT_RESEARCH_REPORT_MAX_AGE_SECONDS = 3600
 RESEARCH_REPORT_ADVISORY_LOCK_ID = 78234901
 CONFIDENCE_Z = 1.96
@@ -887,8 +888,19 @@ async def _set_research_statement_timeout(session: AsyncSession) -> None:
     if session.get_bind().dialect.name != "postgresql":
         return
     await session.execute(
-        text(f"set statement_timeout = {int(DEFAULT_RESEARCH_REPORT_STATEMENT_TIMEOUT_MS)}"),
+        text(f"set statement_timeout = {research_report_statement_timeout_ms()}"),
     )
+
+
+def research_report_statement_timeout_ms() -> int:
+    raw = os.getenv("HFD_RESEARCH_REPORT_STATEMENT_TIMEOUT_MS")
+    if raw in (None, ""):
+        return DEFAULT_RESEARCH_REPORT_STATEMENT_TIMEOUT_MS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_RESEARCH_REPORT_STATEMENT_TIMEOUT_MS
+    return min(max(1000, value), DEFAULT_RESEARCH_REPORT_STATEMENT_TIMEOUT_ENV_MAX_MS)
 
 
 async def _labeled_feature_pairs(
@@ -2061,12 +2073,13 @@ async def _latest_persisted_report(
     name: str,
     empty_factory: Callable[[], dict[str, Any]],
 ) -> dict[str, Any]:
-    item = await session.scalar(
+    rows = await session.scalars(
         select(ExperimentRun)
         .where(ExperimentRun.name == name, ExperimentRun.status == "research")
         .order_by(ExperimentRun.created_at.desc())
-        .limit(1)
+        .limit(500)
     )
+    item = _best_persisted_report(rows.all())
     if item is None:
         report = empty_factory()
         report["materialized"] = False
@@ -2082,6 +2095,29 @@ async def _latest_persisted_report(
     report["source_experiment_run_id"] = item.id
     report["experiment_run"] = {"id": item.id, "name": item.name, "status": item.status}
     return report
+
+
+def _best_persisted_report(items: list[ExperimentRun]) -> ExperimentRun | None:
+    if not items:
+        return None
+    return max(items, key=lambda item: (_persisted_report_limit(item), _aware(item.created_at)))
+
+
+def _persisted_report_limit(item: ExperimentRun) -> int:
+    metrics = item.metrics or {}
+    limit = _safe_int(metrics.get("limit"))
+    if limit > 0:
+        return limit
+    return _safe_int(metrics.get("labeled_count") or (metrics.get("data_quality") or {}).get("labeled_count"))
+
+
+def _safe_int(value: Any) -> int:
+    if value in (None, ""):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _empty_feature_candidate_report(*, horizon: str) -> dict[str, Any]:

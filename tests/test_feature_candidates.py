@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.db import Base
 from app.models import CollectionRun, ExperimentRun, FeatureEvent, FeatureLabel, PaperTrade, SignalSnapshot
 from app.services.feature_candidates import (
+    DEFAULT_RESEARCH_REPORT_STATEMENT_TIMEOUT_MS,
     feature_candidate_screen,
     feature_paper_ab,
     feature_segment_candidate_screen,
@@ -14,6 +15,7 @@ from app.services.feature_candidates import (
     generate_default_research_reports,
     latest_feature_candidate_screen,
     research_report_freshness,
+    research_report_statement_timeout_ms,
 )
 
 
@@ -217,6 +219,31 @@ async def test_latest_feature_candidate_screen_reads_persisted_report(session) -
     assert latest["materialized"] is True
     assert latest["candidate_count"] == 1
     assert latest["source_experiment_run_id"] is not None
+
+
+@pytest.mark.asyncio
+async def test_latest_feature_candidate_screen_prefers_deeper_report(session) -> None:
+    old_deep = ExperimentRun(
+        name="feature_candidates_30m",
+        status="research",
+        metrics={"horizon": "30m", "limit": 100000, "labeled_count": 100000, "candidate_count": 3},
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    newer_light = ExperimentRun(
+        name="feature_candidates_30m",
+        status="research",
+        metrics={"horizon": "30m", "limit": 5000, "labeled_count": 5000, "candidate_count": 0},
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    session.add_all([old_deep, newer_light])
+    await session.commit()
+
+    latest = await latest_feature_candidate_screen(session, horizon="30m")
+
+    assert latest["limit"] == 100000
+    assert latest["labeled_count"] == 100000
+    assert latest["candidate_count"] == 3
+    assert latest["source_experiment_run_id"] == old_deep.id
 
 
 @pytest.mark.asyncio
@@ -893,3 +920,21 @@ async def test_research_report_entrypoints_cap_requested_limit(session) -> None:
         assert report["requested_limit"] == 999999
         assert report["limit"] == 5000
         assert report["limit_capped"] is True
+
+
+def test_research_statement_timeout_can_be_overridden(monkeypatch) -> None:
+    monkeypatch.setenv("HFD_RESEARCH_REPORT_STATEMENT_TIMEOUT_MS", "120000")
+
+    assert research_report_statement_timeout_ms() == 120000
+
+
+def test_research_statement_timeout_falls_back_for_invalid_env(monkeypatch) -> None:
+    monkeypatch.setenv("HFD_RESEARCH_REPORT_STATEMENT_TIMEOUT_MS", "not-an-int")
+
+    assert research_report_statement_timeout_ms() == DEFAULT_RESEARCH_REPORT_STATEMENT_TIMEOUT_MS
+
+
+def test_research_statement_timeout_is_bounded(monkeypatch) -> None:
+    monkeypatch.setenv("HFD_RESEARCH_REPORT_STATEMENT_TIMEOUT_MS", "999999")
+
+    assert research_report_statement_timeout_ms() == 300000
