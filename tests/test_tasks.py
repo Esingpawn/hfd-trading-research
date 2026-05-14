@@ -33,6 +33,24 @@ async def test_enqueue_task_records_task_without_redis(session) -> None:
     assert rows[0]["payload"] == {"coin": "BTC"}
 
 
+@pytest.mark.asyncio
+async def test_enqueue_task_commits_record_before_queue_publish(session, monkeypatch) -> None:
+    seen: list[TaskRun | None] = []
+
+    class InspectingQueue:
+        async def enqueue(self, name: str, payload: dict) -> dict[str, object]:
+            seen.append(await session.get(TaskRun, payload["task_run_id"]))
+            return {"status": "queued", "queue": "test", "task": name, "length": 1}
+
+    monkeypatch.setattr("app.application.tasks.build_queue", lambda: InspectingQueue())
+
+    result = await enqueue_task(session, task_name="collect", payload={"coin": "BTC"})
+
+    assert result["status"] == "queued"
+    assert seen and seen[0] is not None
+    assert seen[0].task_name == "collect"
+
+
 def test_task_enqueue_payload_preserves_false_research_dedupe_flag() -> None:
     payload = _task_enqueue_payload(
         dedupe_research_samples=False,

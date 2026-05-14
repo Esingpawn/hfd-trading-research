@@ -39,6 +39,7 @@ async def enqueue_task(
     item = TaskRun(task_name=task_name, payload=payload or {}, result={})
     session.add(item)
     await session.flush()
+    await session.commit()
     queue_result = await build_queue().enqueue(task_name, {"task_run_id": item.id, **(payload or {})})
     item.result = {"queue": queue_result}
     if queue_result.get("status") == "queued":
