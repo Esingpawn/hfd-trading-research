@@ -476,6 +476,20 @@ async def test_refresh_research_reports_enqueues_capped_background_task(session)
 
 
 @pytest.mark.asyncio
+async def test_refresh_research_reports_uses_configured_cap(session, monkeypatch) -> None:
+    monkeypatch.setenv("HFD_RESEARCH_QUERY_MAX_LIMIT", "12000")
+
+    result = await refresh_research_reports(session, horizon="30m", min_samples=30, limit=999999)
+    item = await session.get(TaskRun, result["task_run_id"])
+
+    assert result["requested_limit"] == 999999
+    assert result["limit"] == 12000
+    assert result["limit_capped"] is True
+    assert item is not None
+    assert item.payload == {"horizon": "30m", "min_samples": 30, "limit": 999999, "force": True}
+
+
+@pytest.mark.asyncio
 async def test_refresh_research_reports_reuses_active_task(session) -> None:
     existing = TaskRun(
         task_name="features.research_reports",

@@ -23,6 +23,7 @@ from app.services.feature_candidates import (
     latest_feature_paper_ab,
     latest_feature_segment_candidate_screen,
     latest_feature_segment_paper_ab,
+    research_query_max_limit,
 )
 from app.services.features import (
     backfill_feature_events,
@@ -152,7 +153,7 @@ async def refresh_research_reports(
     force: bool = True,
 ) -> dict[str, object]:
     requested_limit = int(limit)
-    effective_limit = min(max(1, requested_limit), DEFAULT_RESEARCH_QUERY_MAX_LIMIT)
+    effective_limit = min(max(1, requested_limit), research_query_max_limit())
     active = await _active_research_report_task(session, horizon=horizon)
     if active is not None:
         return {

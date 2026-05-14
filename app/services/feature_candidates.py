@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -37,6 +38,7 @@ DEFAULT_RESEARCH_SAMPLE_FETCH_MULTIPLIER = 10
 DEFAULT_RESEARCH_SAMPLE_MAX_FETCH_ROWS = 50000
 DEFAULT_SEGMENT_COVERAGE_TARGET = 30
 DEFAULT_RESEARCH_QUERY_MAX_LIMIT = 5000
+DEFAULT_RESEARCH_QUERY_ENV_MAX_LIMIT = 100000
 DEFAULT_RESEARCH_REPORT_MAX_LIMIT = DEFAULT_RESEARCH_QUERY_MAX_LIMIT
 DEFAULT_RESEARCH_REPORT_STATEMENT_TIMEOUT_MS = 45000
 DEFAULT_RESEARCH_REPORT_MAX_AGE_SECONDS = 3600
@@ -867,7 +869,18 @@ async def _try_research_report_lock(session: AsyncSession) -> bool:
 
 
 def _bounded_research_limit(limit: int) -> int:
-    return min(max(1, int(limit)), DEFAULT_RESEARCH_QUERY_MAX_LIMIT)
+    return min(max(1, int(limit)), research_query_max_limit())
+
+
+def research_query_max_limit() -> int:
+    raw = os.getenv("HFD_RESEARCH_QUERY_MAX_LIMIT")
+    if raw in (None, ""):
+        return DEFAULT_RESEARCH_QUERY_MAX_LIMIT
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_RESEARCH_QUERY_MAX_LIMIT
+    return min(max(1, value), DEFAULT_RESEARCH_QUERY_ENV_MAX_LIMIT)
 
 
 async def _set_research_statement_timeout(session: AsyncSession) -> None:

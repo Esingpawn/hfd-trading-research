@@ -835,6 +835,25 @@ async def test_generate_default_research_reports_caps_requested_limit(session) -
 
 
 @pytest.mark.asyncio
+async def test_generate_default_research_reports_honors_env_limit(session, monkeypatch) -> None:
+    await add_labeled_feature(
+        session,
+        feature_name="inst_choch",
+        subtype="CHoCH_Bullish",
+        returns=[0.012] * 8,
+    )
+    await session.commit()
+    monkeypatch.setenv("HFD_RESEARCH_QUERY_MAX_LIMIT", "12000")
+
+    result = await generate_default_research_reports(session, horizon="30m", min_samples=6, limit=999999)
+
+    assert result["requested_limit"] == 999999
+    assert result["limit"] == 12000
+    assert result["reports"]["feature_candidates"]["limit"] == 12000
+    assert result["reports"]["feature_candidates"]["limit_capped"] is True
+
+
+@pytest.mark.asyncio
 async def test_generate_default_research_reports_skips_when_reports_are_fresh(session) -> None:
     await add_labeled_feature(
         session,

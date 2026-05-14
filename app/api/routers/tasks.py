@@ -56,6 +56,7 @@ async def enqueue_task_api(
     max_return_cluster_ratio: float | None = Query(default=None, ge=0.0, le=1.0),
     persist: bool | None = Query(default=None),
     refresh_labeled: bool = Query(default=False),
+    force: bool | None = Query(default=None),
 ) -> dict[str, object]:
     payload = _task_enqueue_payload(
         coins=coins,
@@ -92,12 +93,13 @@ async def enqueue_task_api(
         max_return_cluster_ratio=max_return_cluster_ratio,
         persist=persist,
         refresh_labeled=refresh_labeled,
+        force=force,
     )
     return await enqueue_task(session, task_name=task_name, payload=payload)
 
 
 def _task_enqueue_payload(**values: Any) -> dict[str, Any]:
-    keep_false = {"persist", "dedupe_research_samples"}
+    keep_false = {"persist", "dedupe_research_samples", "force"}
     return {
         key: value
         for key, value in values.items()
