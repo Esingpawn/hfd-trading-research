@@ -57,6 +57,13 @@ def test_score_opens_when_three_timeframes_align_near_cost() -> None:
     assert result.risk_payload["entry_plan"]["entry_reference_price"] == 100.0
     assert result.risk_payload["entry_plan"]["valid_until"]
     assert "new scan changes entry/stop/target beyond drift_limit_pct" in result.risk_payload["entry_plan"]["invalidates_when"]
+    assert result.risk_payload["entry_plan"]["used_for_outcome_tracking"] is True
+    assert result.risk_payload["entry_plan"]["entry_range"] == {
+        "lower": result.risk_payload["entry_plan"]["entry_lower"],
+        "upper": result.risk_payload["entry_plan"]["entry_upper"],
+    }
+    assert result.risk_payload["entry_plan"]["risk_reward_ratio"] is not None
+    assert result.risk_payload["entry_plan"]["frozen_snapshot"]["entry_range"] == result.risk_payload["entry_plan"]["entry_range"]
 
 
 def test_score_observes_when_price_is_outside_entry_zone() -> None:

@@ -1108,6 +1108,7 @@
           <div class="detailBlock" style="margin-top:10px">
             <h3>影子纸上交易</h3>
             <div id="shadowPaperSummary" class="kvList"></div>
+            <div id="shadowPaperCandidateStats" class="miniTable"><div class="empty">等待候选影子统计</div></div>
             <div id="shadowPaperTrades" class="miniTable"><div class="empty">等待影子纸上记录</div></div>
           </div>
         </div>
@@ -1684,6 +1685,21 @@
       }[value] || fmt(value);
     }
 
+    function timeSplitStatusText(value) {
+      return {
+        passed:"通过",
+        insufficient:"样本不足",
+        failed_validation:"验证失败",
+        decayed:"近期衰减"
+      }[value] || fmt(value);
+    }
+
+    function timeSplitTag(value) {
+      const status = (value || {}).status || "insufficient";
+      const cls = status === "passed" ? "ok" : status === "insufficient" ? "neutral" : "bad";
+      return tag(cls, timeSplitStatusText(status));
+    }
+
     function evidenceText(value) {
       return {
         live_weight_ready:"实时权重样本",
@@ -2066,14 +2082,16 @@
         ["窗口", esc(featureCandidates.horizon || "30m")],
         ["已标注", fmt(featureCandidates.labeled_count || 0, 0)],
         ["候选", fmt(featureCandidates.candidate_count || 0, 0)],
-        ["观察", fmt(featureCandidates.watchlist_count || 0, 0)]
+        ["观察", fmt(featureCandidates.watchlist_count || 0, 0)],
+        ["保守 PF 门槛", fmt((featureCandidates.thresholds || {}).min_profit_factor_lower, 2)]
       ]));
       setHtml("featureCandidates", table((featureCandidates.candidates || []).slice(0, 8), [
         { label:"特征", render: row => esc(row.feature_key) },
         { label:"样本", render: row => fmt(row.sample_count, 0) },
         { label:"胜率", render: row => pct(row.win_rate, 1) },
         { label:"平均收益", render: row => coloredPct(row.avg_return) },
-        { label:"收益因子", render: row => fmt(row.profit_factor, 2) },
+        { label:"PF/下界", render: row => `${fmt(row.profit_factor, 2)} / ${fmt(row.profit_factor_lower, 2)}` },
+        { label:"时间切分", render: row => timeSplitTag(row.time_split) },
         { label:"分段", render: row => `${fmt(row.segment_count || 0, 0)} / ${fmt((row.weak_segments || []).length, 0)}` },
         { label:"状态", render: row => tag(row.paper_ab_ready ? "ok" : "warn", row.paper_ab_ready ? "A/B 就绪" : esc(row.promotion_status)) }
       ], "暂无达标候选特征"));
@@ -2091,7 +2109,7 @@
         { label:"伪交易", render: row => fmt((row.pseudo_trade_metrics || {}).trade_count || 0, 0) },
         { label:"胜率", render: row => pct((row.pseudo_trade_metrics || {}).win_rate, 1) },
         { label:"平均收益", render: row => coloredPct((row.pseudo_trade_metrics || {}).avg_return) },
-        { label:"收益因子", render: row => fmt((row.pseudo_trade_metrics || {}).profit_factor, 2) },
+        { label:"PF/下界", render: row => `${fmt((row.pseudo_trade_metrics || {}).profit_factor, 2)} / ${fmt((row.pseudo_trade_metrics || {}).profit_factor_lower, 2)}` },
         { label:"MFE/MAE", render: row => `${coloredPct((row.pseudo_trade_metrics || {}).avg_mfe)} / ${coloredPct((row.pseudo_trade_metrics || {}).avg_mae)}` }
       ], "暂无 A/B 候选报告"));
       setHtml("featureSegmentCandidatesSummary", kvRows([
@@ -2102,7 +2120,8 @@
         ["最大覆盖", `${fmt((featureSegmentCandidates.quality_summary || {}).max_unique_event_day_count || 0, 0)}天 / ${fmt((featureSegmentCandidates.quality_summary || {}).max_unique_market_window_count || 0, 0)}窗 / ${fmt((featureSegmentCandidates.quality_summary || {}).max_unique_collection_run_count || 0, 0)}轮`],
         ["候选分段", fmt(featureSegmentCandidates.candidate_count || 0, 0)],
         ["风险", Object.entries(featureSegmentCandidates.risk_summary || {}).map(([key, value]) => `${esc(key)}:${fmt(value, 0)}`).join(" / ") || "--"],
-        ["特征组", fmt((featureSegmentCandidates.by_feature || []).length, 0)]
+        ["特征组", fmt((featureSegmentCandidates.by_feature || []).length, 0)],
+        ["保守 PF 门槛", fmt((featureSegmentCandidates.thresholds || {}).min_profit_factor_lower, 2)]
       ]));
       setHtml("featureSegmentCandidates", table((featureSegmentCandidates.candidates || []).slice(0, 10), [
         { label:"分段", render: row => `${coinBadge(row.symbol)} <span class="muted">${esc(row.timeframe)}</span>` },
@@ -2111,6 +2130,8 @@
         { label:"覆盖", render: row => `${fmt((row.quality || {}).unique_event_day_count || 0, 0)}天 / ${fmt((row.quality || {}).unique_market_window_count || 0, 0)}窗 / ${fmt((row.quality || {}).unique_collection_run_count || 0, 0)}轮` },
         { label:"胜率", render: row => pct(row.win_rate, 1) },
         { label:"平均收益", render: row => coloredPct(row.avg_return) },
+        { label:"PF/下界", render: row => `${fmt(row.profit_factor, 2)} / ${fmt(row.profit_factor_lower, 2)}` },
+        { label:"切分", render: row => timeSplitTag(row.time_split) },
         { label:"风险", render: row => tag(row.overfit_risk === "low" ? "ok" : row.overfit_risk === "medium" ? "warn" : "bad", row.overfit_risk || "unknown") },
         { label:"状态", render: row => tag(row.paper_ab_ready ? "ok" : "warn", row.paper_ab_ready ? "分段就绪" : esc(row.promotion_status)) }
       ], "暂无达标分段候选"));
@@ -2130,6 +2151,7 @@
         { label:"伪交易", render: row => `${fmt((row.pseudo_trade_metrics || {}).trade_count || 0, 0)} / ${fmt(row.raw_sample_count || row.sample_count || 0, 0)}` },
         { label:"胜率", render: row => pct((row.pseudo_trade_metrics || {}).win_rate, 1) },
         { label:"平均收益", render: row => coloredPct((row.pseudo_trade_metrics || {}).avg_return) },
+        { label:"PF/下界", render: row => `${fmt((row.pseudo_trade_metrics || {}).profit_factor, 2)} / ${fmt((row.pseudo_trade_metrics || {}).profit_factor_lower, 2)}` },
         { label:"风险", render: row => tag(row.overfit_risk === "low" ? "ok" : row.overfit_risk === "medium" ? "warn" : "bad", row.overfit_risk || "unknown") }
       ], "暂无分段 A/B 报告"));
       setHtml("shadowPaperSummary", kvRows([
@@ -2138,6 +2160,8 @@
         ["持仓/已结", `${fmt(shadowPaperStats.open_trades || 0, 0)} / ${fmt(shadowPaperStats.closed_trades || 0, 0)}`],
         ["胜率", pct(shadowPaperStats.win_rate, 1)],
         ["平均盈亏", coloredPct(shadowPaperStats.avg_pnl)],
+        ["收益因子", fmt(shadowPaperStats.profit_factor, 2)],
+        ["候选组", fmt((shadowPaperStats.by_candidate || []).length, 0)],
         ["隔离", shadowPaperStats.policy && shadowPaperStats.policy.opens_paper_trades === false ? `<span class="green">仅研究</span>` : `<span class="amber">待确认</span>`]
       ]));
       setHtml("shadowPaperTrades", table(shadowPaperTrades.slice(0, 8), [
@@ -2149,6 +2173,15 @@
         { label:"状态", render: row => tag(row.status === "open" ? "neutral" : "ok", row.status) },
         { label:"盈亏", render: row => coloredPct(row.pnl) }
       ], "暂无影子纸上记录"));
+      setHtml("shadowPaperCandidateStats", table((shadowPaperStats.by_candidate || []).slice(0, 8), [
+        { label:"候选", render: row => esc(row.candidate_key) },
+        { label:"币种", render: row => coinBadge(row.symbol) },
+        { label:"方向", render: row => tag(row.direction, directionText(row.direction)) },
+        { label:"观察/已结", render: row => `${fmt(row.total_trades || 0, 0)} / ${fmt(row.closed_trades || 0, 0)}` },
+        { label:"胜率", render: row => pct(row.win_rate, 1) },
+        { label:"平均盈亏", render: row => coloredPct(row.avg_pnl) },
+        { label:"PF", render: row => fmt(row.profit_factor, 2) }
+      ], "暂无候选影子统计"));
       setHtml("indicatorCatalog", table(catalog, [
         { label:"暗流指标", render: row => esc(row.hfd_name) },
         { label:"参数", render: row => `<span class="muted">${esc(row.key)}</span>` },

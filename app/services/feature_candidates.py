@@ -4,6 +4,7 @@ import copy
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from math import sqrt
 from statistics import mean
 from typing import Any, Callable
 
@@ -30,6 +31,9 @@ DEFAULT_MARKET_WINDOW_HOURS = 8
 DEFAULT_MAX_SAME_RETURN_SAMPLES = 10
 DEFAULT_MAX_RETURN_CLUSTER_RATIO = 0.75
 DEFAULT_BALANCED_SAMPLE_DAYS = 14
+DEFAULT_MIN_PROFIT_FACTOR_LOWER = 1.0
+DEFAULT_TIME_SPLIT_MIN_SAMPLES = 30
+CONFIDENCE_Z = 1.96
 
 
 @dataclass(frozen=True)
@@ -727,9 +731,10 @@ def _candidate_rows(
     rows = []
     for feature_key, items in buckets.items():
         stats = _pseudo_trade_stats(items)
+        time_split = _time_split_validation(items, thresholds=thresholds)
         first = items[0][0]
         segment_report = _segment_report(items, thresholds=thresholds)
-        reasons = _candidate_reasons(stats, segment_report, thresholds=thresholds)
+        reasons = _candidate_reasons(stats, segment_report, time_split=time_split, thresholds=thresholds)
         promotion_status = _promotion_status(reasons)
         symbols = sorted({event.symbol for event, _label, _snapshot, _run in items})
         timeframes = sorted({event.timeframe for event, _label, _snapshot, _run in items})
@@ -747,11 +752,19 @@ def _candidate_rows(
                 "sample_count": stats["trade_count"],
                 "win_rate": stats["win_rate"],
                 "avg_return": stats["avg_return"],
+                "avg_return_lower": stats["avg_return_lower"],
+                "avg_return_upper": stats["avg_return_upper"],
                 "median_return": stats["median_return"],
                 "profit_factor": stats["profit_factor"],
+                "profit_factor_lower": stats["profit_factor_lower"],
+                "win_rate_lower": stats["win_rate_lower"],
+                "win_count": stats["win_count"],
+                "loss_count": stats["loss_count"],
+                "reliability_score": stats["reliability_score"],
                 "avg_mfe": stats["avg_mfe"],
                 "avg_mae": stats["avg_mae"],
                 "avg_strength": _avg_strength(items),
+                "time_split": time_split,
                 "segment_count": segment_report["segment_count"],
                 "weak_segments": segment_report["weak_segments"],
                 "rejection_reasons": reasons,
@@ -766,6 +779,8 @@ def _candidate_rows(
         key=lambda row: (
             row["paper_ab_ready"],
             row["promotion_status"] == "watchlist",
+            row["reliability_score"] if row["reliability_score"] is not None else -999.0,
+            row["profit_factor_lower"] if row["profit_factor_lower"] is not None else -999.0,
             row["avg_return"] if row["avg_return"] is not None else -999.0,
             row["win_rate"] if row["win_rate"] is not None else 0.0,
             row["sample_count"],
@@ -787,9 +802,10 @@ def _segment_candidate_rows(
         effective_items = _dedupe_research_pairs(items, thresholds=thresholds, key_func=_segment_key)
         raw_stats = _pseudo_trade_stats(items)
         stats = _pseudo_trade_stats(effective_items)
+        time_split = _time_split_validation(effective_items, thresholds=thresholds)
         quality = _sample_quality(items, effective_items, thresholds=thresholds)
         first = items[0][0]
-        reasons = _segment_candidate_reasons(stats, quality=quality, thresholds=thresholds)
+        reasons = _segment_candidate_reasons(stats, quality=quality, time_split=time_split, thresholds=thresholds)
         promotion_status = "segment_candidate" if not reasons else "rejected"
         rows.append(
             {
@@ -806,12 +822,20 @@ def _segment_candidate_rows(
                 "raw_sample_count": raw_stats["trade_count"],
                 "win_rate": stats["win_rate"],
                 "avg_return": stats["avg_return"],
+                "avg_return_lower": stats["avg_return_lower"],
+                "avg_return_upper": stats["avg_return_upper"],
                 "median_return": stats["median_return"],
                 "profit_factor": stats["profit_factor"],
+                "profit_factor_lower": stats["profit_factor_lower"],
+                "win_rate_lower": stats["win_rate_lower"],
+                "win_count": stats["win_count"],
+                "loss_count": stats["loss_count"],
+                "reliability_score": stats["reliability_score"],
                 "avg_mfe": stats["avg_mfe"],
                 "avg_mae": stats["avg_mae"],
                 "avg_strength": _avg_strength(effective_items),
                 "quality": quality,
+                "time_split": time_split,
                 "overfit_risk": quality["overfit_risk"],
                 "rejection_reasons": reasons,
                 "promotion_status": promotion_status,
@@ -824,6 +848,9 @@ def _segment_candidate_rows(
         rows,
         key=lambda row: (
             row["paper_ab_ready"],
+            row["time_split"].get("status") == "passed",
+            row["reliability_score"] if row["reliability_score"] is not None else -999.0,
+            row["profit_factor_lower"] if row["profit_factor_lower"] is not None else -999.0,
             row["avg_return"] if row["avg_return"] is not None else -999.0,
             row["win_rate"] if row["win_rate"] is not None else 0.0,
             row["sample_count"],
@@ -873,6 +900,7 @@ def _candidate_reasons(
     stats: dict[str, Any],
     segment_report: dict[str, Any],
     *,
+    time_split: dict[str, Any] | None = None,
     thresholds: dict[str, Any],
 ) -> list[str]:
     reasons = []
@@ -884,6 +912,10 @@ def _candidate_reasons(
         reasons.append("win_rate_below_minimum")
     if stats["profit_factor"] is None or stats["profit_factor"] < thresholds["min_profit_factor"]:
         reasons.append("profit_factor_below_minimum")
+    if _uses_reliable_profit_factor(stats, thresholds=thresholds):
+        reasons.append("profit_factor_lower_below_minimum")
+    if time_split and time_split.get("status") in {"failed_validation", "decayed"}:
+        reasons.append(str(time_split["status"]))
     if segment_report["segment_count"] < thresholds["min_segments"]:
         reasons.append("segment_count_below_minimum")
     if segment_report["weak_segments"]:
@@ -895,6 +927,7 @@ def _segment_candidate_reasons(
     stats: dict[str, Any],
     *,
     quality: dict[str, Any] | None = None,
+    time_split: dict[str, Any] | None = None,
     thresholds: dict[str, Any],
 ) -> list[str]:
     reasons = []
@@ -919,6 +952,10 @@ def _segment_candidate_reasons(
         reasons.append("win_rate_below_minimum")
     if stats["profit_factor"] is None or stats["profit_factor"] < thresholds["min_profit_factor"]:
         reasons.append("profit_factor_below_minimum")
+    if _uses_reliable_profit_factor(stats, thresholds=thresholds):
+        reasons.append("profit_factor_lower_below_minimum")
+    if time_split and time_split.get("status") in {"failed_validation", "decayed"}:
+        reasons.append(str(time_split["status"]))
     return reasons
 
 
@@ -936,17 +973,138 @@ def _pseudo_trade_stats(items: list[FeaturePair]) -> dict[str, Any]:
     losses = [value for value in values if value < 0]
     gross_win = sum(wins)
     gross_loss = abs(sum(losses))
+    avg_return = mean(values) if values else None
+    profit_factor = gross_win / gross_loss if gross_loss else (999.0 if gross_win else None)
+    profit_factor_lower = _profit_factor_lower_bound(wins, losses)
+    win_rate = len(wins) / len(values) if values else None
+    avg_lower, avg_upper = _mean_confidence_bounds(values)
     return {
         "trade_count": len(values),
-        "win_rate": len(wins) / len(values) if values else None,
-        "avg_return": mean(values) if values else None,
+        "win_count": len(wins),
+        "loss_count": len(losses),
+        "win_rate": win_rate,
+        "win_rate_lower": _wilson_lower_bound(len(wins), len(values)) if values else None,
+        "avg_return": avg_return,
+        "avg_return_lower": avg_lower,
+        "avg_return_upper": avg_upper,
         "median_return": _median(values),
-        "profit_factor": gross_win / gross_loss if gross_loss else (999.0 if gross_win else None),
+        "profit_factor": profit_factor,
+        "profit_factor_lower": profit_factor_lower,
+        "reliability_score": _reliability_score(
+            trade_count=len(values),
+            avg_return_lower=avg_lower,
+            profit_factor_lower=profit_factor_lower,
+            win_rate_lower=_wilson_lower_bound(len(wins), len(values)) if values else None,
+        ),
         "avg_mfe": _avg_label(items, "mfe"),
         "avg_mae": _avg_label(items, "mae"),
         "gross_win": gross_win,
         "gross_loss": gross_loss,
     }
+
+
+def _time_split_validation(items: list[FeaturePair], *, thresholds: dict[str, Any]) -> dict[str, Any]:
+    ordered = sorted(items, key=lambda item: _aware(item[0].event_ts))
+    sample_count = len([item for item in ordered if isinstance(item[1].return_pct, (int, float))])
+    min_samples = max(int(thresholds.get("time_split_min_samples") or DEFAULT_TIME_SPLIT_MIN_SAMPLES), int(thresholds["min_samples"]))
+    if sample_count < min_samples:
+        return {"status": "insufficient", "sample_count": sample_count, "min_samples": min_samples, "splits": {}}
+
+    train_end = max(1, int(sample_count * 0.7))
+    validation_end = max(train_end + 1, int(sample_count * 0.9))
+    validation_end = min(validation_end, sample_count - 1) if sample_count >= 3 else validation_end
+    splits = {
+        "train": _pseudo_trade_stats(ordered[:train_end]),
+        "validation": _pseudo_trade_stats(ordered[train_end:validation_end]),
+        "recent": _pseudo_trade_stats(ordered[validation_end:]),
+    }
+    validation = splits["validation"]
+    recent = splits["recent"]
+    status = "passed"
+    if _split_is_below_threshold(validation, thresholds=thresholds):
+        status = "failed_validation"
+    elif _split_is_below_threshold(recent, thresholds=thresholds):
+        status = "decayed"
+    return {
+        "status": status,
+        "sample_count": sample_count,
+        "min_samples": min_samples,
+        "split_ratios": {"train": 0.7, "validation": 0.2, "recent": 0.1},
+        "splits": splits,
+    }
+
+
+def _split_is_below_threshold(stats: dict[str, Any], *, thresholds: dict[str, Any]) -> bool:
+    if not stats["trade_count"]:
+        return True
+    if stats["avg_return"] is None or stats["avg_return"] <= float(thresholds["min_avg_return"]):
+        return True
+    if stats["profit_factor"] is None or stats["profit_factor"] < float(thresholds["min_profit_factor"]):
+        return True
+    return False
+
+
+def _uses_reliable_profit_factor(stats: dict[str, Any], *, thresholds: dict[str, Any]) -> bool:
+    minimum = float(thresholds.get("min_profit_factor_lower") or DEFAULT_MIN_PROFIT_FACTOR_LOWER)
+    if minimum <= 0:
+        return False
+    if stats["trade_count"] < max(int(thresholds["min_samples"]), DEFAULT_TIME_SPLIT_MIN_SAMPLES):
+        return False
+    lower = stats.get("profit_factor_lower")
+    return lower is None or float(lower) < minimum
+
+
+def _wilson_lower_bound(wins: int, total: int, *, z: float = CONFIDENCE_Z) -> float | None:
+    if total <= 0:
+        return None
+    p = wins / total
+    denominator = 1 + z * z / total
+    centre = p + z * z / (2 * total)
+    margin = z * sqrt((p * (1 - p) + z * z / (4 * total)) / total)
+    return max(0.0, (centre - margin) / denominator)
+
+
+def _mean_confidence_bounds(values: list[float], *, z: float = CONFIDENCE_Z) -> tuple[float | None, float | None]:
+    if not values:
+        return None, None
+    avg = mean(values)
+    if len(values) < 2:
+        return avg, avg
+    variance = sum((value - avg) ** 2 for value in values) / (len(values) - 1)
+    margin = z * sqrt(variance / len(values))
+    return avg - margin, avg + margin
+
+
+def _profit_factor_lower_bound(wins: list[float], losses: list[float]) -> float | None:
+    if not wins and not losses:
+        return None
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    avg_win = mean(wins) if wins else 0.0
+    avg_loss = abs(mean(losses)) if losses else 0.0
+    sample_count = len(wins) + len(losses)
+    win_shrink = len(wins) / (len(wins) + 2) if wins else 0.0
+    adjusted_win = max(gross_win * win_shrink, 0.0)
+    pseudo_loss = max(avg_loss, avg_win, abs(gross_win) / max(sample_count, 1), 1e-12)
+    adjusted_loss = gross_loss + pseudo_loss * 2
+    return adjusted_win / adjusted_loss if adjusted_loss else None
+
+
+def _reliability_score(
+    *,
+    trade_count: int,
+    avg_return_lower: float | None,
+    profit_factor_lower: float | None,
+    win_rate_lower: float | None,
+) -> float | None:
+    if trade_count <= 0:
+        return None
+    return (
+        min(trade_count / 100.0, 1.0) * 0.25
+        + max(avg_return_lower or 0.0, 0.0) * 25.0
+        + min(max((profit_factor_lower or 0.0) / 2.0, 0.0), 1.0) * 0.35
+        + min(max(win_rate_lower or 0.0, 0.0), 1.0) * 0.15
+    )
 
 
 def _arm_edge(candidate: dict[str, Any], control: dict[str, Any]) -> dict[str, Any]:
@@ -1002,11 +1160,14 @@ def _thresholds(
     market_window_hours: int = DEFAULT_MARKET_WINDOW_HOURS,
     max_same_return_samples: int = DEFAULT_MAX_SAME_RETURN_SAMPLES,
     max_return_cluster_ratio: float = DEFAULT_MAX_RETURN_CLUSTER_RATIO,
+    min_profit_factor_lower: float = DEFAULT_MIN_PROFIT_FACTOR_LOWER,
+    time_split_min_samples: int = DEFAULT_TIME_SPLIT_MIN_SAMPLES,
 ) -> dict[str, Any]:
     return {
         "min_samples": int(min_samples),
         "min_win_rate": float(min_win_rate),
         "min_profit_factor": float(min_profit_factor),
+        "min_profit_factor_lower": float(min_profit_factor_lower),
         "min_avg_return": float(min_avg_return),
         "segment_min_samples": int(segment_min_samples),
         "min_segments": int(min_segments),
@@ -1019,6 +1180,7 @@ def _thresholds(
         "market_window_hours": max(1, min(24, int(market_window_hours))),
         "max_same_return_samples": max(1, int(max_same_return_samples)),
         "max_return_cluster_ratio": float(max_return_cluster_ratio),
+        "time_split_min_samples": max(1, int(time_split_min_samples)),
     }
 
 
@@ -1190,6 +1352,8 @@ def _segment_candidate_feature_summary(rows: list[dict[str, Any]]) -> list[dict[
                 "raw_sample_count": total_raw_samples,
                 "weighted_avg_return": weighted_return,
                 "weighted_win_rate": weighted_win_rate,
+                "weighted_profit_factor_lower": _weighted_mean(items, "profit_factor_lower", "sample_count"),
+                "weighted_reliability_score": _weighted_mean(items, "reliability_score", "sample_count"),
                 "overfit_risk": _combined_overfit_risk(items),
                 "segments": [row["symbol_timeframe"] for row in items[:12]],
                 "used_for_execution_weights": False,
@@ -1198,7 +1362,13 @@ def _segment_candidate_feature_summary(rows: list[dict[str, Any]]) -> list[dict[
         )
     return sorted(
         summary,
-        key=lambda row: (row["weighted_avg_return"] or -999.0, row["weighted_win_rate"] or 0.0, row["sample_count"]),
+        key=lambda row: (
+            row["weighted_reliability_score"] or -999.0,
+            row["weighted_profit_factor_lower"] or -999.0,
+            row["weighted_avg_return"] or -999.0,
+            row["weighted_win_rate"] or 0.0,
+            row["sample_count"],
+        ),
         reverse=True,
     )
 

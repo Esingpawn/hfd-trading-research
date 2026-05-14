@@ -545,3 +545,71 @@ async def test_segment_paper_ab_is_report_only_and_uses_matched_controls(session
     assert paper_count == 0
     assert experiment is not None
     assert experiment.status == "research"
+
+
+@pytest.mark.asyncio
+async def test_feature_candidate_reports_conservative_profit_factor_lower(session) -> None:
+    await add_labeled_feature(
+        session,
+        feature_name="liquidity_vacuum",
+        subtype="gap_up",
+        returns=[0.01] * 30,
+        event_spacing_minutes=31,
+    )
+    await add_labeled_feature(
+        session,
+        feature_name="liquidity_vacuum",
+        subtype="gap_up",
+        returns=[0.01] * 30,
+        symbol="ETHUSDT",
+        event_spacing_minutes=31,
+    )
+    await session.commit()
+
+    report = await feature_candidate_screen(
+        session,
+        horizon="30m",
+        min_samples=30,
+        min_win_rate=0.6,
+        min_profit_factor=1.2,
+        segment_min_samples=30,
+        min_segments=2,
+    )
+    row = report["candidates"][0]
+
+    assert row["profit_factor"] == 999.0
+    assert row["profit_factor_lower"] < row["profit_factor"]
+    assert row["win_rate_lower"] < row["win_rate"]
+    assert row["reliability_score"] is not None
+
+
+@pytest.mark.asyncio
+async def test_segment_candidate_reports_time_split_validation(session) -> None:
+    returns = [0.01] * 27 + [-0.02, -0.02, -0.02]
+    await add_labeled_feature(
+        session,
+        feature_name="inst_choch",
+        subtype="late_decay",
+        returns=returns,
+        event_spacing_minutes=31,
+    )
+    await session.commit()
+
+    report = await feature_segment_candidate_screen(
+        session,
+        horizon="30m",
+        min_samples=30,
+        min_win_rate=0.6,
+        min_profit_factor=1.2,
+        min_unique_time_buckets=3,
+        min_unique_event_days=1,
+        min_unique_market_windows=1,
+        min_unique_collection_runs=1,
+        max_same_return_samples=30,
+        max_return_cluster_ratio=1.0,
+    )
+    row = report["all_segments"][0]
+
+    assert row["time_split"]["status"] == "decayed"
+    assert "decayed" in row["rejection_reasons"]
+    assert row["time_split"]["splits"]["recent"]["avg_return"] < 0

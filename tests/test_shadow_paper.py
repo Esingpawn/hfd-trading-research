@@ -93,3 +93,80 @@ async def test_mark_shadow_paper_trades_closes_take_profit(session) -> None:
     assert stored.status == "closed"
     assert stats["closed_trades"] == 1
     assert stats["policy"]["opens_live_orders"] is False
+
+
+@pytest.mark.asyncio
+async def test_shadow_paper_stats_groups_by_candidate(session) -> None:
+    opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            ShadowPaperTrade(
+                strategy_name="shadow_feature_candidates_v1",
+                candidate_type="segment_candidate",
+                candidate_key="candidate-a",
+                signal_key="signal-a1",
+                symbol="BTCUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=100.0,
+                stop_loss=99.0,
+                take_profit=102.0,
+                position_size=1.0,
+                status="closed",
+                exit_price=102.0,
+                exit_reason="take_profit",
+                pnl=0.02,
+                opened_at=opened_at,
+                closed_at=opened_at,
+                context={},
+            ),
+            ShadowPaperTrade(
+                strategy_name="shadow_feature_candidates_v1",
+                candidate_type="segment_candidate",
+                candidate_key="candidate-a",
+                signal_key="signal-a2",
+                symbol="BTCUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=100.0,
+                stop_loss=99.0,
+                take_profit=102.0,
+                position_size=1.0,
+                status="closed",
+                exit_price=99.0,
+                exit_reason="stop_loss",
+                pnl=-0.01,
+                opened_at=opened_at,
+                closed_at=opened_at,
+                context={},
+            ),
+            ShadowPaperTrade(
+                strategy_name="shadow_feature_candidates_v1",
+                candidate_type="observation_segment",
+                candidate_key="candidate-b",
+                signal_key="signal-b1",
+                symbol="ETHUSDT",
+                timeframe="short",
+                direction="short",
+                entry_price=100.0,
+                stop_loss=101.0,
+                take_profit=98.0,
+                position_size=1.0,
+                status="open",
+                opened_at=opened_at,
+                context={},
+            ),
+        ]
+    )
+    await session.commit()
+
+    stats = await shadow_paper_stats(session)
+    candidate_a = next(item for item in stats["by_candidate"] if item["candidate_key"] == "candidate-a")
+
+    assert stats["total_trades"] == 3
+    assert stats["closed_trades"] == 2
+    assert candidate_a["total_trades"] == 2
+    assert candidate_a["closed_trades"] == 2
+    assert candidate_a["win_rate"] == 0.5
+    assert candidate_a["profit_factor"] == 2.0
+    assert stats["by_symbol"][0]["symbol"] in {"BTCUSDT", "ETHUSDT"}

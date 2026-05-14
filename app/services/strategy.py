@@ -400,6 +400,19 @@ def _entry_plan(
     created_at = datetime.now(timezone.utc)
     valid_until = created_at + timedelta(minutes=ENTRY_PLAN_VALID_MINUTES)
     reference = _entry_reference_price(direction, price, execution_zone)
+    risk_reward = _risk_reward_ratio(direction, reference, stop_loss, take_profit)
+    frozen_snapshot = {
+        "symbol": symbol,
+        "direction": direction,
+        "asset_tier": asset_tier,
+        "signal_price": price,
+        "entry_reference_price": reference,
+        "entry_range": {"lower": execution_zone.get("lower"), "upper": execution_zone.get("upper")},
+        "cost_range": {"lower": entry_zone.get("lower"), "upper": entry_zone.get("upper")},
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "risk_reward_ratio": risk_reward,
+    }
     return {
         "kind": "snapshot_trade_plan",
         "symbol": symbol,
@@ -413,10 +426,15 @@ def _entry_plan(
         "entry_reference_price": reference,
         "entry_lower": execution_zone.get("lower"),
         "entry_upper": execution_zone.get("upper"),
+        "entry_range": frozen_snapshot["entry_range"],
         "cost_lower": entry_zone.get("lower"),
         "cost_upper": entry_zone.get("upper"),
+        "cost_range": frozen_snapshot["cost_range"],
         "stop_loss": stop_loss,
         "take_profit": take_profit,
+        "risk_reward_ratio": risk_reward,
+        "frozen_snapshot": frozen_snapshot,
+        "used_for_outcome_tracking": True,
         "plan_key": _plan_key(direction, reference, execution_zone, stop_loss, take_profit),
         "invalidates_when": [
             "price leaves entry_lower/entry_upper",
@@ -434,6 +452,20 @@ def _entry_reference_price(direction: str, price: float, execution_zone: dict[st
     if isinstance(lower, (int, float)) and isinstance(upper, (int, float)) and lower <= upper:
         return min(max(price, float(lower)), float(upper))
     return price
+
+
+def _risk_reward_ratio(direction: str, reference: float, stop_loss: Any, take_profit: Any) -> float | None:
+    if not isinstance(stop_loss, (int, float)) or not isinstance(take_profit, (int, float)):
+        return None
+    risk = abs(reference - float(stop_loss))
+    reward = abs(float(take_profit) - reference)
+    if risk <= 0:
+        return None
+    if direction == "long" and not (float(stop_loss) < reference < float(take_profit)):
+        return None
+    if direction == "short" and not (float(take_profit) < reference < float(stop_loss)):
+        return None
+    return reward / risk
 
 
 def _plan_key(direction: str, reference: float, execution_zone: dict[str, Any], stop_loss: Any, take_profit: Any) -> str:
