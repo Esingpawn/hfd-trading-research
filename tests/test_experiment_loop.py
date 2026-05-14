@@ -176,6 +176,65 @@ async def test_experiment_backfill_can_materialize_research_reports(session) -> 
 
 
 @pytest.mark.asyncio
+async def test_experiment_backfill_skips_fresh_research_reports(session) -> None:
+    observed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index, symbol in enumerate(["BTCUSDT", "ETHUSDT"]):
+        session.add(
+            SignalSnapshot(
+                symbol=symbol,
+                asset_tier="core",
+                timeframe="short",
+                interval="30m",
+                indicator="inst_choch",
+                endpoint="/api/pro/pro_data",
+                raw_payload={
+                    "klines": [[1_700_000_000_000, 100, 100, 99, 101, 10]],
+                    "inst_choch": [
+                        {"timestamp": 1_700_000_000_000, "price": 100.0, "type": "CHoCH_Bullish"},
+                    ],
+                },
+                summary_payload={},
+                collected_at=observed_at + timedelta(minutes=index),
+            )
+        )
+    session.add_all(
+        [
+            PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=observed_at),
+            PriceSnapshot(symbol="BTCUSDT", price=101.0, raw_payload={}, collected_at=observed_at + timedelta(minutes=30)),
+            PriceSnapshot(symbol="ETHUSDT", price=100.0, raw_payload={}, collected_at=observed_at),
+            PriceSnapshot(symbol="ETHUSDT", price=101.0, raw_payload={}, collected_at=observed_at + timedelta(minutes=30)),
+        ]
+    )
+    await session.commit()
+
+    first = await run_experiment_backfill(
+        session,
+        signal_limit=10,
+        feature_limit=10,
+        feature_label_limit=10,
+        feature_horizons=["30m"],
+        include_research_reports=True,
+        research_report_min_samples=1,
+        research_report_limit=100,
+    )
+    second = await run_experiment_backfill(
+        session,
+        signal_limit=10,
+        feature_limit=10,
+        feature_label_limit=10,
+        feature_horizons=["30m"],
+        include_research_reports=True,
+        research_report_min_samples=1,
+        research_report_limit=100,
+        research_report_max_age_seconds=3600,
+    )
+
+    assert first["research_reports"]["generated_count"] == 4
+    assert second["research_reports"]["status"] == "skipped"
+    assert second["research_reports"]["skip_reason"] == "research_reports_fresh"
+
+
+@pytest.mark.asyncio
 async def test_experiment_backfill_can_maintain_shadow_paper(session) -> None:
     observed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     for index, symbol in enumerate(["BTCUSDT", "ETHUSDT"]):

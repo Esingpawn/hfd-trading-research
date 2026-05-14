@@ -30,6 +30,16 @@ def test_postgres_has_shared_memory_for_research_reports() -> None:
     assert "work_mem=16MB" in block
 
 
+def test_experiment_worker_uses_guarded_research_report_interval() -> None:
+    compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
+    block = _service_block(compose_text, "experiment-worker")
+
+    assert "--research-report-interval-seconds" in block
+    assert '      - "3600"' in block
+    assert "--research-report-limit" in block
+    assert '      - "5000"' in block
+
+
 def _service_block(compose_text: str, service_name: str) -> str:
     lines = compose_text.splitlines()
     start = next(index for index, line in enumerate(lines) if line == f"  {service_name}:")

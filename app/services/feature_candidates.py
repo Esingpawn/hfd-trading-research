@@ -39,8 +39,15 @@ DEFAULT_SEGMENT_COVERAGE_TARGET = 30
 DEFAULT_RESEARCH_QUERY_MAX_LIMIT = 5000
 DEFAULT_RESEARCH_REPORT_MAX_LIMIT = DEFAULT_RESEARCH_QUERY_MAX_LIMIT
 DEFAULT_RESEARCH_REPORT_STATEMENT_TIMEOUT_MS = 45000
+DEFAULT_RESEARCH_REPORT_MAX_AGE_SECONDS = 3600
 RESEARCH_REPORT_ADVISORY_LOCK_ID = 78234901
 CONFIDENCE_Z = 1.96
+DEFAULT_RESEARCH_REPORT_NAMES = (
+    "feature_candidates",
+    "feature_paper_ab",
+    "feature_segment_candidates",
+    "feature_segment_paper_ab",
+)
 
 
 @dataclass(frozen=True)
@@ -678,12 +685,29 @@ async def generate_default_research_reports(
     horizon: str = "30m",
     min_samples: int = DEFAULT_MIN_SAMPLES,
     limit: int = 5000,
+    max_age_seconds: int | None = None,
 ) -> dict[str, Any]:
     requested_limit = int(limit)
     limit = _bounded_research_limit(requested_limit)
     reports: dict[str, Any] = {}
     errors: list[dict[str, str]] = []
     _validate_horizon(horizon)
+    freshness = await research_report_freshness(session, horizon=horizon, max_age_seconds=max_age_seconds)
+    if freshness["fresh"]:
+        return {
+            "enabled": True,
+            "status": "skipped",
+            "skip_reason": "research_reports_fresh",
+            "horizon": horizon,
+            "min_samples": min_samples,
+            "requested_limit": requested_limit,
+            "limit": limit,
+            "generated_count": 0,
+            "error_count": 0,
+            "errors": [],
+            "freshness": freshness,
+            "reports": {},
+        }
     lock_acquired = await _try_research_report_lock(session)
     if not lock_acquired:
         return {
@@ -697,6 +721,7 @@ async def generate_default_research_reports(
             "generated_count": 0,
             "error_count": 0,
             "errors": [],
+            "freshness": freshness,
             "reports": {},
         }
     await _set_research_statement_timeout(session)
@@ -781,7 +806,56 @@ async def generate_default_research_reports(
         "generated_count": len(reports),
         "error_count": len(errors),
         "errors": errors,
+        "freshness": await research_report_freshness(session, horizon=horizon, max_age_seconds=max_age_seconds),
         "reports": {name: _report_summary(report) for name, report in reports.items()},
+    }
+
+
+async def research_report_freshness(
+    session: AsyncSession,
+    *,
+    horizon: str = "30m",
+    max_age_seconds: int | None = None,
+) -> dict[str, Any]:
+    _validate_horizon(horizon)
+    max_age = int(max_age_seconds or DEFAULT_RESEARCH_REPORT_MAX_AGE_SECONDS)
+    now = datetime.now(timezone.utc)
+    names = [f"{name}_{horizon}" for name in DEFAULT_RESEARCH_REPORT_NAMES]
+    rows = await session.execute(
+        select(ExperimentRun.name, func.max(ExperimentRun.created_at))
+        .where(ExperimentRun.name.in_(names), ExperimentRun.status == "research")
+        .group_by(ExperimentRun.name)
+    )
+    generated_at = {str(name): created_at for name, created_at in rows.all() if created_at is not None}
+    reports: dict[str, dict[str, Any]] = {}
+    missing: list[str] = []
+    stale: list[str] = []
+    oldest_age = 0.0
+    for name in names:
+        short_name = name.removesuffix(f"_{horizon}")
+        created_at = generated_at.get(name)
+        if created_at is None:
+            missing.append(short_name)
+            reports[short_name] = {"generated_at": None, "age_seconds": None, "fresh": False}
+            continue
+        age = max(0.0, (now - _aware(created_at)).total_seconds())
+        oldest_age = max(oldest_age, age)
+        is_fresh = age <= max_age
+        if not is_fresh:
+            stale.append(short_name)
+        reports[short_name] = {
+            "generated_at": created_at,
+            "age_seconds": age,
+            "fresh": is_fresh,
+        }
+    return {
+        "horizon": horizon,
+        "max_age_seconds": max_age,
+        "fresh": not missing and not stale,
+        "missing": missing,
+        "stale": stale,
+        "oldest_age_seconds": oldest_age if generated_at else None,
+        "reports": reports,
     }
 
 

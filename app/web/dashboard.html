@@ -889,6 +889,7 @@
         <button onclick="collectCore(false)" title="立即采集评分必需的核心指标，会写入数据库">采集核心</button>
         <button onclick="collectFull(false)" title="立即采集研究指标，会写入数据库">采集研究</button>
         <button onclick="collectExperiments(false)" title="采集实验指标，只进入研究矩阵，不影响开仓或权重">采集实验</button>
+        <button onclick="queueResearchReportRefresh()" title="排队刷新候选特征和 A/B 研究报表，不阻塞面板">刷新研究报告</button>
         <button onclick="paperScan(true)" title="只预演纸上扫描，不写入新交易">扫描预演</button>
         <button onclick="paperScan(false)" title="执行纸上扫描，满足条件时写入模拟交易，不接实盘">执行纸上</button>
         <button onclick="markTrades()" title="用最新价格更新模拟持仓，并顺带回填归因标签">更新持仓</button>
@@ -1237,6 +1238,7 @@
       featurePaperAb: null,
       featureSegmentCandidates: null,
       featureSegmentPaperAb: null,
+      researchRefresh: null,
       shadowPaperStats: null,
       shadowPaperTrades: [],
       selectedSymbol: null,
@@ -1449,6 +1451,19 @@
       if (seconds < 3600) return Math.floor(seconds / 60) + " 分钟前";
       if (seconds < 86400) return Math.floor(seconds / 3600) + " 小时前";
       return Math.floor(seconds / 86400) + " 天前";
+    }
+
+    function researchReportMeta(report) {
+      if (!report || !report.materialized) return `<span class="amber">未生成</span>`;
+      return `<span class="green">${esc(timeAgo(report.generated_at))}</span>`;
+    }
+
+    function researchLimitMeta(report) {
+      if (!report) return "--";
+      const requested = report.requested_limit;
+      const limit = report.limit;
+      if (report.limit_capped) return `<span class="amber">${fmt(limit, 0)} / ${fmt(requested, 0)}</span>`;
+      return fmt(limit, 0);
     }
 
     function table(rows, columns, emptyText) {
@@ -2081,6 +2096,8 @@
       setHtml("featureCandidatesSummary", kvRows([
         ["窗口", esc(featureCandidates.horizon || "30m")],
         ["已标注", fmt(featureCandidates.labeled_count || 0, 0)],
+        ["更新时间", researchReportMeta(featureCandidates)],
+        ["样本上限", researchLimitMeta(featureCandidates)],
         ["候选", fmt(featureCandidates.candidate_count || 0, 0)],
         ["观察", fmt(featureCandidates.watchlist_count || 0, 0)],
         ["保守 PF 门槛", fmt((featureCandidates.thresholds || {}).min_profit_factor_lower, 2)]
@@ -2115,6 +2132,8 @@
       setHtml("featureSegmentCandidatesSummary", kvRows([
         ["窗口", esc(featureSegmentCandidates.horizon || "30m")],
         ["已标注", fmt(featureSegmentCandidates.labeled_count || 0, 0)],
+        ["更新时间", researchReportMeta(featureSegmentCandidates)],
+        ["样本上限", researchLimitMeta(featureSegmentCandidates)],
         ["有效/原始", `${fmt((featureSegmentCandidates.quality_summary || {}).effective_sample_count || 0, 0)} / ${fmt((featureSegmentCandidates.quality_summary || {}).raw_sample_count || 0, 0)}`],
         ["去重比例", pct((featureSegmentCandidates.quality_summary || {}).dedupe_ratio, 1)],
         ["最大覆盖", `${fmt((featureSegmentCandidates.quality_summary || {}).max_unique_event_day_count || 0, 0)}天 / ${fmt((featureSegmentCandidates.quality_summary || {}).max_unique_market_window_count || 0, 0)}窗 / ${fmt((featureSegmentCandidates.quality_summary || {}).max_unique_collection_run_count || 0, 0)}轮`],
@@ -2464,6 +2483,20 @@
         await refreshAll();
       } catch (error) {
         log("实验指标采集失败：" + error.message);
+      }
+    }
+
+    async function queueResearchReportRefresh() {
+      try {
+        log("正在排队刷新研究报告...");
+        const data = await api("/features/research-reports/refresh?horizon=30m&min_samples=30&limit=100000", { method:"POST" });
+        state.researchRefresh = data;
+        const status = data.status === "already_running" ? "已有刷新任务运行中" : "刷新任务已入队";
+        const cap = data.limit_capped ? `，请求 ${fmt(data.requested_limit, 0)} 已截断` : "";
+        log(`${status}：${data.task_run_id || "--"}；实际样本上限 ${fmt(data.limit, 0)}${cap}。稍后读取最新报表。`);
+        setTimeout(refreshResearchReports, 8000);
+      } catch (error) {
+        log("研究报告刷新入队失败：" + error.message);
       }
     }
 

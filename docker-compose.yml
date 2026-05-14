@@ -139,6 +139,10 @@ services:
       - "500"
       - --interval-seconds
       - "300"
+      - --research-report-interval-seconds
+      - "3600"
+      - --research-report-limit
+      - "5000"
     depends_on:
       db-init:
         condition: service_completed_successfully

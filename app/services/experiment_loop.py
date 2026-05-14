@@ -25,6 +25,7 @@ async def run_experiment_backfill(
     research_report_horizon: str = "30m",
     research_report_min_samples: int = 30,
     research_report_limit: int = 5000,
+    research_report_max_age_seconds: int | None = None,
     include_shadow_paper: bool = False,
     shadow_candidate_limit: int = 20,
     shadow_include_watchlist: bool = True,
@@ -66,6 +67,7 @@ async def run_experiment_backfill(
             horizon=research_report_horizon,
             min_samples=research_report_min_samples,
             limit=research_report_limit,
+            max_age_seconds=research_report_max_age_seconds,
         )
     if include_shadow_paper:
         payload["shadow_paper"] = {

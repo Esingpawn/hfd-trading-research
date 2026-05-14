@@ -13,6 +13,7 @@ from app.services.feature_candidates import (
     feature_segment_paper_ab,
     generate_default_research_reports,
     latest_feature_candidate_screen,
+    research_report_freshness,
 )
 
 
@@ -781,6 +782,27 @@ async def test_generate_default_research_reports_caps_requested_limit(session) -
     assert result["reports"]["feature_candidates"]["requested_limit"] == 999999
     assert result["reports"]["feature_candidates"]["limit"] == 5000
     assert result["reports"]["feature_candidates"]["limit_capped"] is True
+
+
+@pytest.mark.asyncio
+async def test_generate_default_research_reports_skips_when_reports_are_fresh(session) -> None:
+    await add_labeled_feature(
+        session,
+        feature_name="inst_choch",
+        subtype="CHoCH_Bullish",
+        returns=[0.012] * 8,
+    )
+    await session.commit()
+
+    first = await generate_default_research_reports(session, horizon="30m", min_samples=6, limit=100)
+    second = await generate_default_research_reports(session, horizon="30m", min_samples=6, limit=100)
+    freshness = await research_report_freshness(session, horizon="30m")
+
+    assert first["generated_count"] == 4
+    assert second["status"] == "skipped"
+    assert second["skip_reason"] == "research_reports_fresh"
+    assert second["generated_count"] == 0
+    assert freshness["fresh"] is True
 
 
 @pytest.mark.asyncio

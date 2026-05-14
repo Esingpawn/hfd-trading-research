@@ -1149,6 +1149,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
                             research_report_horizon="30m",
                             research_report_min_samples=args.research_report_min_samples,
                             research_report_limit=args.research_report_limit,
+                            research_report_max_age_seconds=args.research_report_interval_seconds,
                             include_shadow_paper=include_shadow_paper,
                             shadow_candidate_limit=args.shadow_paper_candidate_limit,
                             shadow_include_watchlist=not args.shadow_paper_strict_only,
