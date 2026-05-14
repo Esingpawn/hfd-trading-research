@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -39,6 +40,8 @@ router = APIRouter()
 _REPORT_CACHE_SECONDS = 300.0
 _REPORT_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, object]]] = {}
 _RESEARCH_REFRESH_ACTIVE_STATUSES = {"queued", "recorded", "running"}
+_RESEARCH_REFRESH_QUEUED_GRACE_SECONDS = 120
+_RESEARCH_REFRESH_RUNNING_GRACE_SECONDS = 3600
 
 
 @router.post("/signals/backfill")
@@ -591,6 +594,22 @@ async def _active_research_report_task(session: SessionDep, *, horizon: str) -> 
     )
     for item in rows.scalars():
         payload = item.payload or {}
-        if str(payload.get("horizon") or "30m") == horizon:
+        if str(payload.get("horizon") or "30m") == horizon and _is_active_research_task(item):
             return item
     return None
+
+
+def _is_active_research_task(item: TaskRun) -> bool:
+    now = datetime.now(timezone.utc)
+    if item.status == "running":
+        started_at = item.started_at or item.queued_at
+        return _aware(started_at) >= now - timedelta(seconds=_RESEARCH_REFRESH_RUNNING_GRACE_SECONDS)
+    if item.status in {"queued", "recorded"}:
+        return _aware(item.queued_at) >= now - timedelta(seconds=_RESEARCH_REFRESH_QUEUED_GRACE_SECONDS)
+    return False
+
+
+def _aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)

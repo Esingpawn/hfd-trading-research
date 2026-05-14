@@ -361,6 +361,26 @@ async def test_refresh_research_reports_reuses_active_task(session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_refresh_research_reports_ignores_stale_queued_task(session) -> None:
+    existing = TaskRun(
+        task_name="features.research_reports",
+        status="queued",
+        payload={"horizon": "30m", "min_samples": 30, "limit": 5000},
+        result={},
+        queued_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+    )
+    session.add(existing)
+    await session.commit()
+
+    result = await refresh_research_reports(session, horizon="30m", min_samples=30, limit=100000)
+    tasks = await session.execute(select(TaskRun).where(TaskRun.task_name == "features.research_reports"))
+
+    assert result["status"] == "recorded"
+    assert result["task_run_id"] != existing.id
+    assert len(tasks.scalars().all()) == 2
+
+
+@pytest.mark.asyncio
 async def test_run_task_by_id_executes_data_quality_report(session) -> None:
     item = TaskRun(task_name="data_quality.report", payload={}, result={})
     session.add(item)
