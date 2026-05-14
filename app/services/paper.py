@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CollectionRun, PaperTrade, PriceSnapshot, StrategyDecision
 from app.services.entry_plan import entry_plan_compatibility, entry_plan_is_expired
+from app.services.risk import template_for_tier
 from app.services.strategy import evaluate_symbol
 from app.services.signal_attribution import backfill_signal_outcomes
 from app.services.telegram import TelegramClient
@@ -19,6 +20,8 @@ RUNNER_SYMBOLS = {"DOGEUSDT", "HYPEUSDT", "ZECUSDT"}
 RUNNER_LOCK_FRACTION = 0.45
 RUNNER_EXTENSION_FRACTION = 0.35
 RUNNER_MIN_EXTENSION_PCT = 0.012
+RUNNER_EVIDENCE_MAX_AGE_MINUTES = 120
+RUNNER_EVIDENCE_MIN_SCORE = 5.0
 
 
 @dataclass
@@ -169,7 +172,14 @@ async def mark_open_trades(session: AsyncSession) -> dict[str, Any]:
         trade.mae = min(trade.mae, pnl)
         previous_stop_loss = trade.stop_loss
         previous_take_profit = trade.take_profit
-        exit_reason = _exit_reason(trade, price)
+        exit_reason = _stop_exit_reason(trade, price)
+        runner_decision: dict[str, Any] | None = None
+        if exit_reason is None and _take_profit_touched(trade, price):
+            runner_decision = await _take_profit_runner_decision(session, trade, price)
+            if runner_decision["extend"]:
+                _extend_take_profit_runner(trade, price)
+            else:
+                exit_reason = "take_profit"
         if exit_reason:
             trade.status = "closed"
             trade.exit_price = price
@@ -186,6 +196,7 @@ async def mark_open_trades(session: AsyncSession) -> dict[str, Any]:
                 payload.update(
                     {
                         "runner_extended": True,
+                        "runner_evidence": runner_decision,
                         "stop_loss": trade.stop_loss,
                         "take_profit": trade.take_profit,
                         "previous_stop_loss": previous_stop_loss,
@@ -371,8 +382,6 @@ def _exit_reason(trade: PaperTrade, price: float) -> str | None:
     if stop_reason:
         return stop_reason
     if _take_profit_touched(trade, price):
-        if _extend_take_profit_runner(trade, price):
-            return None
         return "take_profit"
     return None
 
@@ -395,33 +404,131 @@ def _take_profit_touched(trade: PaperTrade, price: float) -> bool:
     return False
 
 
-def _extend_take_profit_runner(trade: PaperTrade, price: float) -> bool:
-    if not _runner_enabled(trade):
-        return False
+async def _take_profit_runner_decision(session: AsyncSession, trade: PaperTrade, price: float) -> dict[str, Any]:
+    if not _runner_asset_eligible(trade):
+        return _runner_decision(False, blockers=["asset_not_runner_eligible"])
     if trade.entry_price <= 0 or price <= 0:
-        return False
+        return _runner_decision(False, blockers=["invalid_price"])
     if trade.direction == "long" and price <= trade.entry_price:
-        return False
+        return _runner_decision(False, blockers=["not_profitable"])
     if trade.direction == "short" and price >= trade.entry_price:
+        return _runner_decision(False, blockers=["not_profitable"])
+
+    decision = await _latest_runner_decision(session, trade)
+    if decision is None:
+        return _runner_decision(False, blockers=["missing_fresh_strategy_decision"])
+    evidence = _runner_evidence_from_decision(decision, trade)
+    return _runner_decision(
+        evidence["score"] >= RUNNER_EVIDENCE_MIN_SCORE
+        and not evidence["blockers"]
+        and (evidence["signals"].get("dark_flow_target") or evidence["signals"].get("trend_aligned"))
+        and (evidence["signals"].get("liquidity_context") or evidence["signals"].get("orderflow_confirmed")),
+        score=evidence["score"],
+        signals=evidence["signals"],
+        blockers=evidence["blockers"],
+        decision_id=decision.id,
+        decision_created_at=decision.created_at.isoformat() if decision.created_at else None,
+    )
+
+
+async def _latest_runner_decision(session: AsyncSession, trade: PaperTrade) -> StrategyDecision | None:
+    latest = await _latest_decision(session, trade.symbol)
+    if latest and _fresh_runner_decision(latest):
+        return latest
+    opening = await session.get(StrategyDecision, trade.strategy_decision_id)
+    if opening and _fresh_runner_decision(opening):
+        return opening
+    return None
+
+
+def _runner_evidence_from_decision(decision: StrategyDecision, trade: PaperTrade) -> dict[str, Any]:
+    risk = decision.risk_payload or {}
+    reason = decision.reason or {}
+    rules = set(reason.get("rules") or [])
+    gate = risk.get("execution_gate") or {}
+    target_source = str(risk.get("target_source") or "")
+    min_score = float(risk.get("min_score") or template_for_tier(trade.asset_tier).min_score)
+    signals = {
+        "same_direction": decision.direction == trade.direction,
+        "fresh": _fresh_runner_decision(decision),
+        "score_above_minimum": float(decision.score or 0.0) >= min_score,
+        "execution_ready": bool(gate.get("ready")) or decision.decision == "open",
+        "dark_flow_target": bool(target_source and target_source != "risk_reward_template"),
+        "trend_aligned": {"long_term_direction", "mid_term_aligned", "short_term_aligned"}.issubset(rules),
+        "liquidity_context": "liquidity_context_present" in rules,
+        "orderflow_confirmed": "orderflow_present" in rules,
+        "exhaustion_filter_present": "exhaustion_present" in rules,
+    }
+    blockers: list[str] = []
+    if not signals["same_direction"]:
+        blockers.append("latest_direction_changed")
+    if not signals["fresh"]:
+        blockers.append("latest_decision_stale")
+    score = (
+        (1.5 if signals["same_direction"] else 0.0)
+        + (1.0 if signals["fresh"] else 0.0)
+        + (1.0 if signals["score_above_minimum"] else 0.0)
+        + (1.25 if signals["execution_ready"] else 0.0)
+        + (1.25 if signals["dark_flow_target"] else 0.0)
+        + (1.25 if signals["trend_aligned"] else 0.0)
+        + (0.9 if signals["liquidity_context"] else 0.0)
+        + (0.9 if signals["orderflow_confirmed"] else 0.0)
+        + (0.4 if signals["exhaustion_filter_present"] else 0.0)
+    )
+    return {"score": round(score, 3), "signals": signals, "blockers": blockers}
+
+
+def _fresh_runner_decision(decision: StrategyDecision) -> bool:
+    if not decision.created_at:
         return False
+    age_minutes = (datetime.now(timezone.utc) - _aware(decision.created_at)).total_seconds() / 60
+    return age_minutes <= RUNNER_EVIDENCE_MAX_AGE_MINUTES
+
+
+def _runner_decision(
+    extend: bool,
+    *,
+    score: float = 0.0,
+    signals: dict[str, bool] | None = None,
+    blockers: list[str] | None = None,
+    decision_id: str | None = None,
+    decision_created_at: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "extend": extend,
+        "score": round(score, 3),
+        "min_score": RUNNER_EVIDENCE_MIN_SCORE,
+        "signals": signals or {},
+        "blockers": blockers or [],
+        "decision_id": decision_id,
+        "decision_created_at": decision_created_at,
+    }
+
+
+def _extend_take_profit_runner(trade: PaperTrade, price: float) -> None:
     profit_distance = abs(price - trade.entry_price)
     extension = max(profit_distance * RUNNER_EXTENSION_FRACTION, trade.entry_price * RUNNER_MIN_EXTENSION_PCT)
     if trade.direction == "long":
         locked_stop = trade.entry_price + profit_distance * RUNNER_LOCK_FRACTION
         trade.stop_loss = max(trade.stop_loss, locked_stop)
         trade.take_profit = max(trade.take_profit, price + extension)
-        return True
+        return
     locked_stop = trade.entry_price - profit_distance * RUNNER_LOCK_FRACTION
     trade.stop_loss = min(trade.stop_loss, locked_stop)
     trade.take_profit = min(trade.take_profit, price - extension)
-    return True
 
 
-def _runner_enabled(trade: PaperTrade) -> bool:
+def _runner_asset_eligible(trade: PaperTrade) -> bool:
     tier = str(getattr(trade, "asset_tier", "") or "")
     if tier in RUNNER_TIERS:
         return True
     return str(getattr(trade, "symbol", "") or "").upper() in RUNNER_SYMBOLS
+
+
+def _aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _journal(decision: StrategyDecision) -> dict[str, Any]:

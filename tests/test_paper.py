@@ -120,6 +120,42 @@ def paper_trade(
     )
 
 
+def runner_decision(
+    *,
+    decision_id: str,
+    symbol: str,
+    direction: str,
+    score: float,
+    created_at: datetime | None = None,
+) -> StrategyDecision:
+    return StrategyDecision(
+        id=decision_id,
+        strategy_name="strategy",
+        strategy_version="v1",
+        symbol=symbol,
+        asset_tier="high_volatility",
+        direction=direction,
+        score=score,
+        decision="open",
+        reason={
+            "rules": [
+                "long_term_direction",
+                "mid_term_aligned",
+                "short_term_aligned",
+                "liquidity_context_present",
+                "orderflow_present",
+                "exhaustion_present",
+            ]
+        },
+        risk_payload={
+            "min_score": 82,
+            "target_source": "liq_heatmap.heatmap_data",
+            "execution_gate": {"ready": True},
+        },
+        created_at=created_at or datetime.now(timezone.utc),
+    )
+
+
 @pytest.mark.asyncio
 async def test_record_paper_scan_status_updates_decision_payload() -> None:
     session = DummySession()
@@ -172,17 +208,17 @@ def test_core_trade_still_exits_at_take_profit() -> None:
     assert trade.take_profit == 104.0
 
 
-def test_high_volatility_trade_extends_first_take_profit() -> None:
+def test_high_volatility_trade_without_evidence_still_reaches_take_profit() -> None:
     trade = paper_trade(symbol="HYPEUSDT", asset_tier="high_volatility", entry=38.0, stop=37.05, target=39.52)
 
-    assert _exit_reason(trade, 39.6) is None
-    assert trade.stop_loss > 38.0
-    assert trade.take_profit > 39.6
+    assert _exit_reason(trade, 39.6) == "take_profit"
+    assert trade.stop_loss == 37.05
+    assert trade.take_profit == 39.52
 
 
 def test_high_volatility_runner_exits_on_trailing_stop() -> None:
     trade = paper_trade(symbol="HYPEUSDT", asset_tier="high_volatility", entry=38.0, stop=37.05, target=39.52)
-    assert _exit_reason(trade, 39.6) is None
+    trade.stop_loss = 38.72
     trailing_stop = trade.stop_loss
 
     assert _exit_reason(trade, trailing_stop) == "trailing_stop"
@@ -190,6 +226,14 @@ def test_high_volatility_runner_exits_on_trailing_stop() -> None:
 
 @pytest.mark.asyncio
 async def test_mark_open_trades_extends_hype_runner(db_session) -> None:
+    db_session.add(
+        runner_decision(
+            decision_id="decision-1",
+            symbol="HYPEUSDT",
+            direction="long",
+            score=91.0,
+        )
+    )
     db_session.add(
         paper_trade(symbol="HYPEUSDT", asset_tier="high_volatility", entry=38.0, stop=37.05, target=39.52)
     )
@@ -211,6 +255,38 @@ async def test_mark_open_trades_extends_hype_runner(db_session) -> None:
     assert stored.status == "open"
     assert stored.stop_loss > 38.0
     assert stored.take_profit > 39.6
+
+
+@pytest.mark.asyncio
+async def test_mark_open_trades_closes_take_profit_without_runner_evidence(db_session) -> None:
+    db_session.add(
+        runner_decision(
+            decision_id="decision-1",
+            symbol="HYPEUSDT",
+            direction="short",
+            score=91.0,
+        )
+    )
+    db_session.add(
+        paper_trade(symbol="HYPEUSDT", asset_tier="high_volatility", entry=38.0, stop=37.05, target=39.52)
+    )
+    db_session.add(
+        PriceSnapshot(
+            symbol="HYPEUSDT",
+            price=39.6,
+            raw_payload={},
+            collected_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+    )
+    await db_session.commit()
+
+    result = await mark_open_trades(db_session)
+    stored = await db_session.scalar(select(PaperTrade).where(PaperTrade.symbol == "HYPEUSDT"))
+
+    assert result["updated"] == []
+    assert result["closed"][0]["reason"] == "take_profit"
+    assert stored.status == "closed"
+    assert stored.exit_reason == "take_profit"
 
 
 @pytest.mark.asyncio
