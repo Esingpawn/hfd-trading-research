@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.application.tasks import enqueue_task, recent_tasks, run_task_by_id
+from app.application.tasks import enqueue_task, reap_stale_tasks, recent_tasks, run_task_by_id
 from app.api.routers.signals import refresh_research_reports
 from app.api.routers.tasks import _task_enqueue_payload
 from app.db import Base
@@ -82,6 +82,17 @@ def test_task_enqueue_payload_keeps_research_acceleration_limits() -> None:
     assert payload["candidate_limit"] == 5
 
 
+def test_task_enqueue_payload_keeps_stale_reaper_limits() -> None:
+    payload = _task_enqueue_payload(
+        task_name="tasks.reap_stale",
+        queued_after_seconds=120,
+        running_after_seconds=240,
+    )
+
+    assert payload["queued_after_seconds"] == 120
+    assert payload["running_after_seconds"] == 240
+
+
 @pytest.mark.asyncio
 async def test_run_task_by_id_executes_storage_maintenance(session) -> None:
     item = TaskRun(task_name="storage.maintain", payload={"indexes": True}, result={})
@@ -96,6 +107,88 @@ async def test_run_task_by_id_executes_storage_maintenance(session) -> None:
     assert stored.status == "completed"
     assert stored.finished_at is not None
     assert stored.result["execution"]["actions"]["indexes"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_run_task_by_id_skips_terminal_task(session) -> None:
+    item = TaskRun(
+        task_name="storage.maintain",
+        status="completed",
+        payload={"indexes": True},
+        result={"execution": {"status": "already_done"}},
+        finished_at=datetime.now(timezone.utc),
+    )
+    session.add(item)
+    await session.commit()
+
+    result = await run_task_by_id(session, item.id)
+
+    assert result["skipped"] is True
+    assert result["skip_reason"] == "task_already_terminal"
+
+
+@pytest.mark.asyncio
+async def test_reap_stale_tasks_marks_old_active_tasks_failed(session) -> None:
+    now = datetime.now(timezone.utc)
+    stale_running = TaskRun(
+        task_name="features.research_reports",
+        status="running",
+        payload={},
+        result={},
+        queued_at=now - timedelta(hours=2),
+        started_at=now - timedelta(hours=2),
+    )
+    stale_queued = TaskRun(
+        task_name="research.accelerate",
+        status="queued",
+        payload={},
+        result={},
+        queued_at=now - timedelta(hours=2),
+    )
+    fresh_running = TaskRun(
+        task_name="research.accelerate",
+        status="running",
+        payload={},
+        result={},
+        queued_at=now,
+        started_at=now,
+    )
+    session.add_all([stale_running, stale_queued, fresh_running])
+    await session.commit()
+
+    result = await reap_stale_tasks(session, queued_after_seconds=60, running_after_seconds=60)
+
+    assert result["reaped_count"] == 2
+    assert stale_running.status == "failed"
+    assert stale_queued.status == "failed"
+    assert fresh_running.status == "running"
+    assert "stale task reaped" in str(stale_running.error)
+    assert stale_running.result["stale_reaper"]["previous_status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_run_task_by_id_executes_stale_reaper_task(session) -> None:
+    old = TaskRun(
+        task_name="research.accelerate",
+        status="running",
+        payload={},
+        result={},
+        queued_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        started_at=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    item = TaskRun(
+        task_name="tasks.reap_stale",
+        payload={"queued_after_seconds": 60, "running_after_seconds": 60},
+        result={},
+    )
+    session.add_all([old, item])
+    await session.commit()
+
+    result = await run_task_by_id(session, item.id)
+
+    assert result["status"] == "completed"
+    assert result["result"]["execution"]["reaped_count"] == 1
+    assert old.status == "failed"
 
 
 @pytest.mark.asyncio

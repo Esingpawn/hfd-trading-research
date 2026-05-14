@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.queue import build_queue
@@ -30,6 +30,12 @@ from app.services.telegram import TelegramClient
 from app.application.storage import run_storage_maintenance
 
 
+TERMINAL_TASK_STATUSES = {"completed", "failed"}
+ACTIVE_TASK_STATUSES = {"queued", "recorded", "running"}
+DEFAULT_STALE_QUEUED_SECONDS = 30 * 60
+DEFAULT_STALE_RUNNING_SECONDS = 60 * 60
+
+
 async def enqueue_task(
     session: AsyncSession,
     *,
@@ -51,14 +57,80 @@ async def enqueue_task(
 
 
 async def recent_tasks(session: AsyncSession, *, limit: int = 50) -> list[dict[str, Any]]:
+    await reap_stale_tasks(session)
     rows = await session.execute(select(TaskRun).order_by(TaskRun.queued_at.desc()).limit(limit))
     return [task_payload(item) for item in rows.scalars()]
+
+
+async def reap_stale_tasks(
+    session: AsyncSession,
+    *,
+    queued_after_seconds: int = DEFAULT_STALE_QUEUED_SECONDS,
+    running_after_seconds: int = DEFAULT_STALE_RUNNING_SECONDS,
+) -> dict[str, Any]:
+    now = _utc_now()
+    queued_cutoff = now - timedelta(seconds=max(1, queued_after_seconds))
+    running_cutoff = now - timedelta(seconds=max(1, running_after_seconds))
+    rows = await session.execute(
+        select(TaskRun)
+        .where(
+            TaskRun.finished_at.is_(None),
+            TaskRun.status.in_(ACTIVE_TASK_STATUSES),
+            or_(
+                and_(TaskRun.status.in_({"queued", "recorded"}), TaskRun.queued_at <= queued_cutoff),
+                and_(
+                    TaskRun.status == "running",
+                    or_(
+                        and_(TaskRun.started_at.is_not(None), TaskRun.started_at <= running_cutoff),
+                        and_(TaskRun.started_at.is_(None), TaskRun.queued_at <= running_cutoff),
+                    ),
+                ),
+            ),
+        )
+        .order_by(TaskRun.queued_at)
+    )
+    stale = list(rows.scalars())
+    reaped: list[dict[str, Any]] = []
+    for item in stale:
+        previous_status = item.status
+        age_anchor = item.started_at if previous_status == "running" and item.started_at else item.queued_at
+        age_seconds = max(0.0, (now - _aware(age_anchor)).total_seconds())
+        item.status = "failed"
+        item.finished_at = now
+        item.error = item.error or f"stale task reaped after {int(age_seconds)}s in {previous_status}"
+        item.result = {
+            **dict(item.result or {}),
+            "stale_reaper": {
+                "previous_status": previous_status,
+                "age_seconds": round(age_seconds, 3),
+                "reaped_at": now.isoformat(),
+            },
+        }
+        reaped.append(
+            {
+                "id": item.id,
+                "task_name": item.task_name,
+                "previous_status": previous_status,
+                "age_seconds": round(age_seconds, 3),
+            }
+        )
+    if stale:
+        await session.commit()
+    return {
+        "status": "ok",
+        "reaped_count": len(reaped),
+        "queued_after_seconds": max(1, queued_after_seconds),
+        "running_after_seconds": max(1, running_after_seconds),
+        "reaped": reaped,
+    }
 
 
 async def run_task_by_id(session: AsyncSession, task_run_id: str) -> dict[str, Any]:
     item = await session.get(TaskRun, task_run_id)
     if item is None:
         raise ValueError(f"task_run not found: {task_run_id}")
+    if item.status in TERMINAL_TASK_STATUSES and item.finished_at is not None:
+        return {**task_payload(item), "skipped": True, "skip_reason": "task_already_terminal"}
     return await run_task_record(session, item)
 
 
@@ -159,6 +231,12 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
         return await shadow_paper_promotion_report(session)
     if task_name in {"research.accelerate", "research-accelerate"}:
         return await _research_acceleration_cycle(session, payload)
+    if task_name in {"tasks.reap_stale", "tasks-reap-stale"}:
+        return await reap_stale_tasks(
+            session,
+            queued_after_seconds=_payload_int(payload, "queued_after_seconds", DEFAULT_STALE_QUEUED_SECONDS),
+            running_after_seconds=_payload_int(payload, "running_after_seconds", DEFAULT_STALE_RUNNING_SECONDS),
+        )
     if task_name in {"signals.backfill", "signals-backfill"}:
         result = await backfill_signal_outcomes(session, limit=int(payload.get("limit") or 500))
         return result.__dict__
@@ -343,6 +421,12 @@ def task_payload(item: TaskRun) -> dict[str, Any]:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 async def _notify_task_failure(*, task_name: str, item_id: str, error: str) -> None:
