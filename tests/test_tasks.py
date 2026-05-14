@@ -65,6 +65,23 @@ def test_task_enqueue_payload_preserves_false_research_dedupe_flag() -> None:
     assert "notify" not in payload
 
 
+def test_task_enqueue_payload_keeps_research_acceleration_limits() -> None:
+    payload = _task_enqueue_payload(
+        task_name="research.accelerate",
+        feature_limit=20,
+        label_limit=50,
+        signal_limit=30,
+        report_limit=100,
+        candidate_limit=5,
+    )
+
+    assert payload["feature_limit"] == 20
+    assert payload["label_limit"] == 50
+    assert payload["signal_limit"] == 30
+    assert payload["report_limit"] == 100
+    assert payload["candidate_limit"] == 5
+
+
 @pytest.mark.asyncio
 async def test_run_task_by_id_executes_storage_maintenance(session) -> None:
     item = TaskRun(task_name="storage.maintain", payload={"indexes": True}, result={})
