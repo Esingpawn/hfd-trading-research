@@ -17,4 +17,5 @@ def test_dashboard_exposes_shadow_promotion_and_cost_model() -> None:
     assert "shadowPromotion" in html
     assert "uses_fee_and_slippage" in html
     assert "promotion_status" in html
+    assert "row.horizon" in html
     assert "最大回撤" in html

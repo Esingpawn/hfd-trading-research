@@ -6,6 +6,7 @@ from app.api.deps import SessionDep
 from app.services.shadow_paper import (
     mark_shadow_paper_trades,
     shadow_paper_promotion_report,
+    shadow_paper_replay_all,
     shadow_paper_replay,
     shadow_paper_scan,
     shadow_paper_stats,
@@ -40,6 +41,23 @@ async def run_shadow_paper_replay(
     return await shadow_paper_replay(
         session,
         horizon=horizon,
+        limit=limit,
+        candidate_limit=candidate_limit,
+        include_watchlist=include_watchlist,
+    )
+
+
+@router.post("/shadow-paper/replay-all")
+async def run_shadow_paper_replay_all(
+    session: SessionDep,
+    horizons: list[str] | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=5000),
+    candidate_limit: int = Query(default=50, ge=1, le=500),
+    include_watchlist: bool = Query(default=True),
+) -> dict[str, object]:
+    return await shadow_paper_replay_all(
+        session,
+        horizons=horizons,
         limit=limit,
         candidate_limit=candidate_limit,
         include_watchlist=include_watchlist,

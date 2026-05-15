@@ -27,6 +27,7 @@ def test_expected_api_routes_are_registered() -> None:
         ("POST", "/shadow-paper/scan"),
         ("POST", "/shadow-paper/mark"),
         ("POST", "/shadow-paper/replay"),
+        ("POST", "/shadow-paper/replay-all"),
         ("GET", "/shadow-paper/trades"),
         ("GET", "/shadow-paper/stats"),
         ("POST", "/signals/backfill"),

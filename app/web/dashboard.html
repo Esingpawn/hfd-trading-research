@@ -2200,6 +2200,7 @@
       ], "暂无影子纸上记录"));
       setHtml("shadowPaperCandidateStats", table((shadowPaperStats.by_candidate || []).slice(0, 8), [
         { label:"候选", render: row => esc(row.candidate_key) },
+        { label:"窗口", render: row => esc(row.horizon || "live") },
         { label:"币种", render: row => coinBadge(row.symbol) },
         { label:"方向", render: row => tag(row.direction, directionText(row.direction)) },
         { label:"观察/已结", render: row => `${fmt(row.total_trades || 0, 0)} / ${fmt(row.closed_trades || 0, 0)}` },

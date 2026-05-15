@@ -609,6 +609,41 @@ async def test_run_task_by_id_executes_shadow_paper_replay_without_real_paper_tr
 
 
 @pytest.mark.asyncio
+async def test_run_task_by_id_executes_shadow_paper_replay_all_without_real_paper_trade(session) -> None:
+    await _add_feature_group(session, symbol="HYPEUSDT", horizons=["30m", "1h"])
+    for horizon in ["30m", "1h"]:
+        materialize = TaskRun(
+            task_name="features.research_reports",
+            payload={"horizon": horizon, "min_samples": 6, "limit": 100},
+            result={},
+        )
+        session.add(materialize)
+        await session.commit()
+        await run_task_by_id(session, materialize.id)
+    replay = TaskRun(
+        task_name="shadow_paper.replay_all",
+        payload={"horizons": ["30m", "1h"], "limit": 10, "candidate_limit": 5},
+        result={},
+    )
+    session.add(replay)
+    await session.commit()
+
+    result = await run_task_by_id(session, replay.id)
+    shadow_rows = await session.execute(select(ShadowPaperTrade))
+    paper_rows = await session.execute(select(PaperTrade))
+
+    execution = result["result"]["execution"]
+    shadow_trades = shadow_rows.scalars().all()
+    assert result["status"] == "completed"
+    assert execution["policy"]["opens_live_orders"] is False
+    assert execution["policy"]["opens_paper_trades"] is False
+    assert execution["inserted"] >= 2
+    assert set(execution["results"]) == {"30m", "1h"}
+    assert {item.context.get("horizon") for item in shadow_trades} == {"30m", "1h"}
+    assert paper_rows.scalars().all() == []
+
+
+@pytest.mark.asyncio
 async def test_run_task_by_id_executes_research_acceleration_cycle(session) -> None:
     await _add_feature_group(session, symbol="BTCUSDT")
     await _add_feature_group(session, symbol="ETHUSDT")
@@ -657,7 +692,13 @@ async def test_run_task_by_id_records_failure(session) -> None:
     assert "unsupported task_name" in str(stored.error)
 
 
-async def _add_feature_group(session, *, symbol: str, returns: list[float] | None = None) -> None:
+async def _add_feature_group(
+    session,
+    *,
+    symbol: str,
+    returns: list[float] | None = None,
+    horizons: list[str] | None = None,
+) -> None:
     base_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
     for index, return_pct in enumerate(returns or [0.012, 0.01, 0.009, 0.008, 0.011, -0.002]):
         event = FeatureEvent(
@@ -679,15 +720,16 @@ async def _add_feature_group(session, *, symbol: str, returns: list[float] | Non
         )
         session.add(event)
         await session.flush()
-        session.add(
-            FeatureLabel(
-                feature_event_id=event.id,
-                horizon="30m",
-                return_pct=return_pct,
-                mfe=max(return_pct, 0.0),
-                mae=min(return_pct, 0.0),
-                future_price=100.0 * (1 + return_pct),
-                future_at=base_ts,
-                status="labeled",
+        for horizon in horizons or ["30m"]:
+            session.add(
+                FeatureLabel(
+                    feature_event_id=event.id,
+                    horizon=horizon,
+                    return_pct=return_pct,
+                    mfe=max(return_pct, 0.0),
+                    mae=min(return_pct, 0.0),
+                    future_price=100.0 * (1 + return_pct),
+                    future_at=base_ts,
+                    status="labeled",
+                )
             )
-        )

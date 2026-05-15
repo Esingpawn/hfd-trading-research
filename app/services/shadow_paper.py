@@ -188,6 +188,44 @@ async def shadow_paper_replay(
     }
 
 
+async def shadow_paper_replay_all(
+    session: AsyncSession,
+    *,
+    horizons: list[str] | None = None,
+    limit: int = DEFAULT_SHADOW_REPLAY_LIMIT,
+    candidate_limit: int = 50,
+    include_watchlist: bool = True,
+) -> dict[str, Any]:
+    selected_horizons = horizons or list(FEATURE_HORIZONS)
+    unsupported = [item for item in selected_horizons if item not in FEATURE_HORIZONS]
+    if unsupported:
+        raise ValueError(f"unsupported horizons: {', '.join(unsupported)}")
+    results: dict[str, Any] = {}
+    total_inserted = 0
+    total_duplicates = 0
+    for horizon in selected_horizons:
+        result = await shadow_paper_replay(
+            session,
+            horizon=horizon,
+            limit=limit,
+            candidate_limit=candidate_limit,
+            include_watchlist=include_watchlist,
+        )
+        results[horizon] = result
+        total_inserted += int(result.get("inserted") or 0)
+        total_duplicates += int(result.get("duplicates") or 0)
+    return {
+        "strategy_name": SHADOW_STRATEGY_NAME,
+        "horizons": selected_horizons,
+        "limit_per_horizon": limit,
+        "candidate_limit": candidate_limit,
+        "inserted": total_inserted,
+        "duplicates": total_duplicates,
+        "results": results,
+        "policy": _shadow_policy(),
+    }
+
+
 async def mark_shadow_paper_trades(session: AsyncSession) -> dict[str, Any]:
     rows = await session.execute(
         select(ShadowPaperTrade).where(ShadowPaperTrade.status == "open").order_by(ShadowPaperTrade.opened_at)
@@ -279,6 +317,7 @@ async def shadow_paper_stats(session: AsyncSession) -> dict[str, Any]:
         "strategy_name": SHADOW_STRATEGY_NAME,
         **totals,
         "by_candidate": by_candidate,
+        "by_horizon": _grouped_trade_stats(trades, key_func=_horizon_group_key)[:20],
         "by_symbol": _grouped_trade_stats(trades, key_func=_symbol_group_key)[:20],
         "promotion": _promotion_report(by_candidate),
         "policy": _shadow_policy(),
@@ -296,7 +335,10 @@ async def shadow_paper_promotion_report(session: AsyncSession) -> dict[str, Any]
 
 
 def _trade_stats(trades: list[ShadowPaperTrade]) -> dict[str, Any]:
-    closed = [item for item in trades if item.status == "closed" and isinstance(item.pnl, (int, float))]
+    closed = sorted(
+        [item for item in trades if item.status == "closed" and isinstance(item.pnl, (int, float))],
+        key=lambda item: _aware(item.closed_at or item.opened_at or datetime.min.replace(tzinfo=timezone.utc)),
+    )
     wins = [float(item.pnl) for item in closed if item.pnl and item.pnl > 0]
     losses = [float(item.pnl) for item in closed if item.pnl and item.pnl < 0]
     gross_win = sum(wins)
@@ -331,7 +373,7 @@ def _grouped_trade_stats(
     for key, items in buckets.items():
         stats = _trade_stats(items)
         row: dict[str, Any] = {**stats}
-        if len(key) == 5:
+        if len(key) == 6:
             row.update(
                 {
                     "candidate_type": key[0],
@@ -339,8 +381,11 @@ def _grouped_trade_stats(
                     "symbol": key[2],
                     "timeframe": key[3],
                     "direction": key[4],
+                    "horizon": key[5],
                 }
             )
+        elif len(key) == 1:
+            row.update({"horizon": key[0]})
         else:
             row.update({"symbol": key[0], "direction": key[1]})
         rows.append(row)
@@ -356,12 +401,29 @@ def _grouped_trade_stats(
     )
 
 
-def _candidate_group_key(trade: ShadowPaperTrade) -> tuple[str, str, str, str, str]:
-    return (trade.candidate_type, trade.candidate_key, trade.symbol, trade.timeframe, trade.direction)
+def _candidate_group_key(trade: ShadowPaperTrade) -> tuple[str, ...]:
+    return (
+        trade.candidate_type,
+        trade.candidate_key,
+        trade.symbol,
+        trade.timeframe,
+        trade.direction,
+        _trade_horizon(trade),
+    )
+
+
+def _horizon_group_key(trade: ShadowPaperTrade) -> tuple[str]:
+    return (_trade_horizon(trade),)
 
 
 def _symbol_group_key(trade: ShadowPaperTrade) -> tuple[str, str]:
     return (trade.symbol, trade.direction)
+
+
+def _trade_horizon(trade: ShadowPaperTrade) -> str:
+    context = trade.context or {}
+    horizon = context.get("horizon")
+    return str(horizon) if horizon else "live"
 
 
 def _shadow_candidate_rows(

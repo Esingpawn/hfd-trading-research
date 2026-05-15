@@ -24,7 +24,13 @@ from app.services.features import (
     refresh_feature_research,
 )
 from app.services.paper import mark_open_trades, paper_scan
-from app.services.shadow_paper import mark_shadow_paper_trades, shadow_paper_promotion_report, shadow_paper_replay, shadow_paper_scan
+from app.services.shadow_paper import (
+    mark_shadow_paper_trades,
+    shadow_paper_promotion_report,
+    shadow_paper_replay,
+    shadow_paper_replay_all,
+    shadow_paper_scan,
+)
 from app.services.signal_attribution import backfill_signal_outcomes
 from app.services.telegram import TelegramClient
 from app.application.storage import run_storage_maintenance
@@ -229,6 +235,14 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
         return await shadow_paper_replay(
             session,
             horizon=_payload_str(payload, "horizon", "30m"),
+            limit=_payload_int(payload, "limit", 500),
+            candidate_limit=_payload_int(payload, "candidate_limit", 50),
+            include_watchlist=_payload_bool(payload, "include_watchlist", True),
+        )
+    if task_name in {"shadow_paper.replay_all", "shadow-paper-replay-all"}:
+        return await shadow_paper_replay_all(
+            session,
+            horizons=_optional_str_list(payload.get("horizons")),
             limit=_payload_int(payload, "limit", 500),
             candidate_limit=_payload_int(payload, "candidate_limit", 50),
             include_watchlist=_payload_bool(payload, "include_watchlist", True),
