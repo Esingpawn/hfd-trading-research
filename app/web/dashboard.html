@@ -1109,6 +1109,7 @@
           <div class="detailBlock" style="margin-top:10px">
             <h3>影子纸上交易</h3>
             <div id="shadowPaperSummary" class="kvList"></div>
+            <div id="shadowPaperHorizonStats" class="miniTable"><div class="empty">等待窗口影子统计</div></div>
             <div id="shadowPaperCandidateStats" class="miniTable"><div class="empty">等待候选影子统计</div></div>
             <div id="shadowPaperTrades" class="miniTable"><div class="empty">等待影子纸上记录</div></div>
           </div>
@@ -1377,6 +1378,24 @@
 
     function tag(value, label) {
       return `<span class="tag ${value || ""}">${label || directionText(value)}</span>`;
+    }
+
+    function shadowPromotionTag(status) {
+      if (status === "ready_for_paper_weight") return "ok";
+      if (status === "edge_unstable_drawdown") return "neutral";
+      if (status === "reject_or_pause") return "bad";
+      return "warn";
+    }
+
+    function shadowPromotionText(status) {
+      const labels = {
+        ready_for_paper_weight: "可晋级",
+        edge_unstable_drawdown: "边际不稳",
+        reject_or_pause: "暂停",
+        watchlist: "观察",
+        observing: "积累中",
+      };
+      return labels[status] || status || "积累中";
     }
 
     function scoreCell(score) {
@@ -2186,6 +2205,7 @@
         ["执行成本", shadowPaperStats.policy && shadowPaperStats.policy.uses_fee_and_slippage ? `<span class="green">已扣费滑点</span>` : `<span class="amber">未扣成本</span>`],
         ["晋级门槛", `${fmt(shadowCriteria.min_closed_trades || 30, 0)} 笔 / PF ${fmt(shadowCriteria.min_profit_factor || 1.25, 2)}`],
         ["可晋级", fmt((shadowPromotion.ready || []).length, 0)],
+        ["有边际不稳", fmt((shadowPromotion.edge_unstable || []).length, 0)],
         ["候选组", fmt((shadowPaperStats.by_candidate || []).length, 0)],
         ["隔离", shadowPaperStats.policy && shadowPaperStats.policy.opens_paper_trades === false ? `<span class="green">仅研究</span>` : `<span class="amber">待确认</span>`]
       ]));
@@ -2198,6 +2218,14 @@
         { label:"状态", render: row => tag(row.status === "open" ? "neutral" : "ok", row.status) },
         { label:"盈亏", render: row => coloredPct(row.pnl) }
       ], "暂无影子纸上记录"));
+      setHtml("shadowPaperHorizonStats", table((shadowPaperStats.by_horizon || []).slice(0, 6), [
+        { label:"窗口", render: row => esc(row.horizon || "live") },
+        { label:"观察/已结", render: row => `${fmt(row.total_trades || 0, 0)} / ${fmt(row.closed_trades || 0, 0)}` },
+        { label:"胜率", render: row => pct(row.win_rate, 1) },
+        { label:"平均盈亏", render: row => coloredPct(row.avg_pnl) },
+        { label:"PF", render: row => fmt(row.profit_factor, 2) },
+        { label:"回撤", render: row => pct(row.max_drawdown, 1) }
+      ], "暂无窗口影子统计"));
       setHtml("shadowPaperCandidateStats", table((shadowPaperStats.by_candidate || []).slice(0, 8), [
         { label:"候选", render: row => esc(row.candidate_key) },
         { label:"窗口", render: row => esc(row.horizon || "live") },
@@ -2208,7 +2236,7 @@
         { label:"平均盈亏", render: row => coloredPct(row.avg_pnl) },
         { label:"PF", render: row => fmt(row.profit_factor, 2) },
         { label:"回撤", render: row => pct(row.max_drawdown, 1) },
-        { label:"晋级", render: row => tag(row.promotion_status === "ready_for_paper_weight" ? "ok" : row.promotion_status === "reject_or_pause" ? "bad" : "warn", esc(row.promotion_status || "observing")) }
+        { label:"晋级", render: row => tag(shadowPromotionTag(row.promotion_status), esc(shadowPromotionText(row.promotion_status))) }
       ], "暂无候选影子统计"));
       setHtml("indicatorCatalog", table(catalog, [
         { label:"暗流指标", render: row => esc(row.hfd_name) },

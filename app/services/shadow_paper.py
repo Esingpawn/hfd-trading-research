@@ -737,6 +737,7 @@ def _promotion_report(candidate_rows: list[dict[str, Any]]) -> dict[str, Any]:
             "cost_model_required": True,
         },
         "ready": [row for row in rows if row["promotion_status"] == "ready_for_paper_weight"],
+        "edge_unstable": [row for row in rows if row["promotion_status"] == "edge_unstable_drawdown"],
         "watchlist": [row for row in rows if row["promotion_status"] == "watchlist"],
         "rejected": [row for row in rows if row["promotion_status"] == "reject_or_pause"],
         "all": rows,
@@ -759,11 +760,21 @@ def _promotion_status(row: dict[str, Any]) -> tuple[str, list[str]]:
         blockers.append("drawdown_above_threshold")
     if not blockers:
         return "ready_for_paper_weight", []
+    if _has_positive_edge_but_unstable_drawdown(row, blockers):
+        return "edge_unstable_drawdown", blockers
     if closed >= PROMOTION_MIN_CLOSED_TRADES:
         return "reject_or_pause", blockers
     if closed >= max(5, PROMOTION_MIN_CLOSED_TRADES // 3) and blockers != ["insufficient_closed_trades"]:
         return "watchlist", blockers
     return "observing", blockers
+
+
+def _has_positive_edge_but_unstable_drawdown(row: dict[str, Any], blockers: list[str]) -> bool:
+    if set(blockers) != {"drawdown_above_threshold"}:
+        return False
+    closed = int(row.get("closed_trades") or 0)
+    avg_pnl = row.get("avg_pnl")
+    return closed >= PROMOTION_MIN_CLOSED_TRADES and isinstance(avg_pnl, (int, float)) and float(avg_pnl) > 0
 
 
 def _asset_tier(symbol: str) -> str:

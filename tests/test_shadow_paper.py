@@ -395,6 +395,45 @@ async def test_shadow_paper_promotion_marks_ready_candidates(session) -> None:
     assert ready[0]["promotion_blockers"] == []
 
 
+@pytest.mark.asyncio
+async def test_shadow_paper_promotion_separates_positive_edge_from_unstable_drawdown(session) -> None:
+    opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(30):
+        pnl = 0.04 if index < 20 else -0.02
+        session.add(
+            ShadowPaperTrade(
+                strategy_name="shadow_feature_candidates_v1",
+                candidate_type="segment_candidate",
+                candidate_key="candidate-edge-unstable",
+                signal_key=f"signal-edge-{index}",
+                symbol="SOLUSDT",
+                timeframe="short",
+                direction="short",
+                entry_price=100.0,
+                stop_loss=101.0,
+                take_profit=98.0,
+                position_size=1.0,
+                status="closed",
+                pnl=pnl,
+                opened_at=opened_at + timedelta(minutes=index),
+                closed_at=opened_at + timedelta(minutes=index),
+                context={"execution_model": {"mode": "conservative_shadow_paper"}, "horizon": "4h"},
+            )
+        )
+    await session.commit()
+
+    stats = await shadow_paper_stats(session)
+
+    unstable = stats["promotion"]["edge_unstable"]
+    assert len(unstable) == 1
+    assert unstable[0]["candidate_key"] == "candidate-edge-unstable"
+    assert unstable[0]["promotion_status"] == "edge_unstable_drawdown"
+    assert unstable[0]["avg_pnl"] > 0
+    assert unstable[0]["profit_factor"] >= 1.25
+    assert unstable[0]["promotion_blockers"] == ["drawdown_above_threshold"]
+    assert stats["promotion"]["ready"] == []
+
+
 async def add_replay_segment_report(session, *, horizons: list[str] | None = None) -> None:
     for horizon in horizons or ["30m"]:
         session.add(
