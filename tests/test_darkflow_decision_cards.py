@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
-from app.models import DarkflowInteraction, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TradeCandidate
+from app.models import DarkflowInteraction, ExperimentRun, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TradeCandidate
 from app.services.darkflow_candidate_promotion import (
     DARKFLOW_V2_SHADOW_STRATEGY_NAME,
     audit_darkflow_trade_candidates,
@@ -723,13 +723,27 @@ async def test_entry_plan_state_report_summarizes_frozen_candidate_states(sessio
         )
     await session.commit()
     await materialize_darkflow_trade_candidates(session, limit=10)
+    session.add(
+        ExperimentRun(
+            name="darkflow_pipeline_run",
+            status="running",
+            scope={"lineage": "core_darkflow_v2"},
+            params={},
+            metrics={"stage": "started"},
+            notes="test running heartbeat",
+            created_at=base + timedelta(minutes=5),
+        )
+    )
+    await session.commit()
 
     report = await darkflow_entry_plan_state_report(session, limit=10, entry_tolerance_pct=0.05)
 
     assert report["candidate_count"] == 4
     assert report["state_counts"] == {"waiting": 1, "missed": 1, "triggered": 1, "invalidated": 1}
     assert report["freshness"]["status"] == "fresh"
-    assert report["freshness"]["pipeline"]["expected_worker"] == "experiment-worker"
+    assert report["freshness"]["latest_pipeline_run_at"] is not None
+    assert report["freshness"]["opportunity_status"] == "active"
+    assert report["freshness"]["pipeline"]["expected_worker"] == "darkflow-worker"
     assert report["policy"]["report_only"] is True
     assert report["policy"]["mutates_candidate_state"] is False
     assert report["policy"]["opens_live_orders"] is False

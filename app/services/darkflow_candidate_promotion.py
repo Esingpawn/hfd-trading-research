@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import DarkflowInteraction, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TradeCandidate, utc_now
+from app.models import DarkflowInteraction, ExperimentRun, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TradeCandidate, utc_now
 from app.services.darkflow_decision_cards import (
     PROMOTION_BLOCKER_ANTI_REPAINT_FAILED,
     PROMOTION_BLOCKER_ANTI_REPAINT_MISSING,
@@ -323,10 +323,24 @@ async def _darkflow_freshness(
     latest_interaction_created_at = await session.scalar(
         select(DarkflowInteraction.created_at).order_by(DarkflowInteraction.created_at.desc(), DarkflowInteraction.id.desc()).limit(1)
     )
+    latest_pipeline_run_at = await session.scalar(
+        select(ExperimentRun.created_at)
+        .where(ExperimentRun.name == "darkflow_pipeline_run", ExperimentRun.status.in_(["running", "research"]))
+        .order_by(ExperimentRun.created_at.desc(), ExperimentRun.id.desc())
+        .limit(1)
+    )
     latest_candidate_setup_at = max((_aware(item.setup_time) for item in rows if item.setup_time is not None), default=None)
-    latest_candidate_updated_at = max((_aware(item.updated_at) for item in rows if item.updated_at is not None), default=None)
+    latest_candidate_updated_at = await session.scalar(
+        select(TradeCandidate.updated_at)
+        .where(TradeCandidate.lineage == "core_darkflow_v2")
+        .order_by(TradeCandidate.updated_at.desc(), TradeCandidate.id.desc())
+        .limit(1)
+    )
+    latest_candidate_updated_at = _aware(latest_candidate_updated_at)
     candidate_age_minutes = _age_minutes(now, latest_candidate_setup_at)
     interaction_age_minutes = _age_minutes(now, latest_interaction_event_at)
+    interaction_pipeline_age_minutes = _freshest_age_minutes(now, latest_pipeline_run_at, latest_interaction_created_at)
+    candidate_pipeline_age_minutes = _freshest_age_minutes(now, latest_pipeline_run_at, latest_candidate_updated_at)
     snapshot_age_minutes = _age_minutes(now, latest_snapshot_at)
     price_age_minutes = _age_minutes(now, latest_price_at)
     stale_reasons: list[str] = []
@@ -334,28 +348,38 @@ async def _darkflow_freshness(
         stale_reasons.append("latest_price_stale")
     if snapshot_age_minutes is None or snapshot_age_minutes > 60:
         stale_reasons.append("latest_signal_snapshot_stale")
+    if interaction_pipeline_age_minutes is None or interaction_pipeline_age_minutes > 30:
+        stale_reasons.append("darkflow_pipeline_not_running")
+    if candidate_pipeline_age_minutes is None or candidate_pipeline_age_minutes > 30:
+        stale_reasons.append("trade_candidate_pipeline_not_running")
+    opportunity_reasons: list[str] = []
     if interaction_age_minutes is None or interaction_age_minutes > 90:
-        stale_reasons.append("darkflow_interactions_stale")
+        opportunity_reasons.append("no_recent_darkflow_interaction_opportunity")
     if candidate_age_minutes is None or candidate_age_minutes > 90:
-        stale_reasons.append("trade_candidates_stale")
+        opportunity_reasons.append("no_recent_trade_candidate_setup")
     return {
         "status": "stale" if stale_reasons else "fresh",
         "stale_reasons": stale_reasons,
+        "opportunity_status": "quiet" if opportunity_reasons else "active",
+        "opportunity_reasons": opportunity_reasons,
         "latest_price_at": _iso(_aware(latest_price_at)),
         "latest_signal_snapshot_at": _iso(_aware(latest_snapshot_at)),
         "latest_interaction_event_at": _iso(latest_interaction_event_at),
         "latest_interaction_created_at": _iso(_aware(latest_interaction_created_at)),
+        "latest_pipeline_run_at": _iso(_aware(latest_pipeline_run_at)),
         "latest_candidate_setup_at": _iso(latest_candidate_setup_at),
         "latest_candidate_updated_at": _iso(latest_candidate_updated_at),
         "age_minutes": {
             "price": price_age_minutes,
             "signal_snapshot": snapshot_age_minutes,
             "interaction_event": interaction_age_minutes,
+            "interaction_pipeline": interaction_pipeline_age_minutes,
             "candidate_setup": candidate_age_minutes,
+            "candidate_pipeline": candidate_pipeline_age_minutes,
         },
         "pipeline": {
-            "expected_worker": "experiment-worker",
-            "expected_command": "python -m app.cli experiment-loop --darkflow-interval-seconds 900",
+            "expected_worker": "darkflow-worker",
+            "expected_command": "python -m app.cli darkflow-loop --interval-seconds 300",
             "report_only": True,
         },
     }
@@ -938,6 +962,12 @@ def _age_minutes(now: datetime, value: datetime | None) -> float | None:
     if value is None:
         return None
     return round(max(0.0, (_aware(now) - _aware(value)).total_seconds() / 60.0), 3)
+
+
+def _freshest_age_minutes(now: datetime, *values: datetime | None) -> float | None:
+    ages = [_age_minutes(now, value) for value in values]
+    valid_ages = [age for age in ages if age is not None]
+    return min(valid_ages) if valid_ages else None
 
 
 def _aware(value: datetime | None) -> datetime | None:

@@ -44,7 +44,7 @@ from app.services.feature_candidates import (
     feature_segment_candidate_screen,
     feature_segment_paper_ab,
 )
-from app.services.experiment_loop import run_experiment_backfill
+from app.services.experiment_loop import run_darkflow_pipeline, run_experiment_backfill
 from app.services.features import (
     backfill_feature_events,
     backfill_feature_labels,
@@ -639,6 +639,58 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seconds between experiment backfill runs",
     )
     experiment_loop.add_argument(
+        "--max-runs",
+        type=int,
+        default=0,
+        help="Stop after N runs. 0 means run until interrupted",
+    )
+
+    darkflow_loop = subparsers.add_parser(
+        "darkflow-loop",
+        help="Run the core darkflow v2 candidate pipeline on a lightweight schedule",
+    )
+    darkflow_loop.add_argument(
+        "--limit",
+        type=int,
+        default=500,
+        help="Latest signal snapshots to scan into core darkflow v2 interactions each refresh",
+    )
+    darkflow_loop.add_argument(
+        "--backtest-limit",
+        type=int,
+        default=5000,
+        help="Latest darkflow interactions to include in the persisted v2 backtest report",
+    )
+    darkflow_loop.add_argument(
+        "--candidate-limit",
+        type=int,
+        default=200,
+        help="Maximum darkflow v2 trade candidates to materialize and audit each refresh",
+    )
+    darkflow_loop.add_argument(
+        "--shadow-limit",
+        type=int,
+        default=100,
+        help="Maximum audited darkflow v2 candidates to scan into isolated shadow-forward each refresh",
+    )
+    darkflow_loop.add_argument(
+        "--max-hold-bars",
+        type=int,
+        default=12,
+        help="Maximum bars used for darkflow interaction outcome and frozen entry-plan validity",
+    )
+    darkflow_loop.add_argument(
+        "--persist-zones",
+        action="store_true",
+        help="Also persist darkflow_zones. Keep disabled for the lightweight production loop.",
+    )
+    darkflow_loop.add_argument(
+        "--interval-seconds",
+        type=int,
+        default=300,
+        help="Seconds between lightweight darkflow pipeline refreshes",
+    )
+    darkflow_loop.add_argument(
         "--max-runs",
         type=int,
         default=0,
@@ -1533,6 +1585,91 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 await asyncio.sleep(args.interval_seconds)
         except KeyboardInterrupt:
             print("experiment loop interrupted")
+        finally:
+            await _stop_runtime_heartbeat(heartbeat_task)
+            await engine.dispose()
+        return 0
+
+    if args.command == "darkflow-loop":
+        runtime_meta = _runtime_metadata(
+            "darkflow-loop",
+            command="python -m app.cli darkflow-loop",
+            interval_seconds=args.interval_seconds,
+            heartbeat_ttl_seconds=_heartbeat_ttl(args.interval_seconds),
+            limit=args.limit,
+            backtest_limit=args.backtest_limit,
+            candidate_limit=args.candidate_limit,
+            shadow_limit=args.shadow_limit,
+            max_hold_bars=args.max_hold_bars,
+            persist_zones=args.persist_zones,
+            research_only=True,
+            opens_live_orders=False,
+            opens_paper_trades=False,
+        )
+        heartbeat_task = _start_runtime_heartbeat("darkflow-loop", runtime_meta)
+        run_number = 0
+        try:
+            while True:
+                run_number += 1
+                _touch_runtime("darkflow-loop", runtime_meta, run_number=run_number)
+                try:
+                    async with SessionLocal() as session:
+                        result = await run_darkflow_pipeline(
+                            session,
+                            limit=args.limit,
+                            backtest_limit=args.backtest_limit,
+                            candidate_limit=args.candidate_limit,
+                            shadow_limit=args.shadow_limit,
+                            max_hold_bars=args.max_hold_bars,
+                            persist_zones=args.persist_zones,
+                        )
+                    _touch_runtime(
+                        "darkflow-loop",
+                        runtime_meta,
+                        run_number=run_number,
+                        last_success_at=_utc_now_iso(),
+                        last_result={
+                            "interactions_inserted": result.get("interactions", {}).get("interactions_inserted"),
+                            "candidate_inserted": result.get("trade_candidates", {}).get("inserted"),
+                            "candidate_updated": result.get("trade_candidates", {}).get("updated"),
+                        },
+                    )
+                    print(
+                        json.dumps(
+                            jsonable({
+                                "run": run_number,
+                                "status": "processed",
+                                "darkflow": result,
+                            }),
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _touch_runtime(
+                        "darkflow-loop",
+                        runtime_meta,
+                        run_number=run_number,
+                        last_error_at=_utc_now_iso(),
+                        last_error=str(exc),
+                    )
+                    print(
+                        json.dumps(
+                            {
+                                "run": run_number,
+                                "status": "error",
+                                "reason": "darkflow_loop_iteration_failed",
+                                "error": str(exc),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+                if args.max_runs and run_number >= args.max_runs:
+                    break
+                await asyncio.sleep(args.interval_seconds)
+        except KeyboardInterrupt:
+            print("darkflow loop interrupted")
         finally:
             await _stop_runtime_heartbeat(heartbeat_task)
             await engine.dispose()

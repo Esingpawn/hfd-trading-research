@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
 from app.models import DarkflowInteraction, ExperimentRun, FeatureEvent, FeatureLabel, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TradeCandidate
-from app.services.experiment_loop import run_experiment_backfill
+from app.services.experiment_loop import run_darkflow_pipeline, run_experiment_backfill
 
 
 @pytest.fixture()
@@ -305,6 +305,7 @@ async def test_experiment_backfill_can_maintain_darkflow_pipeline(session) -> No
     candidates = await session.execute(select(TradeCandidate))
     shadows = await session.execute(select(ShadowPaperTrade))
     experiments = await session.execute(select(ExperimentRun).where(ExperimentRun.name == "darkflow_interaction_backtest"))
+    pipeline_runs = await session.execute(select(ExperimentRun).where(ExperimentRun.name == "darkflow_pipeline_run"))
 
     assert result["darkflow"]["enabled"] is True
     assert result["darkflow"]["policy"]["opens_live_orders"] is False
@@ -316,6 +317,82 @@ async def test_experiment_backfill_can_maintain_darkflow_pipeline(session) -> No
     assert len(candidates.scalars().all()) == 1
     assert len(shadows.scalars().all()) == 1
     assert experiments.scalar_one().status == "research"
+    pipeline_run = pipeline_runs.scalar_one()
+    assert pipeline_run.status == "research"
+    assert pipeline_run.metrics["stage"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_darkflow_pipeline_can_run_without_feature_research(session) -> None:
+    await _add_darkflow_snapshot(session)
+
+    result = await run_darkflow_pipeline(
+        session,
+        limit=10,
+        backtest_limit=100,
+        candidate_limit=10,
+        shadow_limit=10,
+        max_hold_bars=12,
+    )
+    interactions = await session.execute(select(DarkflowInteraction))
+    candidates = await session.execute(select(TradeCandidate))
+    shadows = await session.execute(select(ShadowPaperTrade))
+
+    assert result["enabled"] is True
+    assert result["policy"]["opens_live_orders"] is False
+    assert result["policy"]["opens_paper_trades"] is False
+    assert result["pipeline_run"]["name"] == "darkflow_pipeline_run"
+    assert result["pipeline_run"]["status"] == "research"
+    assert result["interactions"]["interactions_inserted"] == 1
+    assert result["trade_candidates"]["inserted"] == 1
+    assert len(interactions.scalars().all()) == 1
+    assert len(candidates.scalars().all()) == 1
+    assert len(shadows.scalars().all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_darkflow_pipeline_can_skip_zone_persistence_for_lightweight_loop(session) -> None:
+    await _add_darkflow_snapshot(session)
+
+    result = await run_darkflow_pipeline(
+        session,
+        limit=10,
+        backtest_limit=100,
+        candidate_limit=10,
+        shadow_limit=10,
+        max_hold_bars=12,
+        persist_zones=False,
+    )
+    interactions = await session.execute(select(DarkflowInteraction))
+
+    assert result["policy"]["persists_darkflow_zones"] is False
+    assert result["interactions"]["interactions_inserted"] == 1
+    assert len(interactions.scalars().all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_darkflow_pipeline_marks_failed_run_when_iteration_errors(session, monkeypatch) -> None:
+    async def fail_mark_shadow_paper_trades(_session):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("app.services.experiment_loop.mark_shadow_paper_trades", fail_mark_shadow_paper_trades)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await run_darkflow_pipeline(
+            session,
+            limit=10,
+            backtest_limit=100,
+            candidate_limit=10,
+            shadow_limit=10,
+            max_hold_bars=12,
+        )
+
+    pipeline_run = await session.scalar(select(ExperimentRun).where(ExperimentRun.name == "darkflow_pipeline_run"))
+
+    assert pipeline_run is not None
+    assert pipeline_run.status == "failed"
+    assert pipeline_run.metrics["stage"] == "failed"
+    assert pipeline_run.metrics["error"] == "boom"
 
 
 async def _add_darkflow_snapshot(session) -> None:

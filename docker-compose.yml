@@ -153,6 +153,46 @@ services:
       - "200"
       - --darkflow-shadow-limit
       - "100"
+      - --no-darkflow-pipeline
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    volumes:
+      - hfd_raw_payloads:/var/lib/hfd/raw_payloads
+      - hfd_runtime:/app/data/runtime
+      - hfd_logs:/app/data/logs
+    restart: unless-stopped
+
+  darkflow-worker:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
+      REDIS_URL: redis://redis:6379/0
+      RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
+      EXTERNALIZE_RAW_PAYLOADS: "true"
+      LIVE_TRADING_ENABLED: "false"
+      TRADING_GATEWAY: disabled
+    command:
+      - python
+      - -m
+      - app.cli
+      - darkflow-loop
+      - --limit
+      - "150"
+      - --interval-seconds
+      - "300"
+      - --backtest-limit
+      - "2000"
+      - --candidate-limit
+      - "100"
+      - --shadow-limit
+      - "50"
+      - --max-hold-bars
+      - "12"
     depends_on:
       db-init:
         condition: service_completed_successfully

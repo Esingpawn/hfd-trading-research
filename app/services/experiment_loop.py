@@ -4,6 +4,7 @@ from typing import Any, Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models import ExperimentRun, utc_now
 from app.services.feature_candidates import generate_default_research_reports
 from app.services.features import FeatureLabelBackfillResult, backfill_feature_events, backfill_feature_labels
 from app.services.darkflow_interactions import backfill_darkflow_interactions, darkflow_interaction_backtest
@@ -38,6 +39,7 @@ async def run_experiment_backfill(
     darkflow_candidate_limit: int = 200,
     darkflow_shadow_limit: int = 100,
     darkflow_max_hold_bars: int = 12,
+    darkflow_persist_zones: bool = True,
 ) -> dict[str, Any]:
     signal_result = await backfill_signal_outcomes(
         session,
@@ -52,13 +54,14 @@ async def run_experiment_backfill(
         "darkflow": {"enabled": False},
     }
     if include_darkflow_pipeline:
-        payload["darkflow"] = await _run_darkflow_pipeline(
+        payload["darkflow"] = await run_darkflow_pipeline(
             session,
             limit=darkflow_limit,
             backtest_limit=darkflow_backtest_limit,
             candidate_limit=darkflow_candidate_limit,
             shadow_limit=darkflow_shadow_limit,
             max_hold_bars=darkflow_max_hold_bars,
+            persist_zones=darkflow_persist_zones,
         )
     if include_feature_research:
         horizons = list(feature_horizons or DEFAULT_FEATURE_HORIZONS)
@@ -101,7 +104,7 @@ async def run_experiment_backfill(
     return payload
 
 
-async def _run_darkflow_pipeline(
+async def run_darkflow_pipeline(
     session: AsyncSession,
     *,
     limit: int,
@@ -109,44 +112,205 @@ async def _run_darkflow_pipeline(
     candidate_limit: int,
     shadow_limit: int,
     max_hold_bars: int,
+    persist_zones: bool = True,
 ) -> dict[str, Any]:
-    mark = await mark_shadow_paper_trades(session)
-    interactions = await backfill_darkflow_interactions(
-        session,
-        limit=max(1, int(limit)),
-        max_hold_bars=max(1, int(max_hold_bars)),
-        persist_zones=True,
-        commit=True,
+    params = _darkflow_pipeline_params(
+        limit=limit,
+        backtest_limit=backtest_limit,
+        candidate_limit=candidate_limit,
+        shadow_limit=shadow_limit,
+        max_hold_bars=max_hold_bars,
+        persist_zones=persist_zones,
     )
-    backtest = await darkflow_interaction_backtest(
-        session,
-        limit=max(1, int(backtest_limit)),
-        persist=True,
-    )
-    candidates = await materialize_darkflow_trade_candidates(
-        session,
-        limit=max(1, int(candidate_limit)),
-    )
-    promotion = await refresh_darkflow_candidate_promotion(
-        session,
-        limit=max(1, int(candidate_limit)),
-        shadow_limit=max(1, int(shadow_limit)),
-    )
+    pipeline_run = await _start_darkflow_pipeline_run(session, params=params)
+    try:
+        mark = await mark_shadow_paper_trades(session)
+        interactions = await backfill_darkflow_interactions(
+            session,
+            limit=params["limit"],
+            max_hold_bars=params["max_hold_bars"],
+            persist_zones=params["persist_zones"],
+            commit=True,
+        )
+        backtest = await darkflow_interaction_backtest(
+            session,
+            limit=params["backtest_limit"],
+            persist=True,
+        )
+        candidates = await materialize_darkflow_trade_candidates(
+            session,
+            limit=params["candidate_limit"],
+        )
+        promotion = await refresh_darkflow_candidate_promotion(
+            session,
+            limit=params["candidate_limit"],
+            shadow_limit=params["shadow_limit"],
+        )
+        payload = {
+            "enabled": True,
+            "mark": mark,
+            "interactions": interactions.__dict__,
+            "interaction_backtest": backtest,
+            "trade_candidates": candidates,
+            "promotion": promotion,
+            "policy": _darkflow_pipeline_policy(params["persist_zones"]),
+        }
+        payload["pipeline_run"] = await _complete_darkflow_pipeline_run(
+            session,
+            run_id=pipeline_run.id,
+            payload=payload,
+            params=params,
+        )
+        return payload
+    except Exception as exc:  # noqa: BLE001
+        await _fail_darkflow_pipeline_run(
+            session,
+            run_id=pipeline_run.id,
+            params=params,
+            error=str(exc),
+        )
+        raise
+
+
+def _darkflow_pipeline_params(
+    *,
+    limit: int,
+    backtest_limit: int,
+    candidate_limit: int,
+    shadow_limit: int,
+    max_hold_bars: int,
+    persist_zones: bool,
+) -> dict[str, Any]:
     return {
-        "enabled": True,
-        "mark": mark,
-        "interactions": interactions.__dict__,
-        "interaction_backtest": backtest,
-        "trade_candidates": candidates,
-        "promotion": promotion,
-        "policy": {
-            "research_only": True,
+        "limit": max(1, int(limit)),
+        "backtest_limit": max(1, int(backtest_limit)),
+        "candidate_limit": max(1, int(candidate_limit)),
+        "shadow_limit": max(1, int(shadow_limit)),
+        "max_hold_bars": max(1, int(max_hold_bars)),
+        "persist_zones": bool(persist_zones),
+    }
+
+
+def _darkflow_pipeline_policy(persist_zones: bool) -> dict[str, Any]:
+    return {
+        "research_only": True,
+        "opens_live_orders": False,
+        "opens_paper_trades": False,
+        "uses_isolated_shadow_paper": True,
+        "persists_darkflow_zones": bool(persist_zones),
+        "purpose": "keep core_darkflow_v2 zones/interactions/candidates fresh from latest collected snapshots",
+    }
+
+
+async def _start_darkflow_pipeline_run(
+    session: AsyncSession,
+    *,
+    params: dict[str, Any],
+) -> ExperimentRun:
+    created_at = utc_now()
+    run = ExperimentRun(
+        name="darkflow_pipeline_run",
+        status="running",
+        scope={
+            "lineage": "core_darkflow_v2",
             "opens_live_orders": False,
             "opens_paper_trades": False,
-            "uses_isolated_shadow_paper": True,
-            "purpose": "keep core_darkflow_v2 zones/interactions/candidates fresh from latest collected snapshots",
         },
+        params=params,
+        metrics={
+            "stage": "started",
+            "policy": _darkflow_pipeline_policy(bool(params.get("persist_zones"))),
+        },
+        notes="lightweight core_darkflow_v2 maintenance heartbeat started",
+        created_at=created_at,
+    )
+    session.add(run)
+    await session.commit()
+    return run
+
+
+async def _complete_darkflow_pipeline_run(
+    session: AsyncSession,
+    *,
+    run_id: str,
+    payload: dict[str, Any],
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    run = await session.get(ExperimentRun, run_id)
+    if run is None:
+        run = ExperimentRun(
+            id=run_id,
+            name="darkflow_pipeline_run",
+            scope={
+                "lineage": "core_darkflow_v2",
+                "opens_live_orders": False,
+                "opens_paper_trades": False,
+            },
+            created_at=utc_now(),
+        )
+        session.add(run)
+    candidates = payload.get("trade_candidates") or {}
+    promotion = payload.get("promotion") or {}
+    shadow_forward = promotion.get("shadow_forward") or {}
+    audit = promotion.get("audit") or {}
+    summary = promotion.get("summary") or {}
+    run.status = "research"
+    run.params = params
+    run.metrics = {
+        "stage": "completed",
+        "interactions": payload.get("interactions") or {},
+        "trade_candidates": {
+            "card_count": candidates.get("card_count"),
+            "scanned_interactions": candidates.get("scanned_interactions"),
+            "inserted": candidates.get("inserted"),
+            "updated": candidates.get("updated"),
+            "unchanged": candidates.get("unchanged"),
+        },
+        "promotion": {
+            "audited": audit.get("audited"),
+            "passed": audit.get("passed"),
+            "failed": audit.get("failed"),
+            "shadow_opened": len(shadow_forward.get("opened") or []),
+            "candidate_count": summary.get("candidate_count"),
+            "promotion_status_counts": summary.get("promotion_status_counts") or {},
+        },
+        "policy": payload.get("policy") or {},
     }
+    run.notes = "lightweight core_darkflow_v2 maintenance heartbeat completed"
+    await session.commit()
+    return {"id": run.id, "created_at": run.created_at.isoformat(), "name": run.name, "status": run.status}
+
+
+async def _fail_darkflow_pipeline_run(
+    session: AsyncSession,
+    *,
+    run_id: str,
+    params: dict[str, Any],
+    error: str,
+) -> None:
+    await session.rollback()
+    run = await session.get(ExperimentRun, run_id)
+    if run is None:
+        run = ExperimentRun(
+            id=run_id,
+            name="darkflow_pipeline_run",
+            scope={
+                "lineage": "core_darkflow_v2",
+                "opens_live_orders": False,
+                "opens_paper_trades": False,
+            },
+            created_at=utc_now(),
+        )
+        session.add(run)
+    run.status = "failed"
+    run.params = params
+    run.metrics = {
+        "stage": "failed",
+        "error": error,
+        "policy": _darkflow_pipeline_policy(bool(params.get("persist_zones"))),
+    }
+    run.notes = "lightweight core_darkflow_v2 maintenance heartbeat failed"
+    await session.commit()
 
 
 async def _backfill_feature_labels_incremental(

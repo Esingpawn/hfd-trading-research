@@ -4,7 +4,7 @@ from pathlib import Path
 def test_payload_reading_workers_mount_raw_payload_volume() -> None:
     compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
 
-    for service_name in ("api", "paper-worker", "experiment-worker", "task-worker"):
+    for service_name in ("api", "paper-worker", "experiment-worker", "darkflow-worker", "task-worker"):
         block = _service_block(compose_text, service_name)
 
         assert "RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads" in block
@@ -44,12 +44,31 @@ def test_experiment_worker_maintains_core_darkflow_pipeline() -> None:
     compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
     block = _service_block(compose_text, "experiment-worker")
 
+    assert "--no-darkflow-pipeline" in block
     assert "--darkflow-interval-seconds" in block
     assert '      - "900"' in block
     assert "--darkflow-limit" in block
     assert "--darkflow-backtest-limit" in block
     assert "--darkflow-candidate-limit" in block
     assert "--darkflow-shadow-limit" in block
+
+
+def test_darkflow_worker_runs_lightweight_core_pipeline() -> None:
+    compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
+    block = _service_block(compose_text, "darkflow-worker")
+
+    assert "darkflow-loop" in block
+    assert "LIVE_TRADING_ENABLED: \"false\"" in block
+    assert "TRADING_GATEWAY: disabled" in block
+    assert "--interval-seconds" in block
+    assert '      - "300"' in block
+    assert "--backtest-limit" in block
+    assert '      - "2000"' in block
+    assert "--candidate-limit" in block
+    assert '      - "100"' in block
+    assert "--shadow-limit" in block
+    assert '      - "50"' in block
+    assert "--persist-zones" not in block
 
 
 def _service_block(compose_text: str, service_name: str) -> str:
