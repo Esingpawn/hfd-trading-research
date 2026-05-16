@@ -31,6 +31,12 @@ from app.services.darkflow_interactions import (
     darkflow_shadow_replay,
 )
 from app.services.darkflow_decision_cards import materialize_darkflow_trade_candidates
+from app.services.darkflow_candidate_promotion import (
+    audit_darkflow_trade_candidates,
+    darkflow_candidate_promotion_report,
+    open_darkflow_shadow_forward_samples,
+    refresh_darkflow_candidate_promotion,
+)
 from app.services.paper import mark_open_trades, paper_scan
 from app.services.shadow_paper import (
     mark_shadow_paper_trades,
@@ -423,6 +429,32 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
             min_quality_score=_payload_float(payload, "min_quality_score", 55.0),
             min_rr_ratio=_payload_float(payload, "min_rr_ratio", 1.5),
         )
+    if task_name in {"darkflow.trade_candidate_audit", "darkflow-trade-candidate-audit"}:
+        return await audit_darkflow_trade_candidates(
+            session,
+            limit=_payload_int(payload, "limit", 500),
+            include_blocked=_payload_bool(payload, "include_blocked", False),
+        )
+    if task_name in {"darkflow.trade_candidate_shadow_forward", "darkflow-trade-candidate-shadow-forward"}:
+        return await open_darkflow_shadow_forward_samples(
+            session,
+            limit=_payload_int(payload, "limit", 100),
+            max_candidate_age_hours=_payload_float(payload, "max_candidate_age_hours", 72.0),
+            entry_tolerance_pct=_payload_float(payload, "entry_tolerance_pct", 0.025),
+        )
+    if task_name in {"darkflow.trade_candidate_promotion", "darkflow-trade-candidate-promotion"}:
+        return await refresh_darkflow_candidate_promotion(
+            session,
+            limit=_payload_int(payload, "limit", 500),
+            shadow_limit=_payload_int(payload, "shadow_limit", 100),
+            max_candidate_age_hours=_payload_float(payload, "max_candidate_age_hours", 72.0),
+            entry_tolerance_pct=_payload_float(payload, "entry_tolerance_pct", 0.025),
+        )
+    if task_name in {"darkflow.trade_candidate_promotion_report", "darkflow-trade-candidate-promotion-report"}:
+        return await darkflow_candidate_promotion_report(
+            session,
+            limit=_payload_int(payload, "limit", 500),
+        )
     if task_name in {"darkflow.shadow_replay", "darkflow-shadow-replay"}:
         return await darkflow_shadow_replay(
             session,
@@ -515,6 +547,13 @@ async def _research_acceleration_cycle(session: AsyncSession, payload: dict[str,
         limit=_payload_int(payload, "trade_candidate_limit", _payload_int(payload, "darkflow_backtest_limit", report_limit)),
         min_quality_score=_payload_float(payload, "trade_candidate_min_quality_score", 55.0),
         min_rr_ratio=_payload_float(payload, "trade_candidate_min_rr_ratio", 1.5),
+    )
+    result["steps"]["darkflow_trade_candidate_promotion"] = await refresh_darkflow_candidate_promotion(
+        session,
+        limit=_payload_int(payload, "trade_candidate_promotion_limit", 500),
+        shadow_limit=_payload_int(payload, "trade_candidate_shadow_limit", 100),
+        max_candidate_age_hours=_payload_float(payload, "trade_candidate_max_age_hours", 72.0),
+        entry_tolerance_pct=_payload_float(payload, "trade_candidate_entry_tolerance_pct", 0.025),
     )
     result["steps"]["shadow_mark"] = await mark_shadow_paper_trades(session)
     result["steps"]["darkflow_shadow_replay"] = await darkflow_shadow_replay(

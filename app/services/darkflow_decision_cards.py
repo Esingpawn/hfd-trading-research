@@ -16,6 +16,12 @@ DEFAULT_DECISION_CARD_LIMIT = 20
 DEFAULT_MIN_DECISION_CARD_QUALITY = 55.0
 DEFAULT_MIN_RR_RATIO = 1.5
 DEFAULT_TRADE_CANDIDATE_LIMIT = 100
+PROMOTION_BLOCKER_ANTI_REPAINT_MISSING = "anti_repaint_audit_missing"
+PROMOTION_BLOCKER_ANTI_REPAINT_FAILED = "anti_repaint_audit_failed"
+PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING = "isolated_v2_shadow_forward_sample_missing"
+PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING = "isolated_v2_shadow_forward_sample_collecting"
+PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED = "isolated_v2_shadow_forward_sample_failed"
+PROMOTION_BLOCKER_PERSISTENT_TABLE_MISSING = "persistent_trade_candidate_table_missing"
 _HARD_QUALITY_BLOCKERS = {
     "body_break_invalidation",
     "official_rule_unmapped",
@@ -177,11 +183,7 @@ def _decision_card(
         min_quality_score=min_quality_score,
         min_rr_ratio=min_rr_ratio,
     )
-    promotion_blockers = [
-        "anti_repaint_audit_missing",
-        "persistent_trade_candidate_table_missing",
-        "isolated_v2_shadow_forward_sample_missing",
-    ]
+    promotion_blockers = [PROMOTION_BLOCKER_ANTI_REPAINT_MISSING, PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING]
     return {
         "card_id": f"darkflow-card:{DARKFLOW_INTERACTION_SCHEMA}:{item.interaction_key}",
         "source_interaction_id": item.id,
@@ -239,6 +241,15 @@ def _decision_card(
             "research_only": True,
         },
     }
+
+
+def decision_card_from_interaction(
+    item: DarkflowInteraction,
+    *,
+    min_quality_score: float = DEFAULT_MIN_DECISION_CARD_QUALITY,
+    min_rr_ratio: float = DEFAULT_MIN_RR_RATIO,
+) -> dict[str, Any] | None:
+    return _decision_card(item, min_quality_score=min_quality_score, min_rr_ratio=min_rr_ratio)
 
 
 def _interaction_schema(context: dict[str, Any]) -> str | None:
@@ -325,7 +336,7 @@ def _candidate_payload(card: dict[str, Any], *, now: datetime) -> dict[str, Any]
     entry_plan = card["entry_plan"]
     target = entry_plan["take_profit_levels"][0]
     status = str(risk_gate["status"])
-    promotion_blockers = list(risk_gate.get("promotion_blockers") or [])
+    promotion_blockers = _normalized_promotion_blockers(risk_gate.get("promotion_blockers") or [])
     return {
         "candidate_key": str(card["card_id"]),
         "source_type": "darkflow_interaction",
@@ -350,7 +361,12 @@ def _candidate_payload(card: dict[str, Any], *, now: datetime) -> dict[str, Any]
         "model_win_prob": _float(card["scores"].get("model_win_prob")),
         "expected_r": _float(card["scores"].get("expected_R")),
         "status": status,
-        "promotion_status": "blocked" if promotion_blockers or status != "shadow_candidate" else "shadow_ready_pending_audit",
+        "promotion_status": _promotion_status(
+            status=status,
+            anti_repaint_status="missing",
+            shadow_status="not_started",
+            promotion_blockers=promotion_blockers,
+        ),
         "anti_repaint_status": "missing",
         "shadow_status": "not_started",
         "paper_eligible": False,
@@ -401,8 +417,84 @@ def _preserve_candidate_lifecycle(existing: TradeCandidate, payload: dict[str, A
         "promotion_status",
     ):
         preserved[field] = getattr(existing, field)
+    preserved["promotion_blockers"] = _merge_lifecycle_blockers(
+        payload["promotion_blockers"],
+        existing.promotion_blockers,
+        anti_repaint_status=existing.anti_repaint_status,
+        shadow_status=existing.shadow_status,
+    )
     preserved["materialized_at"] = existing.materialized_at
     return preserved
+
+
+def _normalized_promotion_blockers(values: list[Any]) -> list[str]:
+    obsolete = {PROMOTION_BLOCKER_PERSISTENT_TABLE_MISSING}
+    blockers = [str(value) for value in values if str(value) not in obsolete]
+    return list(dict.fromkeys(blockers))
+
+
+def _merge_lifecycle_blockers(
+    payload_blockers: list[str],
+    existing_blockers: list[str],
+    *,
+    anti_repaint_status: str,
+    shadow_status: str,
+) -> list[str]:
+    blockers = set(_normalized_promotion_blockers(payload_blockers))
+    blockers.update(_normalized_promotion_blockers(existing_blockers))
+    if anti_repaint_status == "passed":
+        blockers.discard(PROMOTION_BLOCKER_ANTI_REPAINT_MISSING)
+        blockers.discard(PROMOTION_BLOCKER_ANTI_REPAINT_FAILED)
+    elif anti_repaint_status == "failed":
+        blockers.discard(PROMOTION_BLOCKER_ANTI_REPAINT_MISSING)
+        blockers.add(PROMOTION_BLOCKER_ANTI_REPAINT_FAILED)
+    else:
+        blockers.add(PROMOTION_BLOCKER_ANTI_REPAINT_MISSING)
+    if shadow_status == "passed":
+        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
+        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
+        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
+    elif shadow_status == "collecting":
+        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
+        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
+        blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
+    elif shadow_status == "failed":
+        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
+        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
+        blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
+    else:
+        blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
+    ordered = [
+        PROMOTION_BLOCKER_ANTI_REPAINT_MISSING,
+        PROMOTION_BLOCKER_ANTI_REPAINT_FAILED,
+        PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING,
+        PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING,
+        PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED,
+    ]
+    return [item for item in ordered if item in blockers] + sorted(blockers - set(ordered))
+
+
+def _promotion_status(
+    *,
+    status: str,
+    anti_repaint_status: str,
+    shadow_status: str,
+    promotion_blockers: list[str],
+) -> str:
+    blockers = set(promotion_blockers)
+    if status != "shadow_candidate":
+        return "blocked"
+    if anti_repaint_status == "failed" or PROMOTION_BLOCKER_ANTI_REPAINT_FAILED in blockers:
+        return "anti_repaint_failed"
+    if anti_repaint_status != "passed":
+        return "anti_repaint_pending"
+    if shadow_status == "failed" or PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED in blockers:
+        return "shadow_forward_failed"
+    if shadow_status == "collecting" or PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING in blockers:
+        return "shadow_forward_collecting"
+    if shadow_status != "passed":
+        return "shadow_forward_pending"
+    return "paper_review_ready"
 
 
 def _materialized_candidate_payload(item: TradeCandidate) -> dict[str, Any]:

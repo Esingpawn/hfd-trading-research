@@ -30,6 +30,12 @@ from app.services.darkflow_interactions import (
     darkflow_shadow_replay,
 )
 from app.services.darkflow_decision_cards import materialize_darkflow_trade_candidates
+from app.services.darkflow_candidate_promotion import (
+    audit_darkflow_trade_candidates,
+    darkflow_candidate_promotion_report,
+    open_darkflow_shadow_forward_samples,
+    refresh_darkflow_candidate_promotion,
+)
 from app.services.darkflow_rules import darkflow_rulebook
 from app.services.feature_candidates import (
     feature_candidate_screen,
@@ -450,6 +456,36 @@ def build_parser() -> argparse.ArgumentParser:
     darkflow_candidates.add_argument("--limit", type=int, default=100)
     darkflow_candidates.add_argument("--min-quality-score", type=float, default=55.0)
     darkflow_candidates.add_argument("--min-rr-ratio", type=float, default=1.5)
+
+    darkflow_candidate_audit = subparsers.add_parser(
+        "darkflow-trade-candidate-audit",
+        help="Audit darkflow trade candidates for anti-repaint stability",
+    )
+    darkflow_candidate_audit.add_argument("--limit", type=int, default=500)
+    darkflow_candidate_audit.add_argument("--include-blocked", action="store_true")
+
+    darkflow_candidate_shadow = subparsers.add_parser(
+        "darkflow-trade-candidate-shadow-forward",
+        help="Open isolated v2 shadow-forward samples for audited darkflow trade candidates",
+    )
+    darkflow_candidate_shadow.add_argument("--limit", type=int, default=100)
+    darkflow_candidate_shadow.add_argument("--max-candidate-age-hours", type=float, default=72.0)
+    darkflow_candidate_shadow.add_argument("--entry-tolerance-pct", type=float, default=0.025)
+
+    darkflow_candidate_promotion = subparsers.add_parser(
+        "darkflow-trade-candidate-promotion",
+        help="Run anti-repaint audit and isolated v2 shadow-forward refresh",
+    )
+    darkflow_candidate_promotion.add_argument("--limit", type=int, default=500)
+    darkflow_candidate_promotion.add_argument("--shadow-limit", type=int, default=100)
+    darkflow_candidate_promotion.add_argument("--max-candidate-age-hours", type=float, default=72.0)
+    darkflow_candidate_promotion.add_argument("--entry-tolerance-pct", type=float, default=0.025)
+
+    darkflow_candidate_promotion_report = subparsers.add_parser(
+        "darkflow-trade-candidate-promotion-report",
+        help="Print darkflow trade candidate promotion gate status",
+    )
+    darkflow_candidate_promotion_report.add_argument("--limit", type=int, default=500)
 
     subparsers.add_parser("storage-health", help="Show database storage health")
     storage_maintain = subparsers.add_parser("storage-maintain", help="Run safe database maintenance")
@@ -1204,6 +1240,49 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 min_quality_score=args.min_quality_score,
                 min_rr_ratio=args.min_rr_ratio,
             )
+        print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "darkflow-trade-candidate-audit":
+        async with SessionLocal() as session:
+            result = await audit_darkflow_trade_candidates(
+                session,
+                limit=args.limit,
+                include_blocked=args.include_blocked,
+            )
+        print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "darkflow-trade-candidate-shadow-forward":
+        async with SessionLocal() as session:
+            result = await open_darkflow_shadow_forward_samples(
+                session,
+                limit=args.limit,
+                max_candidate_age_hours=args.max_candidate_age_hours,
+                entry_tolerance_pct=args.entry_tolerance_pct,
+            )
+        print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "darkflow-trade-candidate-promotion":
+        async with SessionLocal() as session:
+            result = await refresh_darkflow_candidate_promotion(
+                session,
+                limit=args.limit,
+                shadow_limit=args.shadow_limit,
+                max_candidate_age_hours=args.max_candidate_age_hours,
+                entry_tolerance_pct=args.entry_tolerance_pct,
+            )
+        print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "darkflow-trade-candidate-promotion-report":
+        async with SessionLocal() as session:
+            result = await darkflow_candidate_promotion_report(session, limit=args.limit)
         print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
         await engine.dispose()
         return 0

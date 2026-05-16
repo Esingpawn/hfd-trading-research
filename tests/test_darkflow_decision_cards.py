@@ -7,7 +7,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
-from app.models import DarkflowInteraction, TradeCandidate
+from app.models import DarkflowInteraction, PriceSnapshot, ShadowPaperTrade, TradeCandidate
+from app.services.darkflow_candidate_promotion import (
+    DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+    audit_darkflow_trade_candidates,
+    darkflow_candidate_promotion_report,
+    open_darkflow_shadow_forward_samples,
+)
 from app.services.darkflow_decision_cards import (
     latest_darkflow_decision_cards,
     latest_materialized_trade_candidates,
@@ -318,8 +324,140 @@ async def test_trade_candidate_refresh_preserves_lifecycle_when_plan_unchanged(s
     refreshed = await materialize_darkflow_trade_candidates(session, limit=10)
     candidate = await session.scalar(select(TradeCandidate))
 
-    assert refreshed["updated"] == 0
+    assert refreshed["updated"] == 1
     assert candidate is not None
     assert candidate.anti_repaint_status == "passed"
     assert candidate.shadow_status == "collecting"
     assert candidate.promotion_status == "shadow_running"
+    assert "anti_repaint_audit_missing" not in candidate.promotion_blockers
+    assert "isolated_v2_shadow_forward_sample_collecting" in candidate.promotion_blockers
+
+
+@pytest.mark.asyncio
+async def test_trade_candidate_audit_passes_rebuildable_candidates(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-audit",
+            zone_key="zone-candidate-audit",
+            source_snapshot_id="snapshot-candidate-audit",
+            symbol="BTCUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            playbook="pullback_to_cost",
+            direction="long",
+            interaction_type="wick_pierce_reclaim",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "evidence": {"trend_alignment": {"aligned": True}},
+                "target_plan": {"model": "tutorial_dynamic_zone_target_v1"},
+                "quality": {
+                    "score": 92.0,
+                    "confirmations": ["official_rule_mapped", "dynamic_darkflow_target"],
+                    "blockers": [],
+                },
+            },
+        )
+    )
+    await session.commit()
+    await materialize_darkflow_trade_candidates(session, limit=10)
+
+    result = await audit_darkflow_trade_candidates(session, limit=10)
+    candidate = await session.scalar(select(TradeCandidate))
+
+    assert result["passed"] == 1
+    assert candidate is not None
+    assert candidate.anti_repaint_status == "passed"
+    assert candidate.promotion_status == "shadow_forward_pending"
+    assert "anti_repaint_audit_missing" not in candidate.promotion_blockers
+    assert "isolated_v2_shadow_forward_sample_missing" in candidate.promotion_blockers
+
+
+@pytest.mark.asyncio
+async def test_shadow_forward_opens_isolated_v2_sample_after_audit(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-shadow-forward",
+            zone_key="zone-candidate-shadow-forward",
+            source_snapshot_id="snapshot-candidate-shadow-forward",
+            symbol="BTCUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            playbook="pullback_to_cost",
+            direction="long",
+            interaction_type="wick_pierce_reclaim",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "evidence": {"trend_alignment": {"aligned": True}},
+                "target_plan": {"model": "tutorial_dynamic_zone_target_v1"},
+                "quality": {
+                    "score": 92.0,
+                    "confirmations": ["official_rule_mapped", "dynamic_darkflow_target"],
+                    "blockers": [],
+                },
+            },
+        )
+    )
+    session.add(
+        PriceSnapshot(
+            symbol="BTCUSDT",
+            price=100.0,
+            raw_payload={},
+            collected_at=base + timedelta(minutes=5),
+            created_at=base + timedelta(minutes=5),
+        )
+    )
+    await session.commit()
+    await materialize_darkflow_trade_candidates(session, limit=10)
+    await audit_darkflow_trade_candidates(session, limit=10)
+
+    result = await open_darkflow_shadow_forward_samples(
+        session,
+        limit=10,
+        max_candidate_age_hours=0,
+        entry_tolerance_pct=0.05,
+    )
+    candidate = await session.scalar(select(TradeCandidate))
+    trades = (await session.execute(select(ShadowPaperTrade))).scalars().all()
+    report = await darkflow_candidate_promotion_report(session, limit=10)
+
+    assert len(result["opened"]) == 1
+    assert len(trades) == 1
+    assert trades[0].strategy_name == DARKFLOW_V2_SHADOW_STRATEGY_NAME
+    assert trades[0].context["opens_paper_trades"] is False
+    assert trades[0].context["opens_live_orders"] is False
+    assert candidate is not None
+    assert candidate.shadow_status == "collecting"
+    assert candidate.promotion_status == "shadow_forward_collecting"
+    assert candidate.paper_eligible is False
+    assert candidate.live_eligible is False
+    assert report["shadow_status_counts"] == {"collecting": 1}

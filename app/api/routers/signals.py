@@ -49,6 +49,12 @@ from app.services.darkflow_decision_cards import (
     latest_materialized_trade_candidates,
     materialize_darkflow_trade_candidates,
 )
+from app.services.darkflow_candidate_promotion import (
+    audit_darkflow_trade_candidates,
+    darkflow_candidate_promotion_report,
+    open_darkflow_shadow_forward_samples,
+    refresh_darkflow_candidate_promotion,
+)
 from app.services.darkflow_rules import darkflow_rulebook
 from app.services.indicator_catalog import indicator_experiment_coverage
 from app.services.signal_attribution import backfill_signal_outcomes, signal_effectiveness
@@ -237,6 +243,55 @@ async def materialize_darkflow_trade_candidates_report(
         limit=limit,
         min_quality_score=min_quality_score,
         min_rr_ratio=min_rr_ratio,
+    )
+
+
+@router.get("/darkflow/trade-candidates/promotion")
+async def darkflow_trade_candidate_promotion_report(
+    session: SessionDep,
+    limit: int = Query(default=500, ge=1, le=5000),
+) -> dict[str, object]:
+    return await darkflow_candidate_promotion_report(session, limit=limit)
+
+
+@router.post("/darkflow/trade-candidates/audit")
+async def audit_darkflow_trade_candidates_report(
+    session: SessionDep,
+    limit: int = Query(default=500, ge=1, le=5000),
+    include_blocked: bool = Query(default=False),
+) -> dict[str, object]:
+    return await audit_darkflow_trade_candidates(session, limit=limit, include_blocked=include_blocked)
+
+
+@router.post("/darkflow/trade-candidates/shadow-forward")
+async def open_darkflow_shadow_forward_report(
+    session: SessionDep,
+    limit: int = Query(default=100, ge=1, le=1000),
+    max_candidate_age_hours: float = Query(default=72.0, ge=0.0, le=720.0),
+    entry_tolerance_pct: float = Query(default=0.025, ge=0.0, le=0.2),
+) -> dict[str, object]:
+    return await open_darkflow_shadow_forward_samples(
+        session,
+        limit=limit,
+        max_candidate_age_hours=max_candidate_age_hours,
+        entry_tolerance_pct=entry_tolerance_pct,
+    )
+
+
+@router.post("/darkflow/trade-candidates/promotion/refresh")
+async def refresh_darkflow_trade_candidate_promotion_report(
+    session: SessionDep,
+    limit: int = Query(default=500, ge=1, le=5000),
+    shadow_limit: int = Query(default=100, ge=1, le=1000),
+    max_candidate_age_hours: float = Query(default=72.0, ge=0.0, le=720.0),
+    entry_tolerance_pct: float = Query(default=0.025, ge=0.0, le=0.2),
+) -> dict[str, object]:
+    return await refresh_darkflow_candidate_promotion(
+        session,
+        limit=limit,
+        shadow_limit=shadow_limit,
+        max_candidate_age_hours=max_candidate_age_hours,
+        entry_tolerance_pct=entry_tolerance_pct,
     )
 
 
