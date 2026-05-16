@@ -32,6 +32,12 @@ from app.services.features import (
     reset_feature_research,
     refresh_feature_research,
 )
+from app.services.darkflow_playbooks import (
+    darkflow_playbook_backtest,
+    darkflow_playbook_catalog,
+    latest_darkflow_playbook_backtest,
+)
+from app.services.darkflow_rules import darkflow_rulebook
 from app.services.indicator_catalog import indicator_experiment_coverage
 from app.services.signal_attribution import backfill_signal_outcomes, signal_effectiveness
 from app.services.signal_weights import signal_weight_governance
@@ -75,6 +81,72 @@ async def signals_weights(
 @router.get("/signals/experiments")
 async def signals_experiments(session: SessionDep) -> dict[str, object]:
     return await indicator_experiment_coverage(session)
+
+
+@router.get("/darkflow/rulebook")
+async def darkflow_rulebook_report() -> dict[str, object]:
+    return darkflow_rulebook()
+
+
+@router.get("/darkflow/playbooks")
+async def darkflow_playbook_catalog_report() -> dict[str, object]:
+    return darkflow_playbook_catalog()
+
+
+@router.get("/darkflow/playbooks/backtest/latest")
+async def latest_darkflow_playbook_backtest_report(
+    session: SessionDep,
+    horizon: str = Query(default="4h", pattern="^(30m|1h|4h|24h)$"),
+) -> dict[str, object]:
+    return await latest_darkflow_playbook_backtest(session, horizon=horizon)
+
+
+@router.get("/darkflow/playbooks/backtest")
+async def darkflow_playbook_backtest_report(
+    session: SessionDep,
+    horizon: str = Query(default="4h", pattern="^(30m|1h|4h|24h)$"),
+    limit: int = Query(default=5000, ge=1, le=100000),
+    min_samples: int = Query(default=30, ge=1, le=5000),
+    min_win_rate: float = Query(default=0.52, ge=0.0, le=1.0),
+    min_profit_factor: float = Query(default=1.1, ge=0.0, le=1000.0),
+    min_avg_return: float = Query(default=0.0, ge=-1.0, le=1.0),
+    confirmation_window_minutes: int = Query(default=90, ge=1, le=1440),
+) -> dict[str, object]:
+    return await darkflow_playbook_backtest(
+        session,
+        horizon=horizon,
+        limit=limit,
+        min_samples=min_samples,
+        min_win_rate=min_win_rate,
+        min_profit_factor=min_profit_factor,
+        min_avg_return=min_avg_return,
+        confirmation_window_minutes=confirmation_window_minutes,
+        persist=False,
+    )
+
+
+@router.post("/darkflow/playbooks/backtest")
+async def persist_darkflow_playbook_backtest_report(
+    session: SessionDep,
+    horizon: str = Query(default="4h", pattern="^(30m|1h|4h|24h)$"),
+    limit: int = Query(default=5000, ge=1, le=100000),
+    min_samples: int = Query(default=30, ge=1, le=5000),
+    min_win_rate: float = Query(default=0.52, ge=0.0, le=1.0),
+    min_profit_factor: float = Query(default=1.1, ge=0.0, le=1000.0),
+    min_avg_return: float = Query(default=0.0, ge=-1.0, le=1.0),
+    confirmation_window_minutes: int = Query(default=90, ge=1, le=1440),
+) -> dict[str, object]:
+    return await darkflow_playbook_backtest(
+        session,
+        horizon=horizon,
+        limit=limit,
+        min_samples=min_samples,
+        min_win_rate=min_win_rate,
+        min_profit_factor=min_profit_factor,
+        min_avg_return=min_avg_return,
+        confirmation_window_minutes=confirmation_window_minutes,
+        persist=True,
+    )
 
 
 @router.get("/signals/experiment-effectiveness")

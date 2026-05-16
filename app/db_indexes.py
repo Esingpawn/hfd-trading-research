@@ -71,6 +71,12 @@ SQLITE_INDEX_SPECS: tuple[SqliteIndexSpec, ...] = (
         "feature effectiveness grouping and event labeling",
     ),
     SqliteIndexSpec(
+        "ix_feature_events_indicator_ts_id",
+        "feature_events",
+        "indicator, event_ts, id",
+        "darkflow playbook sampling by official indicator",
+    ),
+    SqliteIndexSpec(
         "ix_feature_labels_horizon_status",
         "feature_labels",
         "horizon, status",

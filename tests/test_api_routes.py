@@ -11,6 +11,7 @@ def test_task_enqueue_exposes_research_quality_params() -> None:
     assert "min_unique_collection_runs" in query_params
     assert "replay_limit" in query_params
     assert "force" in query_params
+    assert "confirmation_window_minutes" in query_params
 
 
 def test_expected_api_routes_are_registered() -> None:
@@ -32,6 +33,11 @@ def test_expected_api_routes_are_registered() -> None:
         ("GET", "/shadow-paper/stats"),
         ("POST", "/signals/backfill"),
         ("GET", "/signals/weights"),
+        ("GET", "/darkflow/rulebook"),
+        ("GET", "/darkflow/playbooks"),
+        ("GET", "/darkflow/playbooks/backtest"),
+        ("GET", "/darkflow/playbooks/backtest/latest"),
+        ("POST", "/darkflow/playbooks/backtest"),
         ("POST", "/features/backfill"),
         ("POST", "/features/labels/backfill"),
         ("POST", "/features/reset"),

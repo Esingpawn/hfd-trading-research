@@ -22,6 +22,8 @@ from app.services.backtest import run_cost_band_retest_backtest
 from app.services.collection_schedule import research_due_timeframes, research_intervals
 from app.services.collector import SnapshotCollector
 from app.services.data_quality import data_quality_report
+from app.services.darkflow_playbooks import darkflow_playbook_backtest, darkflow_playbook_catalog
+from app.services.darkflow_rules import darkflow_rulebook
 from app.services.feature_candidates import (
     feature_candidate_screen,
     feature_paper_ab,
@@ -379,6 +381,23 @@ def build_parser() -> argparse.ArgumentParser:
     research_reports.add_argument("--horizon", choices=["30m", "1h", "4h", "24h"], default="30m")
     research_reports.add_argument("--min-samples", type=int, default=30)
     research_reports.add_argument("--limit", type=int, default=5000)
+
+    subparsers.add_parser("darkflow-rulebook", help="Print official HFD tutorial rulebook mapping")
+
+    subparsers.add_parser("darkflow-playbooks", help="Print darkflow tutorial playbook catalog")
+
+    darkflow_backtest = subparsers.add_parser(
+        "darkflow-playbook-backtest",
+        help="Run research-only darkflow tutorial playbook backtest from feature labels",
+    )
+    darkflow_backtest.add_argument("--horizon", choices=["30m", "1h", "4h", "24h"], default="4h")
+    darkflow_backtest.add_argument("--limit", type=int, default=5000)
+    darkflow_backtest.add_argument("--min-samples", type=int, default=30)
+    darkflow_backtest.add_argument("--min-win-rate", type=float, default=0.52)
+    darkflow_backtest.add_argument("--min-profit-factor", type=float, default=1.1)
+    darkflow_backtest.add_argument("--min-avg-return", type=float, default=0.0)
+    darkflow_backtest.add_argument("--confirmation-window-minutes", type=int, default=90)
+    darkflow_backtest.add_argument("--persist", action="store_true", help="Save the report as an experiment run")
 
     subparsers.add_parser("storage-health", help="Show database storage health")
     storage_maintain = subparsers.add_parser("storage-maintain", help="Run safe database maintenance")
@@ -1040,6 +1059,33 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 horizon=args.horizon,
                 min_samples=args.min_samples,
                 limit=args.limit,
+            )
+        print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "darkflow-rulebook":
+        print(json.dumps(jsonable(darkflow_rulebook()), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "darkflow-playbooks":
+        print(json.dumps(jsonable(darkflow_playbook_catalog()), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "darkflow-playbook-backtest":
+        async with SessionLocal() as session:
+            result = await darkflow_playbook_backtest(
+                session,
+                horizon=args.horizon,
+                limit=args.limit,
+                min_samples=args.min_samples,
+                min_win_rate=args.min_win_rate,
+                min_profit_factor=args.min_profit_factor,
+                min_avg_return=args.min_avg_return,
+                confirmation_window_minutes=args.confirmation_window_minutes,
+                persist=args.persist,
             )
         print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
         await engine.dispose()

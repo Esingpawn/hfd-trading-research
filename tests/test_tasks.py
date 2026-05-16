@@ -418,6 +418,28 @@ async def test_run_task_by_id_executes_research_report_materialization(session) 
 
 
 @pytest.mark.asyncio
+async def test_run_task_by_id_executes_darkflow_playbook_backtest(session) -> None:
+    await _add_feature_group(session, symbol="BTCUSDT")
+    item = TaskRun(
+        task_name="darkflow.playbook_backtest",
+        payload={"horizon": "30m", "min_samples": 6, "limit": 100, "persist": True},
+        result={},
+    )
+    session.add(item)
+    await session.commit()
+
+    result = await run_task_by_id(session, item.id)
+    experiment = await session.scalar(select(ExperimentRun).where(ExperimentRun.name == "darkflow_playbook_backtest_30m"))
+
+    assert result["status"] == "completed"
+    assert result["result"]["execution"]["policy"]["opens_live_orders"] is False
+    assert result["result"]["execution"]["policy"]["opens_paper_trades"] is False
+    assert result["result"]["execution"]["playbook_count"] >= 6
+    assert experiment is not None
+    assert experiment.status == "research"
+
+
+@pytest.mark.asyncio
 async def test_run_task_by_id_caps_research_report_materialization_limit(session) -> None:
     await _add_feature_group(session, symbol="BTCUSDT")
     item = TaskRun(
@@ -669,6 +691,7 @@ async def test_run_task_by_id_executes_research_acceleration_cycle(session) -> N
     execution = result["result"]["execution"]
     assert execution["policy"]["opens_live_orders"] is False
     assert execution["steps"]["research_reports"]["generated_count"] == 4
+    assert execution["steps"]["darkflow_playbook_backtest"]["policy"]["opens_paper_trades"] is False
     assert execution["steps"]["shadow_replay"]["policy"]["opens_paper_trades"] is False
     assert execution["steps"]["shadow_scan"]["policy"]["opens_paper_trades"] is False
     assert execution["steps"]["shadow_promotion"]["promotion"]["criteria"]["cost_model_required"] is True

@@ -59,6 +59,7 @@ class FeatureEvent(Base):
     __table_args__ = (
         UniqueConstraint("event_key", name="uq_feature_events_event_key"),
         Index("ix_feature_events_indicator_feature_ts", "indicator", "feature_name", "event_ts"),
+        Index("ix_feature_events_indicator_ts_id", "indicator", "event_ts", "id"),
         Index("ix_feature_events_symbol_timeframe_ts", "symbol", "timeframe", "event_ts"),
     )
 

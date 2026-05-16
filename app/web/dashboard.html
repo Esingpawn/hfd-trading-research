@@ -1082,6 +1082,11 @@
             <h3>实验特征检验</h3>
             <div id="experimentEffectiveness" class="miniTable"><div class="empty">等待实验特征检验</div></div>
           </div>
+          <div class="detailBlock" style="margin-top:10px">
+            <h3>官方教程语义回测</h3>
+            <div id="darkflowPlaybookSummary" class="kvList"></div>
+            <div id="darkflowPlaybooks" class="miniTable"><div class="empty">等待暗流 playbook 回测</div></div>
+          </div>
           <div class="detailBlock">
             <h3>暗流指标映射</h3>
             <div id="indicatorCatalog" class="miniTable"><div class="empty">等待指标映射</div></div>
@@ -1235,6 +1240,7 @@
       weights: null,
       experiments: null,
       experimentEffectiveness: null,
+      darkflowPlaybookBacktest: null,
       featureCandidates: null,
       featurePaperAb: null,
       featureSegmentCandidates: null,
@@ -2039,6 +2045,7 @@
       const weightData = state.weights || {};
       const experiments = state.experiments || {};
       const experimentEffectiveness = state.experimentEffectiveness || {};
+      const darkflowPlaybookBacktest = state.darkflowPlaybookBacktest || {};
       const featureCandidates = state.featureCandidates || {};
       const featurePaperAb = state.featurePaperAb || {};
       const featureSegmentCandidates = state.featureSegmentCandidates || {};
@@ -2114,6 +2121,23 @@
         { label:"噪音风险", render: row => esc(noiseRiskText(row.noise_risk)) },
         { label:"建议", render: row => esc(row.recommendation) }
       ], "暂无实验特征检验数据"));
+      setHtml("darkflowPlaybookSummary", kvRows([
+        ["窗口", esc(darkflowPlaybookBacktest.horizon || "4h")],
+        ["已标注", fmt(darkflowPlaybookBacktest.labeled_count || 0, 0)],
+        ["教程覆盖", `${fmt(darkflowPlaybookBacktest.covered_labeled_count || 0, 0)} / ${fmt(darkflowPlaybookBacktest.uncovered_labeled_count || 0, 0)}`],
+        ["候选/观察", `${fmt(darkflowPlaybookBacktest.candidate_playbook_count || 0, 0)} / ${fmt(darkflowPlaybookBacktest.watchlist_playbook_count || 0, 0)}`],
+        ["隔离", darkflowPlaybookBacktest.policy && darkflowPlaybookBacktest.policy.opens_paper_trades === false ? `<span class="green">仅研究</span>` : `<span class="amber">待确认</span>`]
+      ]));
+      setHtml("darkflowPlaybooks", table((darkflowPlaybookBacktest.playbooks || []).slice(0, 8), [
+        { label:"玩法", render: row => esc(row.display_name || row.key) },
+        { label:"样本", render: row => fmt(row.sample_count || 0, 0) },
+        { label:"确认", render: row => `${fmt(row.confirmed_sample_count || 0, 0)} / ${pct(row.confirmation_rate, 1)}` },
+        { label:"胜率", render: row => pct((row.stats || {}).win_rate, 1) },
+        { label:"平均收益", render: row => coloredPct((row.stats || {}).avg_return) },
+        { label:"PF", render: row => fmt((row.stats || {}).profit_factor, 2) },
+        { label:"回撤", render: row => pct((row.stats || {}).max_drawdown, 1) },
+        { label:"状态", render: row => tag((row.readiness || {}).status === "candidate" ? "ok" : (row.readiness || {}).status === "watchlist" ? "warn" : "neutral", esc((row.readiness || {}).status || "research")) }
+      ], "暂无官方教程语义回测报告"));
       setHtml("featureCandidatesSummary", kvRows([
         ["窗口", esc(featureCandidates.horizon || "30m")],
         ["已标注", fmt(featureCandidates.labeled_count || 0, 0)],
@@ -2449,6 +2473,11 @@
         state.experimentEffectiveness = experimentEffectiveness;
         renderEffectiveness();
         renderSettings();
+
+        const darkflowPlaybookBacktest = await api("/darkflow/playbooks/backtest/latest?horizon=4h")
+          .catch(error => ({ error: error.message, playbooks: [] }));
+        state.darkflowPlaybookBacktest = darkflowPlaybookBacktest;
+        renderEffectiveness();
 
         const featureCandidates = await api("/features/candidates/latest?horizon=30m")
           .catch(error => ({ error: error.message, candidates: [], watchlist: [] }));

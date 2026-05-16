@@ -23,6 +23,7 @@ from app.services.features import (
     reset_feature_research,
     refresh_feature_research,
 )
+from app.services.darkflow_playbooks import darkflow_playbook_backtest
 from app.services.paper import mark_open_trades, paper_scan
 from app.services.shadow_paper import (
     mark_shadow_paper_trades,
@@ -367,6 +368,18 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
             limit=_payload_int(payload, "limit", 5000),
             max_age_seconds=0 if _payload_bool(payload, "force", False) else _payload_int(payload, "max_age_seconds", 3600),
         )
+    if task_name in {"darkflow.playbook_backtest", "darkflow-playbook-backtest"}:
+        return await darkflow_playbook_backtest(
+            session,
+            horizon=_payload_str(payload, "horizon", "4h"),
+            limit=_payload_int(payload, "limit", 5000),
+            min_samples=_payload_int(payload, "min_samples", 30),
+            min_win_rate=_payload_float(payload, "min_win_rate", 0.52),
+            min_profit_factor=_payload_float(payload, "min_profit_factor", 1.1),
+            min_avg_return=_payload_float(payload, "min_avg_return", 0.0),
+            confirmation_window_minutes=_payload_int(payload, "confirmation_window_minutes", 90),
+            persist=_payload_bool(payload, "persist", True),
+        )
     if task_name in {"data_quality.report", "data-quality-report"}:
         return await data_quality_report(session)
     if task_name in {"storage.maintain", "storage-maintain"}:
@@ -417,6 +430,17 @@ async def _research_acceleration_cycle(session: AsyncSession, payload: dict[str,
         min_samples=_payload_int(payload, "min_samples", 30),
         limit=report_limit,
         max_age_seconds=0,
+    )
+    result["steps"]["darkflow_playbook_backtest"] = await darkflow_playbook_backtest(
+        session,
+        horizon=_payload_str(payload, "darkflow_horizon", _payload_str(payload, "horizon", "4h")),
+        limit=_payload_int(payload, "darkflow_limit", report_limit),
+        min_samples=_payload_int(payload, "darkflow_min_samples", _payload_int(payload, "min_samples", 30)),
+        min_win_rate=_payload_float(payload, "darkflow_min_win_rate", 0.52),
+        min_profit_factor=_payload_float(payload, "darkflow_min_profit_factor", 1.1),
+        min_avg_return=_payload_float(payload, "darkflow_min_avg_return", 0.0),
+        confirmation_window_minutes=_payload_int(payload, "confirmation_window_minutes", 90),
+        persist=_payload_bool(payload, "darkflow_persist", True),
     )
     result["steps"]["shadow_mark"] = await mark_shadow_paper_trades(session)
     result["steps"]["shadow_replay"] = await shadow_paper_replay(
