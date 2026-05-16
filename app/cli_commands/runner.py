@@ -1338,7 +1338,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
                         last_shadow_paper_at = now
                     print(
                         json.dumps(
-                            {
+                            jsonable({
                                 "run": run_number,
                                 "status": "processed",
                                 "backfill": result["signals"],
@@ -1346,7 +1346,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
                                 "features": result["features"],
                                 "research_reports": result["research_reports"],
                                 "shadow_paper": result["shadow_paper"],
-                            },
+                            }),
                             ensure_ascii=False,
                         ),
                         flush=True,
