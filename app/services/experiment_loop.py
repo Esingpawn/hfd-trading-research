@@ -51,6 +51,15 @@ async def run_experiment_backfill(
         "shadow_paper": {"enabled": False},
         "darkflow": {"enabled": False},
     }
+    if include_darkflow_pipeline:
+        payload["darkflow"] = await _run_darkflow_pipeline(
+            session,
+            limit=darkflow_limit,
+            backtest_limit=darkflow_backtest_limit,
+            candidate_limit=darkflow_candidate_limit,
+            shadow_limit=darkflow_shadow_limit,
+            max_hold_bars=darkflow_max_hold_bars,
+        )
     if include_feature_research:
         horizons = list(feature_horizons or DEFAULT_FEATURE_HORIZONS)
         event_result = await backfill_feature_events(
@@ -89,15 +98,6 @@ async def run_experiment_backfill(
                 include_watchlist=shadow_include_watchlist,
             ),
         }
-    if include_darkflow_pipeline:
-        payload["darkflow"] = await _run_darkflow_pipeline(
-            session,
-            limit=darkflow_limit,
-            backtest_limit=darkflow_backtest_limit,
-            candidate_limit=darkflow_candidate_limit,
-            shadow_limit=darkflow_shadow_limit,
-            max_hold_bars=darkflow_max_hold_bars,
-        )
     return payload
 
 
