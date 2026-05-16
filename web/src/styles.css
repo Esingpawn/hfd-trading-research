@@ -270,6 +270,61 @@ h2 { margin: 0; font-size: 15px; }
 .lineageBox strong { display: block; }
 .lineageBox span { display: block; margin-top: 4px; color: #9aa7b4; font-size: 13px; line-height: 1.5; }
 
+.statePanel {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.stateSummary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.stateSummary > div,
+.stateBucket,
+.stateSample {
+  border: 1px solid #202a36;
+  background: #0b1118;
+  border-radius: 6px;
+  padding: 10px;
+}
+.stateSummary span,
+.stateBucket span,
+.stateSample span {
+  display: block;
+  color: #9aa7b4;
+  font-size: 12px;
+}
+.stateSummary strong,
+.stateBucket strong,
+.stateSample strong {
+  display: block;
+  margin-top: 5px;
+  font-family: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+}
+.stateSummary strong { color: #3b82f6; font-size: 20px; }
+.stateSummary small,
+.stateSample small { display: block; margin-top: 4px; color: #667382; font-size: 12px; line-height: 1.4; }
+.stateBuckets {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+}
+.stateBucket { min-height: 70px; }
+.stateBucket strong { font-size: 21px; }
+.stateBucket.good strong { color: #16c784; }
+.stateBucket.info strong { color: #3b82f6; }
+.stateBucket.warn strong { color: #f0b90b; }
+.stateBucket.bad strong { color: #ea3943; }
+.stateSamples { display: grid; gap: 8px; }
+.stateSample {
+  display: grid;
+  grid-template-columns: 110px 90px 1fr;
+  gap: 8px;
+  align-items: center;
+}
+.stateSample span { color: #cbd5e1; }
+
 .candidateTable { display: grid; gap: 8px; }
 .candidateHead,
 .candidateRow {
@@ -330,6 +385,9 @@ h2 { margin: 0; font-size: 15px; }
   .brandBlock span, nav button:not(.active) { font-size: 0; }
   nav button { justify-content: center; }
   .heroGrid, .contentGrid { grid-template-columns: 1fr; }
+  .stateBuckets { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .stateSample { grid-template-columns: 1fr 1fr; }
+  .stateSample small { grid-column: 1 / -1; }
   .candidateHead { display: none; }
   .candidateRow { grid-template-columns: 1fr 1fr; }
 }
@@ -341,6 +399,8 @@ h2 { margin: 0; font-size: 15px; }
   nav button { padding: 0; }
   .workspace { padding: 12px; }
   .topbar { align-items: flex-start; flex-direction: column; }
-  .metricGrid, .levels, .qualityPanel { grid-template-columns: 1fr; }
+  .metricGrid, .levels, .qualityPanel, .stateSummary, .stateBuckets { grid-template-columns: 1fr; }
+  .stateSample { grid-template-columns: 1fr; }
+  .stateSample small { grid-column: auto; }
   .candidateRow { grid-template-columns: 1fr; }
 }

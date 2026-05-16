@@ -48,6 +48,41 @@ type TradeCandidateReport = {
   policy: Policy;
 };
 
+type EntryPlanStateReport = {
+  candidate_count: number;
+  generated_at?: string | null;
+  state_counts: Record<string, number>;
+  reason_counts: Record<string, number>;
+  missing_price_count: number;
+  samples: EntryPlanSample[];
+  thresholds: { entry_tolerance_pct: number };
+  policy: Policy & { report_only?: boolean; mutates_candidate_state?: boolean };
+};
+
+type EntryPlanSample = {
+  candidate_key: string;
+  symbol: string;
+  direction: "long" | "short" | string;
+  status: string;
+  promotion_status: string;
+  anti_repaint_status: string;
+  shadow_status: string;
+  entry_price: number;
+  stop_price: number;
+  target_price: number;
+  quality_score: number;
+  entry_plan_state: {
+    state: string;
+    reason: string;
+    mark_price?: number | null;
+    planned_entry?: number;
+    planned_stop?: number;
+    target_price?: number;
+    entry_range?: { lower?: number; upper?: number; source?: string };
+    valid_until?: string | null;
+  };
+};
+
 type TradeCandidate = {
   candidate_key: string;
   strategy_id: string;
@@ -151,6 +186,7 @@ type LoadState = {
   quality: DataQuality | null;
   cards: DecisionCardReport | null;
   candidates: TradeCandidateReport | null;
+  entryStates: EntryPlanStateReport | null;
   darkflow: DarkflowBacktest | null;
   shadow: ShadowStats | null;
 };
@@ -162,6 +198,7 @@ const EMPTY_STATE: LoadState = {
   quality: null,
   cards: null,
   candidates: null,
+  entryStates: null,
   darkflow: null,
   shadow: null,
 };
@@ -185,6 +222,7 @@ function App() {
       loadSection("quality", () => fetchJson<DataQuality>("/data/quality-report")),
       loadSection("cards", () => fetchJson<DecisionCardReport>("/darkflow/decision-cards?limit=12")),
       loadSection("candidates", () => fetchJson<TradeCandidateReport>("/darkflow/trade-candidates?limit=12")),
+      loadSection("entryStates", () => fetchJson<EntryPlanStateReport>("/darkflow/trade-candidates/entry-plan-states?limit=200")),
       loadSection("darkflow", () => fetchJson<DarkflowBacktest>("/darkflow/interactions/backtest/latest")),
       loadSection("shadow", () => fetchJson<ShadowStats>("/shadow-paper/stats")),
     ]);
@@ -271,6 +309,7 @@ function App() {
 
         <section className="contentGrid single">
           <Panel title="候选生命周期" subtitle={`${data.candidates?.candidate_count ?? 0} materialized candidates`}>
+            <EntryPlanStatePanel report={data.entryStates} />
             <CandidateLifecycle candidates={data.candidates?.candidates ?? []} />
           </Panel>
         </section>
@@ -285,6 +324,7 @@ function LoadErrorBanner({ errors }: { errors: LoadErrors }) {
     quality: "数据质量",
     cards: "暗流交易卡",
     candidates: "持久候选",
+    entryStates: "入场计划状态",
     darkflow: "暗流回测",
     shadow: "旧影子盘",
   };
@@ -392,6 +432,49 @@ function CandidateLifecycle({ candidates }: { candidates: TradeCandidate[] }) {
       {candidates.map((item) => (
         <CandidateRow key={item.candidate_key} item={item} />
       ))}
+    </div>
+  );
+}
+
+function EntryPlanStatePanel({ report }: { report: EntryPlanStateReport | null }) {
+  if (!report) {
+    return <div className="statePanel"><Empty text="等待入场计划状态报告" /></div>;
+  }
+  const states = ["triggered", "waiting", "missed", "expired", "invalidated", "missing_price", "invalid_shape"];
+  const topReason = Object.entries(report.reason_counts).sort((a, b) => b[1] - a[1])[0];
+  return (
+    <div className="statePanel">
+      <div className="stateSummary">
+        <div>
+          <span>冻结计划状态</span>
+          <strong>{fmt(report.candidate_count, 0)}</strong>
+          <small>更新时间 {timeText(report.generated_at)}</small>
+        </div>
+        <div>
+          <span>主要阻塞</span>
+          <strong>{topReason ? stateReasonText(topReason[0]) : "--"}</strong>
+          <small>{topReason ? `${fmt(topReason[1], 0)} candidates` : "无"}</small>
+        </div>
+      </div>
+      <div className="stateBuckets">
+        {states.map((state) => (
+          <div className={`stateBucket ${stateTone(state)}`} key={state}>
+            <span>{entryStateText(state)}</span>
+            <strong>{fmt(report.state_counts[state] ?? 0, 0)}</strong>
+          </div>
+        ))}
+      </div>
+      <div className="stateSamples">
+        {report.samples.slice(0, 5).map((sample) => (
+          <div className="stateSample" key={sample.candidate_key}>
+            <strong>{sample.symbol}</strong>
+            <span>{entryStateText(sample.entry_plan_state.state)}</span>
+            <small>
+              {stateReasonText(sample.entry_plan_state.reason)} · mark {fmt(sample.entry_plan_state.mark_price, 4)} · range {sampleRangeText(sample)}
+            </small>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -529,6 +612,38 @@ function gateText(value: string) {
   return value === "shadow_candidate" ? "影子候选" : value === "research_blocked" ? "研究阻断" : value;
 }
 
+function entryStateText(value: string) {
+  return {
+    triggered: "已触发",
+    waiting: "等待入场",
+    missed: "已错过",
+    expired: "已过期",
+    invalidated: "已失效",
+    missing_price: "缺价格",
+    invalid_shape: "形态异常",
+  }[value] ?? value;
+}
+
+function stateReasonText(value: string) {
+  return {
+    mark_price_inside_frozen_entry_range: "价格进入固定区间",
+    awaiting_frozen_entry_range: "尚未进入固定区间",
+    entry_range_missed: "价格已越过区间",
+    valid_until_passed: "超过有效期",
+    price_crosses_invalidation: "触发失效价",
+    missing_latest_price: "缺少最新价格",
+    invalid_long_frozen_entry_range: "多头区间异常",
+    invalid_short_frozen_entry_range: "空头区间异常",
+  }[value] ?? value.replace(/_/g, " ");
+}
+
+function stateTone(value: string) {
+  if (value === "triggered") return "good";
+  if (value === "waiting") return "info";
+  if (value === "missed" || value === "expired") return "warn";
+  return "bad";
+}
+
 function promotionText(value: string) {
   return value === "blocked" ? "阻断" : value === "shadow_ready_pending_audit" ? "待审计" : value === "shadow_running" ? "影子盘中" : value;
 }
@@ -549,6 +664,14 @@ function timeText(value?: string | null) {
 function entryRangeText(plan?: FrozenEntryPlan | null) {
   const lower = plan?.entry_range?.lower;
   const upper = plan?.entry_range?.upper;
+  if (typeof lower !== "number" || typeof upper !== "number") return "--";
+  return `${fmt(lower, 4)} ~ ${fmt(upper, 4)}`;
+}
+
+function sampleRangeText(sample: EntryPlanSample) {
+  const range = sample.entry_plan_state.entry_range;
+  const lower = range?.lower;
+  const upper = range?.upper;
   if (typeof lower !== "number" || typeof upper !== "number") return "--";
   return `${fmt(lower, 4)} ~ ${fmt(upper, 4)}`;
 }

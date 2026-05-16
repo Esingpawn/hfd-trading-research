@@ -51,6 +51,7 @@ from app.services.darkflow_decision_cards import (
 )
 from app.services.darkflow_candidate_promotion import (
     audit_darkflow_trade_candidates,
+    darkflow_entry_plan_state_report,
     darkflow_candidate_promotion_report,
     open_darkflow_shadow_forward_samples,
     refresh_darkflow_candidate_promotion,
@@ -252,6 +253,19 @@ async def darkflow_trade_candidate_promotion_report(
     limit: int = Query(default=500, ge=1, le=5000),
 ) -> dict[str, object]:
     return await darkflow_candidate_promotion_report(session, limit=limit)
+
+
+@router.get("/darkflow/trade-candidates/entry-plan-states")
+async def darkflow_trade_candidate_entry_plan_state_report(
+    session: SessionDep,
+    limit: int = Query(default=500, ge=1, le=5000),
+    entry_tolerance_pct: float = Query(default=0.025, ge=0.0, le=0.2),
+) -> dict[str, object]:
+    return await darkflow_entry_plan_state_report(
+        session,
+        limit=limit,
+        entry_tolerance_pct=entry_tolerance_pct,
+    )
 
 
 @router.post("/darkflow/trade-candidates/audit")

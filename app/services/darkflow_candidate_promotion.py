@@ -243,6 +243,71 @@ async def darkflow_candidate_promotion_report(
     }
 
 
+async def darkflow_entry_plan_state_report(
+    session: AsyncSession,
+    *,
+    limit: int = DEFAULT_PROMOTION_LIMIT,
+    entry_tolerance_pct: float = DEFAULT_ENTRY_TOLERANCE_PCT,
+) -> dict[str, Any]:
+    rows = await _candidate_rows(session, limit=limit, include_blocked=True)
+    now = utc_now()
+    prices = await _latest_prices(session, sorted({candidate.symbol for candidate in rows}))
+    counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    missing_price_count = 0
+    samples: list[dict[str, Any]] = []
+    for candidate in rows:
+        price = prices.get(candidate.symbol)
+        if price is None or price <= 0:
+            state = _missing_price_entry_plan_state(candidate, now=now)
+            missing_price_count += 1
+        else:
+            state = _candidate_entry_plan_state(
+                candidate,
+                mark_price=price,
+                now=now,
+                entry_tolerance_pct=entry_tolerance_pct,
+            )
+        state_key = str(state.get("state") or "unknown")
+        reason_key = str(state.get("reason") or "unknown")
+        counts[state_key] = counts.get(state_key, 0) + 1
+        reason_counts[reason_key] = reason_counts.get(reason_key, 0) + 1
+        if len(samples) < 25:
+            samples.append(
+                {
+                    "candidate_key": candidate.candidate_key,
+                    "symbol": candidate.symbol,
+                    "direction": candidate.direction,
+                    "status": candidate.status,
+                    "promotion_status": candidate.promotion_status,
+                    "anti_repaint_status": candidate.anti_repaint_status,
+                    "shadow_status": candidate.shadow_status,
+                    "entry_price": candidate.entry_price,
+                    "stop_price": candidate.stop_price,
+                    "target_price": candidate.target_price,
+                    "quality_score": candidate.quality_score,
+                    "entry_plan_state": state,
+                }
+            )
+    return {
+        "strategy_name": DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+        "requested_limit": max(1, int(limit)),
+        "candidate_count": len(rows),
+        "generated_at": _iso(now),
+        "state_counts": counts,
+        "reason_counts": reason_counts,
+        "missing_price_count": missing_price_count,
+        "samples": samples,
+        "thresholds": {"entry_tolerance_pct": float(entry_tolerance_pct)},
+        "policy": _policy() | {
+            "opens_paper_trades": False,
+            "opens_live_orders": False,
+            "mutates_candidate_state": False,
+            "report_only": True,
+        },
+    }
+
+
 async def _candidate_rows(session: AsyncSession, *, limit: int, include_blocked: bool) -> list[TradeCandidate]:
     query = select(TradeCandidate).where(TradeCandidate.lineage == "core_darkflow_v2")
     if not include_blocked:
@@ -313,6 +378,15 @@ async def _latest_price(session: AsyncSession, symbol: str) -> float | None:
         select(PriceSnapshot.price).where(PriceSnapshot.symbol == symbol).order_by(PriceSnapshot.created_at.desc()).limit(1)
     )
     return float(row) if isinstance(row, (int, float)) else None
+
+
+async def _latest_prices(session: AsyncSession, symbols: list[str]) -> dict[str, float]:
+    prices: dict[str, float] = {}
+    for symbol in symbols:
+        price = await _latest_price(session, symbol)
+        if price is not None and price > 0:
+            prices[symbol] = price
+    return prices
 
 
 async def _shadow_stats(session: AsyncSession, candidate_key: str) -> dict[str, Any]:
@@ -447,6 +521,39 @@ def _candidate_entry_plan_state(
     if _entry_range_missed(candidate.direction, mark_price=mark_price, lower=lower, upper=upper):
         state.update({"state": "missed", "reason": "entry_range_missed"})
         return state
+    return state
+
+
+def _missing_price_entry_plan_state(candidate: TradeCandidate, *, now: datetime) -> dict[str, Any]:
+    plan = _entry_plan(candidate)
+    planned_entry = _float(plan.get("planned_entry")) or float(candidate.entry_price)
+    planned_stop = _float(plan.get("planned_stop")) or float(candidate.stop_price)
+    target = _target_price_from_plan(plan) or float(candidate.target_price)
+    invalidation = _float(plan.get("invalidation_price")) or planned_stop
+    lower, upper, range_source = _entry_range(
+        plan,
+        direction=candidate.direction,
+        planned_entry=planned_entry,
+        planned_stop=planned_stop,
+        target_price=target,
+        entry_tolerance_pct=DEFAULT_ENTRY_TOLERANCE_PCT,
+    )
+    valid_until = _parse_iso_datetime(plan.get("valid_until"))
+    state = {
+        "state": "missing_price",
+        "reason": "missing_latest_price",
+        "plan_type": str(plan.get("plan_type") or "legacy_entry_plan"),
+        "evaluated_at": _iso(now),
+        "mark_price": None,
+        "planned_entry": planned_entry,
+        "planned_stop": planned_stop,
+        "target_price": target,
+        "invalidation_price": invalidation,
+        "entry_range": {"lower": lower, "upper": upper, "source": range_source},
+        "valid_until": _iso(valid_until),
+    }
+    if valid_until is not None and _aware(now) > valid_until:
+        state.update({"state": "expired", "reason": "valid_until_passed"})
     return state
 
 

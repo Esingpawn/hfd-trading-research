@@ -12,6 +12,7 @@ from app.services.darkflow_candidate_promotion import (
     DARKFLOW_V2_SHADOW_STRATEGY_NAME,
     audit_darkflow_trade_candidates,
     darkflow_candidate_promotion_report,
+    darkflow_entry_plan_state_report,
     open_darkflow_shadow_forward_samples,
 )
 from app.services.darkflow_decision_cards import (
@@ -654,3 +655,124 @@ async def test_shadow_forward_skips_invalidated_frozen_entry_range(session) -> N
     assert len(trades) == 0
     assert result["skipped"][0]["reason"] == "entry_plan_invalidated"
     assert result["skipped"][0]["entry_plan_state"]["reason"] == "price_crosses_invalidation"
+
+
+@pytest.mark.asyncio
+async def test_entry_plan_state_report_summarizes_frozen_candidate_states(session) -> None:
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    rows = [
+        ("state-waiting", "BTCUSDT", 99.2),
+        ("state-missed", "ETHUSDT", 101.0),
+        ("state-triggered", "SOLUSDT", 100.0),
+        ("state-invalidated", "LINKUSDT", 98.9),
+    ]
+    for key, symbol, price in rows:
+        session.add(
+            DarkflowInteraction(
+                interaction_key=key,
+                zone_key=f"zone-{key}",
+                source_snapshot_id=f"snapshot-{key}",
+                symbol=symbol,
+                timeframe="short",
+                interval="30m",
+                indicator="trend_price",
+                playbook="pullback_to_cost",
+                direction="long",
+                interaction_type="wick_pierce_reclaim",
+                event_ts=base,
+                entry_price=100.0,
+                stop_price=99.0,
+                target_price=102.0,
+                invalidation_price=99.0,
+                exit_price=102.0,
+                exit_ts=base + timedelta(minutes=30),
+                exit_reason="target_hit",
+                pnl_pct=0.02,
+                r_multiple=2.0,
+                mfe=0.025,
+                mae=-0.004,
+                status="backtested",
+                context={
+                    "interaction_schema": "v2",
+                    "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+                },
+            )
+        )
+        session.add(
+            PriceSnapshot(
+                symbol=symbol,
+                price=price,
+                raw_payload={},
+                collected_at=base + timedelta(minutes=5),
+                created_at=base + timedelta(minutes=5),
+            )
+        )
+    await session.commit()
+    await materialize_darkflow_trade_candidates(session, limit=10)
+
+    report = await darkflow_entry_plan_state_report(session, limit=10, entry_tolerance_pct=0.05)
+
+    assert report["candidate_count"] == 4
+    assert report["state_counts"] == {"waiting": 1, "missed": 1, "triggered": 1, "invalidated": 1}
+    assert report["policy"]["report_only"] is True
+    assert report["policy"]["mutates_candidate_state"] is False
+    assert report["policy"]["opens_live_orders"] is False
+
+
+@pytest.mark.asyncio
+async def test_entry_plan_state_report_marks_missing_price_and_expired(session) -> None:
+    expired_base = datetime.now(timezone.utc) - timedelta(hours=8)
+    fresh_base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    for key, symbol, base in (
+        ("state-expired", "BTCUSDT", expired_base),
+        ("state-missing", "ETHUSDT", fresh_base),
+    ):
+        session.add(
+            DarkflowInteraction(
+                interaction_key=key,
+                zone_key=f"zone-{key}",
+                source_snapshot_id=f"snapshot-{key}",
+                symbol=symbol,
+                timeframe="short",
+                interval="30m",
+                indicator="trend_price",
+                playbook="pullback_to_cost",
+                direction="long",
+                interaction_type="wick_pierce_reclaim",
+                event_ts=base,
+                entry_price=100.0,
+                stop_price=99.0,
+                target_price=102.0,
+                invalidation_price=99.0,
+                exit_price=102.0,
+                exit_ts=base + timedelta(minutes=30),
+                exit_reason="target_hit",
+                pnl_pct=0.02,
+                r_multiple=2.0,
+                mfe=0.025,
+                mae=-0.004,
+                status="backtested",
+                context={
+                    "interaction_schema": "v2",
+                    "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+                },
+            )
+        )
+    session.add(
+        PriceSnapshot(
+            symbol="BTCUSDT",
+            price=100.0,
+            raw_payload={},
+            collected_at=expired_base + timedelta(minutes=5),
+            created_at=expired_base + timedelta(minutes=5),
+        )
+    )
+    await session.commit()
+    await materialize_darkflow_trade_candidates(session, limit=10)
+
+    report = await darkflow_entry_plan_state_report(session, limit=10, entry_tolerance_pct=0.05)
+
+    assert report["state_counts"] == {"missing_price": 1, "expired": 1}
+    assert report["reason_counts"]["missing_latest_price"] == 1
+    assert report["reason_counts"]["valid_until_passed"] == 1
+    assert report["missing_price_count"] == 1
