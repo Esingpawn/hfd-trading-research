@@ -118,4 +118,28 @@ SQLITE_INDEX_SPECS: tuple[SqliteIndexSpec, ...] = (
         "candidate_type, candidate_key",
         "shadow paper candidate lookup",
     ),
+    SqliteIndexSpec(
+        "ix_darkflow_zones_symbol_timeframe_detected",
+        "darkflow_zones",
+        "symbol, timeframe, detected_at",
+        "darkflow zone backfill and latest interaction lookup",
+    ),
+    SqliteIndexSpec(
+        "ix_darkflow_zones_indicator_detected",
+        "darkflow_zones",
+        "indicator, detected_at",
+        "darkflow zone sampling by official indicator",
+    ),
+    SqliteIndexSpec(
+        "ix_darkflow_interactions_playbook_event",
+        "darkflow_interactions",
+        "playbook, event_ts",
+        "latest darkflow interaction backtest lookup",
+    ),
+    SqliteIndexSpec(
+        "ix_darkflow_interactions_symbol_timeframe_event",
+        "darkflow_interactions",
+        "symbol, timeframe, event_ts",
+        "darkflow interaction grouping and shadow replay",
+    ),
 )

@@ -37,6 +37,13 @@ from app.services.darkflow_playbooks import (
     darkflow_playbook_catalog,
     latest_darkflow_playbook_backtest,
 )
+from app.services.darkflow_interactions import (
+    backfill_darkflow_interactions,
+    backfill_darkflow_zones,
+    darkflow_interaction_backtest,
+    darkflow_shadow_replay,
+    latest_darkflow_interaction_backtest,
+)
 from app.services.darkflow_rules import darkflow_rulebook
 from app.services.indicator_catalog import indicator_experiment_coverage
 from app.services.signal_attribution import backfill_signal_outcomes, signal_effectiveness
@@ -146,6 +153,98 @@ async def persist_darkflow_playbook_backtest_report(
         min_avg_return=min_avg_return,
         confirmation_window_minutes=confirmation_window_minutes,
         persist=True,
+    )
+
+
+@router.post("/darkflow/zones/backfill")
+async def backfill_darkflow_zone_rows(
+    session: SessionDep,
+    limit: int = Query(default=500, ge=1, le=100000),
+    indicators: list[str] | None = Query(default=None),
+    max_zones_per_snapshot: int = Query(default=120, ge=1, le=1000),
+) -> dict[str, object]:
+    result = await backfill_darkflow_zones(
+        session,
+        limit=limit,
+        indicators=indicators,
+        max_zones_per_snapshot=max_zones_per_snapshot,
+    )
+    return result.__dict__
+
+
+@router.post("/darkflow/interactions/backfill")
+async def backfill_darkflow_interaction_rows(
+    session: SessionDep,
+    limit: int = Query(default=500, ge=1, le=100000),
+    indicators: list[str] | None = Query(default=None),
+    max_zones_per_snapshot: int = Query(default=120, ge=1, le=1000),
+    max_interactions_per_snapshot: int = Query(default=80, ge=1, le=1000),
+    max_hold_bars: int = Query(default=12, ge=1, le=200),
+) -> dict[str, object]:
+    result = await backfill_darkflow_interactions(
+        session,
+        limit=limit,
+        indicators=indicators,
+        max_zones_per_snapshot=max_zones_per_snapshot,
+        max_interactions_per_snapshot=max_interactions_per_snapshot,
+        max_hold_bars=max_hold_bars,
+    )
+    return result.__dict__
+
+
+@router.get("/darkflow/interactions/backtest/latest")
+async def latest_darkflow_interaction_backtest_report(session: SessionDep) -> dict[str, object]:
+    return await latest_darkflow_interaction_backtest(session)
+
+
+@router.get("/darkflow/interactions/backtest")
+async def darkflow_interaction_backtest_report(
+    session: SessionDep,
+    limit: int = Query(default=5000, ge=1, le=100000),
+    min_samples: int = Query(default=30, ge=1, le=5000),
+    min_win_rate: float = Query(default=0.52, ge=0.0, le=1.0),
+    min_profit_factor: float = Query(default=1.15, ge=0.0, le=1000.0),
+) -> dict[str, object]:
+    return await darkflow_interaction_backtest(
+        session,
+        limit=limit,
+        min_samples=min_samples,
+        min_win_rate=min_win_rate,
+        min_profit_factor=min_profit_factor,
+        persist=False,
+    )
+
+
+@router.post("/darkflow/interactions/backtest")
+async def persist_darkflow_interaction_backtest_report(
+    session: SessionDep,
+    limit: int = Query(default=5000, ge=1, le=100000),
+    min_samples: int = Query(default=30, ge=1, le=5000),
+    min_win_rate: float = Query(default=0.52, ge=0.0, le=1.0),
+    min_profit_factor: float = Query(default=1.15, ge=0.0, le=1000.0),
+) -> dict[str, object]:
+    return await darkflow_interaction_backtest(
+        session,
+        limit=limit,
+        min_samples=min_samples,
+        min_win_rate=min_win_rate,
+        min_profit_factor=min_profit_factor,
+        persist=True,
+    )
+
+
+@router.post("/darkflow/shadow-replay")
+async def replay_darkflow_shadow_paper(
+    session: SessionDep,
+    limit: int = Query(default=500, ge=1, le=20000),
+    min_profit_factor: float = Query(default=1.15, ge=0.0, le=1000.0),
+    include_watchlist: bool = Query(default=True),
+) -> dict[str, object]:
+    return await darkflow_shadow_replay(
+        session,
+        limit=limit,
+        min_profit_factor=min_profit_factor,
+        include_watchlist=include_watchlist,
     )
 
 

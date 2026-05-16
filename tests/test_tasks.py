@@ -8,7 +8,7 @@ from app.application.tasks import enqueue_task, reap_stale_tasks, recent_tasks, 
 from app.api.routers.signals import refresh_research_reports
 from app.api.routers.tasks import _task_enqueue_payload
 from app.db import Base
-from app.models import ExperimentRun, FeatureEvent, FeatureLabel, PaperTrade, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TaskRun
+from app.models import DarkflowInteraction, ExperimentRun, FeatureEvent, FeatureLabel, PaperTrade, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TaskRun
 
 
 @pytest.fixture()
@@ -440,6 +440,36 @@ async def test_run_task_by_id_executes_darkflow_playbook_backtest(session) -> No
 
 
 @pytest.mark.asyncio
+async def test_run_task_by_id_executes_darkflow_interaction_pipeline(session) -> None:
+    await _add_darkflow_snapshot(session)
+    backfill = TaskRun(task_name="darkflow.interactions_backfill", payload={"limit": 10}, result={})
+    session.add(backfill)
+    await session.commit()
+
+    backfill_result = await run_task_by_id(session, backfill.id)
+    report_task = TaskRun(task_name="darkflow.interaction_backtest", payload={"min_samples": 1, "limit": 100, "persist": True}, result={})
+    session.add(report_task)
+    await session.commit()
+    report_result = await run_task_by_id(session, report_task.id)
+    shadow_task = TaskRun(task_name="darkflow.shadow_replay", payload={"limit": 10}, result={})
+    session.add(shadow_task)
+    await session.commit()
+    shadow_result = await run_task_by_id(session, shadow_task.id)
+
+    interactions = await session.execute(select(DarkflowInteraction))
+    shadow_rows = await session.execute(select(ShadowPaperTrade))
+    paper_rows = await session.execute(select(PaperTrade))
+
+    assert backfill_result["result"]["execution"]["interactions_inserted"] == 1
+    assert report_result["result"]["execution"]["policy"]["opens_live_orders"] is False
+    assert report_result["result"]["execution"]["candidate_playbook_count"] == 1
+    assert shadow_result["result"]["execution"]["policy"]["opens_paper_trades"] is False
+    assert len(interactions.scalars().all()) == 1
+    assert len(shadow_rows.scalars().all()) == 1
+    assert paper_rows.scalars().all() == []
+
+
+@pytest.mark.asyncio
 async def test_run_task_by_id_caps_research_report_materialization_limit(session) -> None:
     await _add_feature_group(session, symbol="BTCUSDT")
     item = TaskRun(
@@ -756,3 +786,42 @@ async def _add_feature_group(
                     status="labeled",
                 )
             )
+
+
+async def _add_darkflow_snapshot(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    rows = []
+    for index, (open_price, high, low, close) in enumerate(
+        [
+            (101.0, 102.0, 100.5, 101.5),
+            (101.5, 101.8, 99.6, 100.6),
+            (100.6, 103.8, 100.4, 103.2),
+            (103.2, 104.4, 102.9, 104.0),
+        ]
+    ):
+        rows.append([int((base + timedelta(minutes=30 * index)).timestamp() * 1000), open_price, close, low, high, 10.0])
+    session.add(
+        SignalSnapshot(
+            symbol="BTCUSDT",
+            asset_tier="core",
+            timeframe="short",
+            interval="30m",
+            indicator="liquidity_sweep",
+            endpoint="/api/pro/pro_data",
+            raw_payload={
+                "klines": rows,
+                "liquidity_sweep": [
+                    {
+                        "timestamp": rows[0][0],
+                        "lower_price": 100.0,
+                        "upper_price": 100.8,
+                        "type": "bottom_sweep",
+                        "score": 1.0,
+                    }
+                ],
+            },
+            summary_payload={},
+            collected_at=base + timedelta(minutes=30),
+        )
+    )
+    await session.commit()

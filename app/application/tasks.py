@@ -24,6 +24,12 @@ from app.services.features import (
     refresh_feature_research,
 )
 from app.services.darkflow_playbooks import darkflow_playbook_backtest
+from app.services.darkflow_interactions import (
+    backfill_darkflow_interactions,
+    backfill_darkflow_zones,
+    darkflow_interaction_backtest,
+    darkflow_shadow_replay,
+)
 from app.services.paper import mark_open_trades, paper_scan
 from app.services.shadow_paper import (
     mark_shadow_paper_trades,
@@ -380,6 +386,41 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
             confirmation_window_minutes=_payload_int(payload, "confirmation_window_minutes", 90),
             persist=_payload_bool(payload, "persist", True),
         )
+    if task_name in {"darkflow.zones_backfill", "darkflow-zones-backfill"}:
+        result = await backfill_darkflow_zones(
+            session,
+            limit=_payload_int(payload, "limit", 500),
+            indicators=_optional_str_list(payload.get("indicators")),
+            max_zones_per_snapshot=_payload_int(payload, "max_zones_per_snapshot", 120),
+        )
+        return result.__dict__
+    if task_name in {"darkflow.interactions_backfill", "darkflow-interactions-backfill"}:
+        result = await backfill_darkflow_interactions(
+            session,
+            limit=_payload_int(payload, "limit", 500),
+            indicators=_optional_str_list(payload.get("indicators")),
+            max_zones_per_snapshot=_payload_int(payload, "max_zones_per_snapshot", 120),
+            max_interactions_per_snapshot=_payload_int(payload, "max_interactions_per_snapshot", 80),
+            max_hold_bars=_payload_int(payload, "max_hold_bars", 12),
+            persist_zones=_payload_bool(payload, "persist_zones", True),
+        )
+        return result.__dict__
+    if task_name in {"darkflow.interaction_backtest", "darkflow-interaction-backtest"}:
+        return await darkflow_interaction_backtest(
+            session,
+            limit=_payload_int(payload, "limit", 5000),
+            min_samples=_payload_int(payload, "min_samples", 30),
+            min_win_rate=_payload_float(payload, "min_win_rate", 0.52),
+            min_profit_factor=_payload_float(payload, "min_profit_factor", 1.15),
+            persist=_payload_bool(payload, "persist", True),
+        )
+    if task_name in {"darkflow.shadow_replay", "darkflow-shadow-replay"}:
+        return await darkflow_shadow_replay(
+            session,
+            limit=_payload_int(payload, "limit", 500),
+            min_profit_factor=_payload_float(payload, "min_profit_factor", 1.15),
+            include_watchlist=_payload_bool(payload, "include_watchlist", True),
+        )
     if task_name in {"data_quality.report", "data-quality-report"}:
         return await data_quality_report(session)
     if task_name in {"storage.maintain", "storage-maintain"}:
@@ -442,7 +483,31 @@ async def _research_acceleration_cycle(session: AsyncSession, payload: dict[str,
         confirmation_window_minutes=_payload_int(payload, "confirmation_window_minutes", 90),
         persist=_payload_bool(payload, "darkflow_persist", True),
     )
+    darkflow_interactions = await backfill_darkflow_interactions(
+        session,
+        limit=_payload_int(payload, "darkflow_interaction_limit", _payload_int(payload, "darkflow_limit", report_limit)),
+        indicators=_optional_str_list(payload.get("darkflow_indicators")) or _optional_str_list(payload.get("indicators")),
+        max_zones_per_snapshot=_payload_int(payload, "max_zones_per_snapshot", 120),
+        max_interactions_per_snapshot=_payload_int(payload, "max_interactions_per_snapshot", 80),
+        max_hold_bars=_payload_int(payload, "max_hold_bars", 12),
+        persist_zones=True,
+    )
+    result["steps"]["darkflow_interactions"] = darkflow_interactions.__dict__
+    result["steps"]["darkflow_interaction_backtest"] = await darkflow_interaction_backtest(
+        session,
+        limit=_payload_int(payload, "darkflow_backtest_limit", report_limit),
+        min_samples=_payload_int(payload, "darkflow_interaction_min_samples", _payload_int(payload, "min_samples", 30)),
+        min_win_rate=_payload_float(payload, "darkflow_interaction_min_win_rate", 0.52),
+        min_profit_factor=_payload_float(payload, "darkflow_interaction_min_profit_factor", 1.15),
+        persist=_payload_bool(payload, "darkflow_interaction_persist", True),
+    )
     result["steps"]["shadow_mark"] = await mark_shadow_paper_trades(session)
+    result["steps"]["darkflow_shadow_replay"] = await darkflow_shadow_replay(
+        session,
+        limit=_payload_int(payload, "darkflow_shadow_limit", replay_limit),
+        min_profit_factor=_payload_float(payload, "darkflow_shadow_min_profit_factor", 1.15),
+        include_watchlist=_payload_bool(payload, "include_watchlist", True),
+    )
     result["steps"]["shadow_replay"] = await shadow_paper_replay(
         session,
         horizon=horizon,

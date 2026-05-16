@@ -21,3 +21,12 @@ def test_dashboard_exposes_shadow_promotion_and_cost_model() -> None:
     assert "shadowPaperHorizonStats" in html
     assert "edge_unstable_drawdown" in html
     assert "最大回撤" in html
+
+
+def test_dashboard_exposes_darkflow_interaction_report() -> None:
+    html = Path("app/web/dashboard.html").read_text(encoding="utf-8")
+
+    assert "darkflowInteractionBacktest" in html
+    assert "/darkflow/interactions/backtest/latest" in html
+    assert "darkflowInteractionSummary" in html
+    assert "darkflowInteractions" in html

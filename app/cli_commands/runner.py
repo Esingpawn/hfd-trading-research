@@ -23,6 +23,12 @@ from app.services.collection_schedule import research_due_timeframes, research_i
 from app.services.collector import SnapshotCollector
 from app.services.data_quality import data_quality_report
 from app.services.darkflow_playbooks import darkflow_playbook_backtest, darkflow_playbook_catalog
+from app.services.darkflow_interactions import (
+    backfill_darkflow_interactions,
+    backfill_darkflow_zones,
+    darkflow_interaction_backtest,
+    darkflow_shadow_replay,
+)
 from app.services.darkflow_rules import darkflow_rulebook
 from app.services.feature_candidates import (
     feature_candidate_screen,
@@ -398,6 +404,42 @@ def build_parser() -> argparse.ArgumentParser:
     darkflow_backtest.add_argument("--min-avg-return", type=float, default=0.0)
     darkflow_backtest.add_argument("--confirmation-window-minutes", type=int, default=90)
     darkflow_backtest.add_argument("--persist", action="store_true", help="Save the report as an experiment run")
+
+    darkflow_zones = subparsers.add_parser(
+        "darkflow-zones-backfill",
+        help="Backfill darkflow tutorial price zones from raw payloads",
+    )
+    darkflow_zones.add_argument("--limit", type=int, default=500)
+    darkflow_zones.add_argument("--indicators", nargs="*", help="Indicator keys to scan")
+    darkflow_zones.add_argument("--max-zones-per-snapshot", type=int, default=120)
+
+    darkflow_interactions = subparsers.add_parser(
+        "darkflow-interactions-backfill",
+        help="Backfill zone/candle interactions for darkflow research",
+    )
+    darkflow_interactions.add_argument("--limit", type=int, default=500)
+    darkflow_interactions.add_argument("--indicators", nargs="*", help="Indicator keys to scan")
+    darkflow_interactions.add_argument("--max-zones-per-snapshot", type=int, default=120)
+    darkflow_interactions.add_argument("--max-interactions-per-snapshot", type=int, default=80)
+    darkflow_interactions.add_argument("--max-hold-bars", type=int, default=12)
+
+    darkflow_interaction_backtest = subparsers.add_parser(
+        "darkflow-interaction-backtest",
+        help="Run research-only darkflow zone-interaction backtest",
+    )
+    darkflow_interaction_backtest.add_argument("--limit", type=int, default=5000)
+    darkflow_interaction_backtest.add_argument("--min-samples", type=int, default=30)
+    darkflow_interaction_backtest.add_argument("--min-win-rate", type=float, default=0.52)
+    darkflow_interaction_backtest.add_argument("--min-profit-factor", type=float, default=1.15)
+    darkflow_interaction_backtest.add_argument("--persist", action="store_true", help="Save the report as an experiment run")
+
+    darkflow_shadow = subparsers.add_parser(
+        "darkflow-shadow-replay",
+        help="Replay approved darkflow interaction candidates into isolated shadow paper trades",
+    )
+    darkflow_shadow.add_argument("--limit", type=int, default=500)
+    darkflow_shadow.add_argument("--min-profit-factor", type=float, default=1.15)
+    darkflow_shadow.add_argument("--no-watchlist", action="store_true", help="Only replay strict candidates")
 
     subparsers.add_parser("storage-health", help="Show database storage health")
     storage_maintain = subparsers.add_parser("storage-maintain", help="Run safe database maintenance")
@@ -1086,6 +1128,58 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 min_avg_return=args.min_avg_return,
                 confirmation_window_minutes=args.confirmation_window_minutes,
                 persist=args.persist,
+            )
+        print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "darkflow-zones-backfill":
+        async with SessionLocal() as session:
+            result = await backfill_darkflow_zones(
+                session,
+                limit=args.limit,
+                indicators=args.indicators,
+                max_zones_per_snapshot=args.max_zones_per_snapshot,
+            )
+        print(json.dumps(jsonable(result.__dict__), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "darkflow-interactions-backfill":
+        async with SessionLocal() as session:
+            result = await backfill_darkflow_interactions(
+                session,
+                limit=args.limit,
+                indicators=args.indicators,
+                max_zones_per_snapshot=args.max_zones_per_snapshot,
+                max_interactions_per_snapshot=args.max_interactions_per_snapshot,
+                max_hold_bars=args.max_hold_bars,
+            )
+        print(json.dumps(jsonable(result.__dict__), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "darkflow-interaction-backtest":
+        async with SessionLocal() as session:
+            result = await darkflow_interaction_backtest(
+                session,
+                limit=args.limit,
+                min_samples=args.min_samples,
+                min_win_rate=args.min_win_rate,
+                min_profit_factor=args.min_profit_factor,
+                persist=args.persist,
+            )
+        print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "darkflow-shadow-replay":
+        async with SessionLocal() as session:
+            result = await darkflow_shadow_replay(
+                session,
+                limit=args.limit,
+                min_profit_factor=args.min_profit_factor,
+                include_watchlist=not args.no_watchlist,
             )
         print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
         await engine.dispose()

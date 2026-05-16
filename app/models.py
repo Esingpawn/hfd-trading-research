@@ -201,6 +201,79 @@ class ShadowPaperTrade(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class DarkflowZone(Base):
+    __tablename__ = "darkflow_zones"
+    __table_args__ = (
+        UniqueConstraint("zone_key", name="uq_darkflow_zones_zone_key"),
+        Index("ix_darkflow_zones_symbol_timeframe_detected", "symbol", "timeframe", "detected_at"),
+        Index("ix_darkflow_zones_indicator_detected", "indicator", "detected_at"),
+        Index("ix_darkflow_zones_status_detected", "status", "detected_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    zone_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    source_snapshot_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_event_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    symbol: Mapped[str] = mapped_column(String(24), index=True)
+    asset_tier: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    interval: Mapped[str] = mapped_column(String(8), index=True)
+    indicator: Mapped[str] = mapped_column(String(64), index=True)
+    family: Mapped[str] = mapped_column(String(64), index=True)
+    zone_type: Mapped[str] = mapped_column(String(80), index=True)
+    direction: Mapped[str] = mapped_column(String(16), index=True)
+    lower_price: Mapped[float] = mapped_column(Float)
+    upper_price: Mapped[float] = mapped_column(Float)
+    mid_price: Mapped[float] = mapped_column(Float)
+    strength: Mapped[float] = mapped_column(Float, default=0.0)
+    subtype: Mapped[str] = mapped_column(String(80), index=True, default="unknown")
+    origin_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    touches: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="active")
+    context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
+class DarkflowInteraction(Base):
+    __tablename__ = "darkflow_interactions"
+    __table_args__ = (
+        UniqueConstraint("interaction_key", name="uq_darkflow_interactions_interaction_key"),
+        Index("ix_darkflow_interactions_playbook_event", "playbook", "event_ts"),
+        Index("ix_darkflow_interactions_symbol_timeframe_event", "symbol", "timeframe", "event_ts"),
+        Index("ix_darkflow_interactions_status_event", "status", "event_ts"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    interaction_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    zone_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    zone_key: Mapped[str] = mapped_column(String(64), index=True)
+    source_snapshot_id: Mapped[str] = mapped_column(String(36), index=True)
+    symbol: Mapped[str] = mapped_column(String(24), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    interval: Mapped[str] = mapped_column(String(8), index=True)
+    indicator: Mapped[str] = mapped_column(String(64), index=True)
+    playbook: Mapped[str] = mapped_column(String(80), index=True)
+    direction: Mapped[str] = mapped_column(String(16), index=True)
+    interaction_type: Mapped[str] = mapped_column(String(64), index=True)
+    event_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    entry_price: Mapped[float | None] = mapped_column(Float)
+    stop_price: Mapped[float | None] = mapped_column(Float)
+    target_price: Mapped[float | None] = mapped_column(Float)
+    invalidation_price: Mapped[float | None] = mapped_column(Float)
+    exit_price: Mapped[float | None] = mapped_column(Float)
+    exit_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    exit_reason: Mapped[str | None] = mapped_column(String(64), index=True)
+    pnl_pct: Mapped[float | None] = mapped_column(Float)
+    r_multiple: Mapped[float | None] = mapped_column(Float)
+    mfe: Mapped[float] = mapped_column(Float, default=0.0)
+    mae: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="observed")
+    context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
 class BacktestRun(Base):
     __tablename__ = "backtest_runs"
 

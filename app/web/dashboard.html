@@ -1087,6 +1087,11 @@
             <div id="darkflowPlaybookSummary" class="kvList"></div>
             <div id="darkflowPlaybooks" class="miniTable"><div class="empty">等待暗流 playbook 回测</div></div>
           </div>
+          <div class="detailBlock" style="margin-top:10px">
+            <h3>暗流区间交互回测</h3>
+            <div id="darkflowInteractionSummary" class="kvList"></div>
+            <div id="darkflowInteractions" class="miniTable"><div class="empty">等待区间交互回测</div></div>
+          </div>
           <div class="detailBlock">
             <h3>暗流指标映射</h3>
             <div id="indicatorCatalog" class="miniTable"><div class="empty">等待指标映射</div></div>
@@ -1241,6 +1246,7 @@
       experiments: null,
       experimentEffectiveness: null,
       darkflowPlaybookBacktest: null,
+      darkflowInteractionBacktest: null,
       featureCandidates: null,
       featurePaperAb: null,
       featureSegmentCandidates: null,
@@ -2046,6 +2052,7 @@
       const experiments = state.experiments || {};
       const experimentEffectiveness = state.experimentEffectiveness || {};
       const darkflowPlaybookBacktest = state.darkflowPlaybookBacktest || {};
+      const darkflowInteractionBacktest = state.darkflowInteractionBacktest || {};
       const featureCandidates = state.featureCandidates || {};
       const featurePaperAb = state.featurePaperAb || {};
       const featureSegmentCandidates = state.featureSegmentCandidates || {};
@@ -2138,6 +2145,24 @@
         { label:"回撤", render: row => pct((row.stats || {}).max_drawdown, 1) },
         { label:"状态", render: row => tag((row.readiness || {}).status === "candidate" ? "ok" : (row.readiness || {}).status === "watchlist" ? "warn" : "neutral", esc((row.readiness || {}).status || "research")) }
       ], "暂无官方教程语义回测报告"));
+      setHtml("darkflowInteractionSummary", kvRows([
+        ["交互样本", fmt(darkflowInteractionBacktest.interaction_count || 0, 0)],
+        ["已回测", fmt(darkflowInteractionBacktest.backtested_count || 0, 0)],
+        ["候选/观察", `${fmt(darkflowInteractionBacktest.candidate_playbook_count || 0, 0)} / ${fmt(darkflowInteractionBacktest.watchlist_playbook_count || 0, 0)}`],
+        ["胜率", pct((darkflowInteractionBacktest.stats || {}).win_rate, 1)],
+        ["PF", fmt((darkflowInteractionBacktest.stats || {}).profit_factor, 2)],
+        ["隔离", darkflowInteractionBacktest.policy && darkflowInteractionBacktest.policy.opens_paper_trades === false ? `<span class="green">仅研究</span>` : `<span class="amber">待确认</span>`]
+      ]));
+      setHtml("darkflowInteractions", table((darkflowInteractionBacktest.playbooks || []).slice(0, 8), [
+        { label:"玩法", render: row => esc(row.display_name || row.playbook) },
+        { label:"样本", render: row => fmt(row.sample_count || 0, 0) },
+        { label:"胜率", render: row => pct((row.stats || {}).win_rate, 1) },
+        { label:"平均收益", render: row => coloredPct((row.stats || {}).avg_return) },
+        { label:"R", render: row => fmt((row.stats || {}).avg_r_multiple, 2) },
+        { label:"PF", render: row => fmt((row.stats || {}).profit_factor, 2) },
+        { label:"回撤", render: row => pct((row.stats || {}).max_drawdown, 1) },
+        { label:"状态", render: row => tag((row.readiness || {}).status === "candidate" ? "ok" : (row.readiness || {}).status === "watchlist" ? "warn" : "neutral", esc((row.readiness || {}).status || "research")) }
+      ], "暂无区间交互回测报告"));
       setHtml("featureCandidatesSummary", kvRows([
         ["窗口", esc(featureCandidates.horizon || "30m")],
         ["已标注", fmt(featureCandidates.labeled_count || 0, 0)],
@@ -2477,6 +2502,11 @@
         const darkflowPlaybookBacktest = await api("/darkflow/playbooks/backtest/latest?horizon=4h")
           .catch(error => ({ error: error.message, playbooks: [] }));
         state.darkflowPlaybookBacktest = darkflowPlaybookBacktest;
+        renderEffectiveness();
+
+        const darkflowInteractionBacktest = await api("/darkflow/interactions/backtest/latest")
+          .catch(error => ({ error: error.message, playbooks: [] }));
+        state.darkflowInteractionBacktest = darkflowInteractionBacktest;
         renderEffectiveness();
 
         const featureCandidates = await api("/features/candidates/latest?horizon=30m")
