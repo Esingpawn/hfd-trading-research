@@ -114,6 +114,55 @@ async def test_decision_cards_build_from_core_darkflow_v2_only(session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_decision_cards_accept_historical_v2_context_without_schema_marker(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="decision-historical-v2",
+            zone_key="zone-historical-v2",
+            source_snapshot_id="snapshot-historical-v2",
+            symbol="BTCUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            playbook="trend_ride_extension",
+            direction="long",
+            interaction_type="first_touch",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "evidence": {"trend_alignment": {"aligned": True}},
+                "target_plan": {"model": "tutorial_dynamic_zone_target_v1"},
+                "quality": {
+                    "score": 82.0,
+                    "confirmations": ["official_rule_mapped", "dynamic_darkflow_target"],
+                    "blockers": [],
+                },
+            },
+        )
+    )
+    await session.commit()
+
+    report = await latest_darkflow_decision_cards(session, limit=5)
+
+    assert report["card_count"] == 1
+    card = report["cards"][0]
+    assert card["card_id"].endswith("decision-historical-v2")
+    assert card["context"]["interaction_schema"] == "v2"
+
+
+@pytest.mark.asyncio
 async def test_decision_cards_block_weak_or_conflicting_quality(session) -> None:
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
     session.add(

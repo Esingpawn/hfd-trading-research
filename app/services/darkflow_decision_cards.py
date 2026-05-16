@@ -156,7 +156,7 @@ def _decision_card(
     min_rr_ratio: float,
 ) -> dict[str, Any] | None:
     context = item.context or {}
-    if context.get("interaction_schema") != DARKFLOW_INTERACTION_SCHEMA:
+    if _interaction_schema(context) != DARKFLOW_INTERACTION_SCHEMA:
         return None
     if not all(isinstance(value, (int, float)) for value in (item.entry_price, item.stop_price, item.target_price)):
         return None
@@ -235,10 +235,19 @@ def _decision_card(
         "context": {
             "target_model": context.get("target_model") or ((context.get("target_plan") or {}).get("model")),
             "tutorial_rule_family": context.get("tutorial_rule_family"),
-            "interaction_schema": DARKFLOW_INTERACTION_SCHEMA,
+            "interaction_schema": _interaction_schema(context),
             "research_only": True,
         },
     }
+
+
+def _interaction_schema(context: dict[str, Any]) -> str | None:
+    raw = context.get("interaction_schema")
+    if raw:
+        return str(raw)
+    if context.get("quality") and context.get("evidence") and context.get("target_plan"):
+        return DARKFLOW_INTERACTION_SCHEMA
+    return None
 
 
 def _gate_blockers(
