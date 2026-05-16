@@ -424,6 +424,9 @@ def _candidate_entry_plan_state(
         "entry_range": {"lower": lower, "upper": upper, "source": range_source},
         "valid_until": _iso(valid_until),
     }
+    if valid_until is not None and _aware(now) > valid_until:
+        state.update({"state": "expired", "reason": "valid_until_passed"})
+        return state
     shape_error = _entry_plan_shape_error(
         candidate.direction,
         entry=planned_entry,
@@ -434,9 +437,6 @@ def _candidate_entry_plan_state(
     )
     if shape_error:
         state.update({"state": "invalid_shape", "reason": shape_error})
-        return state
-    if valid_until is not None and _aware(now) > valid_until:
-        state.update({"state": "expired", "reason": "valid_until_passed"})
         return state
     if _price_invalidated(candidate.direction, mark_price=mark_price, invalidation=invalidation, stop=planned_stop):
         state.update({"state": "invalidated", "reason": "price_crosses_invalidation"})
@@ -493,13 +493,22 @@ def _entry_plan_shape_error(
     lower: float,
     upper: float,
 ) -> str | None:
+    epsilon = max(abs(entry) * 1e-8, 1e-8)
     if direction not in {"long", "short"}:
         return "unsupported_direction"
     if min(entry, stop, target, lower, upper) <= 0 or lower >= upper:
         return "invalid_plan_prices"
-    if direction == "long" and not (stop < lower <= entry <= upper < target):
+    if direction == "long" and not (
+        stop < lower
+        and lower - epsilon <= entry <= upper + epsilon
+        and upper < target
+    ):
         return "invalid_long_frozen_entry_range"
-    if direction == "short" and not (target < lower <= entry <= upper < stop):
+    if direction == "short" and not (
+        target < lower
+        and lower - epsilon <= entry <= upper + epsilon
+        and upper < stop
+    ):
         return "invalid_short_frozen_entry_range"
     return None
 
