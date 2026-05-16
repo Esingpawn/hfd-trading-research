@@ -1,3 +1,13 @@
+FROM node:24-alpine AS dashboard-build
+
+WORKDIR /web
+
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+COPY web ./
+RUN npm run build
+
 FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -16,6 +26,7 @@ RUN pip install --upgrade pip \
     && pip install fastapi uvicorn httpx sqlalchemy aiosqlite psycopg alembic redis
 
 COPY app ./app
+COPY --from=dashboard-build /web/dist ./web/dist
 COPY alembic.ini ./
 COPY migrations ./migrations
 COPY scripts ./scripts

@@ -15,7 +15,12 @@ from app.services.completeness import data_completeness
 from app.services.entry_plan import entry_plan_compatibility, entry_plan_is_expired
 
 
-DASHBOARD_HTML = Path(__file__).resolve().parents[1] / "web" / "dashboard.html"
+APP_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = APP_ROOT.parent
+DASHBOARD_HTML = APP_ROOT / "web" / "dashboard.html"
+DASHBOARD_DIST = PROJECT_ROOT / "web" / "dist"
+DASHBOARD_DIST_HTML = DASHBOARD_DIST / "index.html"
+DASHBOARD_DIST_ASSETS = DASHBOARD_DIST / "assets"
 RUNTIME_DIR = Path("data/runtime")
 APP_STARTED_AT = datetime.now(timezone.utc)
 SERVER_MONOTONIC_STARTED_AT = time.monotonic()
