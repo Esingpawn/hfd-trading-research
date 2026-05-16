@@ -73,6 +73,25 @@ type TradeCandidate = {
   blockers: string[];
   promotion_blockers: string[];
   supporting_signals: string[];
+  decision_payload?: DecisionCard;
+};
+
+type FrozenEntryPlan = {
+  plan_type?: string;
+  status?: string;
+  state?: string;
+  trigger: string;
+  planned_entry: number;
+  planned_stop: number;
+  take_profit_levels: Array<{ label: string; price: number; source: string }>;
+  max_hold_bars: number;
+  frozen_at?: string | null;
+  valid_until?: string | null;
+  entry_reference_price?: number;
+  entry_range?: { lower?: number; upper?: number; source?: string };
+  invalidation_price?: number;
+  entry_tolerance_pct?: number;
+  drift_limit_pct?: number;
 };
 
 type DecisionCard = {
@@ -86,13 +105,7 @@ type DecisionCard = {
   setup_type: string;
   market_state: string;
   setup_time: string | null;
-  entry_plan: {
-    trigger: string;
-    planned_entry: number;
-    planned_stop: number;
-    take_profit_levels: Array<{ label: string; price: number; source: string }>;
-    max_hold_bars: number;
-  };
+  entry_plan: FrozenEntryPlan;
   scores: { rule_score: number; quality_score: number; model_win_prob: number | null; expected_R: number | null };
   risk: { rr_ratio: number; stop_distance_pct: number; target_distance_pct: number };
   supporting_signals: string[];
@@ -309,6 +322,10 @@ function DecisionCardView({ card, featured = false }: { card: DecisionCard; feat
         <Level label="Stop" value={card.entry_plan.planned_stop} danger />
         <Level label={target?.label ?? "TP"} value={target?.price} />
       </div>
+      <div className="planLock">
+        <span>固定区间 {entryRangeText(card.entry_plan)}</span>
+        <span>有效至 {timeText(card.entry_plan.valid_until)}</span>
+      </div>
       <div className="evidenceRow">
         {card.supporting_signals.slice(0, 4).map((item) => <span key={item}>{signalText(item)}</span>)}
         {!card.supporting_signals.length && <span>等待确认信号</span>}
@@ -373,25 +390,33 @@ function CandidateLifecycle({ candidates }: { candidates: TradeCandidate[] }) {
         <span>晋级</span>
       </div>
       {candidates.map((item) => (
-        <div className="candidateRow" key={item.candidate_key}>
-          <div>
-            <strong>{item.symbol}</strong>
-            <small>{directionText(item.direction)} · {strategyText(item.strategy_id)}</small>
-          </div>
-          <div>
-            <span>{fmt(item.entry_price, 4)} / {fmt(item.stop_price, 4)} / {fmt(item.target_price, 4)}</span>
-            <small>RR {fmt(item.rr_ratio, 2)} · Q {fmt(item.quality_score, 0)}</small>
-          </div>
-          <div>
-            <StatusPill label={gateText(item.status)} tone={item.status === "shadow_candidate" ? "good" : "warn"} />
-            <small>{item.supporting_signals.slice(0, 2).map(signalText).join(" / ") || "等待证据"}</small>
-          </div>
-          <div>
-            <span>{promotionText(item.promotion_status)}</span>
-            <small>anti-repaint: {auditText(item.anti_repaint_status)} · shadow: {shadowText(item.shadow_status)}</small>
-          </div>
-        </div>
+        <CandidateRow key={item.candidate_key} item={item} />
       ))}
+    </div>
+  );
+}
+
+function CandidateRow({ item }: { item: TradeCandidate }) {
+  const plan = item.decision_payload?.entry_plan;
+  return (
+    <div className="candidateRow">
+      <div>
+        <strong>{item.symbol}</strong>
+        <small>{directionText(item.direction)} · {strategyText(item.strategy_id)}</small>
+      </div>
+      <div>
+        <span>{fmt(item.entry_price, 4)} / {fmt(item.stop_price, 4)} / {fmt(item.target_price, 4)}</span>
+        <small>RR {fmt(item.rr_ratio, 2)} · Q {fmt(item.quality_score, 0)}</small>
+        {plan && <small>固定区间 {entryRangeText(plan)} · 至 {timeText(plan.valid_until)}</small>}
+      </div>
+      <div>
+        <StatusPill label={gateText(item.status)} tone={item.status === "shadow_candidate" ? "good" : "warn"} />
+        <small>{item.supporting_signals.slice(0, 2).map(signalText).join(" / ") || "等待证据"}</small>
+      </div>
+      <div>
+        <span>{promotionText(item.promotion_status)}</span>
+        <small>anti-repaint: {auditText(item.anti_repaint_status)} · shadow: {shadowText(item.shadow_status)}</small>
+      </div>
     </div>
   );
 }
@@ -519,6 +544,13 @@ function shadowText(value: string) {
 function timeText(value?: string | null) {
   if (!value) return "等待报告";
   return new Date(value).toLocaleString("zh-CN", { hour12: false });
+}
+
+function entryRangeText(plan?: FrozenEntryPlan | null) {
+  const lower = plan?.entry_range?.lower;
+  const upper = plan?.entry_range?.upper;
+  if (typeof lower !== "number" || typeof upper !== "number") return "--";
+  return `${fmt(lower, 4)} ~ ${fmt(upper, 4)}`;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

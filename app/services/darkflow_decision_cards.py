@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -16,6 +16,10 @@ DEFAULT_DECISION_CARD_LIMIT = 20
 DEFAULT_MIN_DECISION_CARD_QUALITY = 55.0
 DEFAULT_MIN_RR_RATIO = 1.5
 DEFAULT_TRADE_CANDIDATE_LIMIT = 100
+FROZEN_ENTRY_PLAN_TYPE = "frozen_darkflow_v2_entry_plan"
+DEFAULT_ENTRY_PLAN_VALID_BARS = 12
+DEFAULT_ENTRY_PLAN_TOLERANCE_PCT = 0.006
+DEFAULT_ENTRY_PLAN_DRIFT_LIMIT_PCT = 0.003
 PROMOTION_BLOCKER_ANTI_REPAINT_MISSING = "anti_repaint_audit_missing"
 PROMOTION_BLOCKER_ANTI_REPAINT_FAILED = "anti_repaint_audit_failed"
 PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING = "isolated_v2_shadow_forward_sample_missing"
@@ -197,14 +201,7 @@ def _decision_card(
         "setup_type": item.interaction_type,
         "market_state": _market_state(item.playbook, item.interaction_type),
         "setup_time": _iso(item.event_ts),
-        "entry_plan": {
-            "trigger": _entry_trigger(item),
-            "planned_entry": entry,
-            "planned_stop": stop,
-            "take_profit_levels": _take_profit_levels(item, target),
-            "invalidation_price": float(item.invalidation_price) if isinstance(item.invalidation_price, (int, float)) else stop,
-            "max_hold_bars": int(context.get("hold_bars") or 0),
-        },
+        "entry_plan": _frozen_entry_plan(item, entry=entry, stop=stop, target=target),
         "scores": {
             "rule_score": round(quality_score / 10.0, 2),
             "quality_score": round(quality_score, 3),
@@ -287,6 +284,131 @@ def _take_profit_levels(item: DarkflowInteraction, target: float) -> list[dict[s
             "source": target_plan.get("model") or (item.context or {}).get("target_model") or "interaction_target",
         }
     ]
+
+
+def _frozen_entry_plan(item: DarkflowInteraction, *, entry: float, stop: float, target: float) -> dict[str, Any]:
+    context = item.context or {}
+    hold_bars = int(context.get("hold_bars") or 0)
+    entry_range = _entry_range_from_context(item, entry=entry, stop=stop, target=target)
+    valid_until = _entry_plan_valid_until(item, max_hold_bars=hold_bars)
+    invalidation_price = float(item.invalidation_price) if isinstance(item.invalidation_price, (int, float)) else stop
+    return {
+        "plan_type": FROZEN_ENTRY_PLAN_TYPE,
+        "status": "frozen",
+        "state": "frozen",
+        "trigger": _entry_trigger(item),
+        "planned_entry": entry,
+        "planned_stop": stop,
+        "take_profit_levels": _take_profit_levels(item, target),
+        "invalidation_price": invalidation_price,
+        "max_hold_bars": hold_bars,
+        "frozen_at": _iso(item.event_ts),
+        "valid_until": _iso(valid_until),
+        "entry_reference_price": entry,
+        "entry_range": entry_range,
+        "entry_tolerance_pct": DEFAULT_ENTRY_PLAN_TOLERANCE_PCT,
+        "drift_limit_pct": DEFAULT_ENTRY_PLAN_DRIFT_LIMIT_PCT,
+        "invalidation_rules": [
+            "price_crosses_invalidation",
+            "valid_until_passed",
+            "entry_range_missed",
+            "reward_shape_changed",
+        ],
+        "used_for_outcome_tracking": True,
+    }
+
+
+def _entry_range_from_context(
+    item: DarkflowInteraction,
+    *,
+    entry: float,
+    stop: float,
+    target: float,
+) -> dict[str, Any]:
+    context = item.context or {}
+    zone = context.get("zone") if isinstance(context.get("zone"), dict) else {}
+    lower = _float(zone.get("lower_price")) if isinstance(zone, dict) else None
+    upper = _float(zone.get("upper_price")) if isinstance(zone, dict) else None
+    if lower is not None and upper is not None:
+        source = "source_darkflow_zone"
+        lower_value, upper_value = sorted((float(lower), float(upper)))
+    else:
+        source = "entry_reference_tolerance"
+        width = abs(entry) * DEFAULT_ENTRY_PLAN_TOLERANCE_PCT
+        lower_value = entry - width
+        upper_value = entry + width
+    clipped = _clip_entry_range(
+        item.direction,
+        lower=lower_value,
+        upper=upper_value,
+        entry=entry,
+        stop=stop,
+        target=target,
+    )
+    if clipped is None:
+        width = abs(entry) * DEFAULT_ENTRY_PLAN_TOLERANCE_PCT
+        clipped = _clip_entry_range(
+            item.direction,
+            lower=entry - width,
+            upper=entry + width,
+            entry=entry,
+            stop=stop,
+            target=target,
+        ) or (entry - width, entry + width)
+        source = "entry_reference_tolerance"
+    return {
+        "lower": round(float(clipped[0]), 10),
+        "upper": round(float(clipped[1]), 10),
+        "source": source,
+    }
+
+
+def _clip_entry_range(
+    direction: str,
+    *,
+    lower: float,
+    upper: float,
+    entry: float,
+    stop: float,
+    target: float,
+) -> tuple[float, float] | None:
+    if lower <= 0 or upper <= 0 or lower >= upper:
+        return None
+    epsilon = max(abs(entry) * 1e-9, 1e-9)
+    if direction == "long":
+        lower = max(lower, stop + epsilon)
+        upper = min(upper, target - epsilon)
+    elif direction == "short":
+        lower = max(lower, target + epsilon)
+        upper = min(upper, stop - epsilon)
+    else:
+        return None
+    if lower >= upper or not (lower <= entry <= upper):
+        return None
+    return lower, upper
+
+
+def _entry_plan_valid_until(item: DarkflowInteraction, *, max_hold_bars: int) -> datetime:
+    start = _aware(item.event_ts)
+    bars = max(1, int(max_hold_bars or DEFAULT_ENTRY_PLAN_VALID_BARS))
+    validity = _interval_delta(item.interval) * bars
+    validity = max(validity, timedelta(hours=2))
+    validity = min(validity, timedelta(hours=72))
+    return start + validity
+
+
+def _interval_delta(interval: str | None) -> timedelta:
+    raw = str(interval or "").strip().lower()
+    if len(raw) >= 2 and raw[:-1].isdigit():
+        count = int(raw[:-1])
+        unit = raw[-1]
+        if unit == "m":
+            return timedelta(minutes=count)
+        if unit == "h":
+            return timedelta(hours=count)
+        if unit == "d":
+            return timedelta(days=count)
+    return timedelta(minutes=30)
 
 
 def _entry_trigger(item: DarkflowInteraction) -> str:
@@ -555,3 +677,9 @@ def _iso(value: datetime | None) -> str | None:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat()
+
+
+def _aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)

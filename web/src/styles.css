@@ -213,6 +213,20 @@ h2 { margin: 0; font-size: 15px; }
   font-size: 16px;
 }
 .level strong.danger { color: #ea3943; }
+.planLock {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  color: #9aa7b4;
+  font-size: 12px;
+}
+.planLock span {
+  border: 1px solid #263548;
+  background: #0b1118;
+  border-radius: 6px;
+  padding: 5px 8px;
+}
 .evidenceRow {
   display: flex;
   flex-wrap: wrap;

@@ -111,9 +111,19 @@ async def test_decision_cards_build_from_core_darkflow_v2_only(session) -> None:
     card = report["cards"][0]
     assert card["card_id"].endswith("decision-core")
     assert card["strategy_id"] == "pullback_to_cost"
+    assert card["entry_plan"]["plan_type"] == "frozen_darkflow_v2_entry_plan"
+    assert card["entry_plan"]["state"] == "frozen"
     assert card["entry_plan"]["planned_entry"] == 100.0
     assert card["entry_plan"]["planned_stop"] == 99.0
     assert card["entry_plan"]["take_profit_levels"][0]["price"] == 102.0
+    assert card["entry_plan"]["entry_reference_price"] == 100.0
+    assert card["entry_plan"]["entry_range"] == {
+        "lower": 99.4,
+        "upper": 100.6,
+        "source": "entry_reference_tolerance",
+    }
+    assert card["entry_plan"]["valid_until"] == "2026-01-01T02:00:00+00:00"
+    assert "entry_range_missed" in card["entry_plan"]["invalidation_rules"]
     assert card["risk"]["rr_ratio"] == 2.0
     assert card["risk_gate"]["paper_eligible"] is False
     assert "anti_repaint_audit_missing" in card["risk_gate"]["promotion_blockers"]
@@ -389,7 +399,7 @@ async def test_trade_candidate_audit_passes_rebuildable_candidates(session) -> N
 
 @pytest.mark.asyncio
 async def test_shadow_forward_opens_isolated_v2_sample_after_audit(session) -> None:
-    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
     session.add(
         DarkflowInteraction(
             interaction_key="candidate-shadow-forward",
@@ -461,3 +471,186 @@ async def test_shadow_forward_opens_isolated_v2_sample_after_audit(session) -> N
     assert candidate.paper_eligible is False
     assert candidate.live_eligible is False
     assert report["shadow_status_counts"] == {"collecting": 1}
+
+
+@pytest.mark.asyncio
+async def test_shadow_forward_waits_when_price_has_not_reached_frozen_entry_range(session) -> None:
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-shadow-waiting",
+            zone_key="zone-candidate-shadow-waiting",
+            source_snapshot_id="snapshot-candidate-shadow-waiting",
+            symbol="BTCUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            playbook="pullback_to_cost",
+            direction="long",
+            interaction_type="wick_pierce_reclaim",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+            },
+        )
+    )
+    session.add(
+        PriceSnapshot(
+            symbol="BTCUSDT",
+            price=99.2,
+            raw_payload={},
+            collected_at=base + timedelta(minutes=5),
+            created_at=base + timedelta(minutes=5),
+        )
+    )
+    await session.commit()
+    await materialize_darkflow_trade_candidates(session, limit=10)
+    await audit_darkflow_trade_candidates(session, limit=10)
+
+    result = await open_darkflow_shadow_forward_samples(
+        session,
+        limit=10,
+        max_candidate_age_hours=0,
+        entry_tolerance_pct=0.05,
+    )
+    trades = (await session.execute(select(ShadowPaperTrade))).scalars().all()
+
+    assert result["opened"] == []
+    assert len(trades) == 0
+    assert result["skipped"][0]["reason"] == "entry_plan_waiting"
+    assert result["skipped"][0]["entry_plan_state"]["state"] == "waiting"
+
+
+@pytest.mark.asyncio
+async def test_shadow_forward_skips_missed_frozen_entry_range(session) -> None:
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-shadow-missed",
+            zone_key="zone-candidate-shadow-missed",
+            source_snapshot_id="snapshot-candidate-shadow-missed",
+            symbol="BTCUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            playbook="pullback_to_cost",
+            direction="long",
+            interaction_type="wick_pierce_reclaim",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+            },
+        )
+    )
+    session.add(
+        PriceSnapshot(
+            symbol="BTCUSDT",
+            price=101.0,
+            raw_payload={},
+            collected_at=base + timedelta(minutes=5),
+            created_at=base + timedelta(minutes=5),
+        )
+    )
+    await session.commit()
+    await materialize_darkflow_trade_candidates(session, limit=10)
+    await audit_darkflow_trade_candidates(session, limit=10)
+
+    result = await open_darkflow_shadow_forward_samples(
+        session,
+        limit=10,
+        max_candidate_age_hours=0,
+        entry_tolerance_pct=0.05,
+    )
+    trades = (await session.execute(select(ShadowPaperTrade))).scalars().all()
+
+    assert result["opened"] == []
+    assert len(trades) == 0
+    assert result["skipped"][0]["reason"] == "entry_plan_missed"
+    assert result["skipped"][0]["entry_plan_state"]["reason"] == "entry_range_missed"
+
+
+@pytest.mark.asyncio
+async def test_shadow_forward_skips_invalidated_frozen_entry_range(session) -> None:
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-shadow-invalidated",
+            zone_key="zone-candidate-shadow-invalidated",
+            source_snapshot_id="snapshot-candidate-shadow-invalidated",
+            symbol="BTCUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            playbook="pullback_to_cost",
+            direction="long",
+            interaction_type="wick_pierce_reclaim",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=99.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="stop_loss",
+            pnl_pct=-0.01,
+            r_multiple=-1.0,
+            mfe=0.003,
+            mae=-0.012,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+            },
+        )
+    )
+    session.add(
+        PriceSnapshot(
+            symbol="BTCUSDT",
+            price=98.9,
+            raw_payload={},
+            collected_at=base + timedelta(minutes=5),
+            created_at=base + timedelta(minutes=5),
+        )
+    )
+    await session.commit()
+    await materialize_darkflow_trade_candidates(session, limit=10)
+    await audit_darkflow_trade_candidates(session, limit=10)
+
+    result = await open_darkflow_shadow_forward_samples(
+        session,
+        limit=10,
+        max_candidate_age_hours=0,
+        entry_tolerance_pct=0.05,
+    )
+    trades = (await session.execute(select(ShadowPaperTrade))).scalars().all()
+
+    assert result["opened"] == []
+    assert len(trades) == 0
+    assert result["skipped"][0]["reason"] == "entry_plan_invalidated"
+    assert result["skipped"][0]["entry_plan_state"]["reason"] == "price_crosses_invalidation"

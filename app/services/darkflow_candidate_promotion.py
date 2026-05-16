@@ -124,14 +124,21 @@ async def open_darkflow_shadow_forward_samples(
         if price is None or price <= 0:
             skipped.append({"candidate_key": candidate.candidate_key, "symbol": candidate.symbol, "reason": "missing_latest_price"})
             continue
-        if not _within_entry_tolerance(price, candidate.entry_price, entry_tolerance_pct=entry_tolerance_pct):
+        entry_plan_state = _candidate_entry_plan_state(
+            candidate,
+            mark_price=price,
+            now=now,
+            entry_tolerance_pct=entry_tolerance_pct,
+        )
+        if entry_plan_state["state"] != "triggered":
             skipped.append(
                 {
                     "candidate_key": candidate.candidate_key,
                     "symbol": candidate.symbol,
-                    "reason": "price_outside_entry_tolerance",
+                    "reason": f"entry_plan_{entry_plan_state['state']}",
                     "mark_price": price,
                     "planned_entry": candidate.entry_price,
+                    "entry_plan_state": entry_plan_state,
                 }
             )
             continue
@@ -140,6 +147,7 @@ async def open_darkflow_shadow_forward_samples(
             mark_price=price,
             now=now,
             entry_tolerance_pct=entry_tolerance_pct,
+            entry_plan_state=entry_plan_state,
         )
         if trade is None:
             skipped.append({"candidate_key": candidate.candidate_key, "reason": "invalid_shadow_trade_shape"})
@@ -156,6 +164,7 @@ async def open_darkflow_shadow_forward_samples(
                 "entry_price": trade.entry_price,
                 "stop_loss": trade.stop_loss,
                 "take_profit": trade.take_profit,
+                "entry_plan_state": entry_plan_state,
             }
         )
     if opened or updated:
@@ -381,12 +390,153 @@ def _within_entry_tolerance(price: float, planned_entry: float, *, entry_toleran
     return abs(price - planned_entry) / planned_entry <= max(0.0, float(entry_tolerance_pct))
 
 
+def _candidate_entry_plan_state(
+    candidate: TradeCandidate,
+    *,
+    mark_price: float,
+    now: datetime,
+    entry_tolerance_pct: float,
+) -> dict[str, Any]:
+    plan = _entry_plan(candidate)
+    planned_entry = _float(plan.get("planned_entry")) or float(candidate.entry_price)
+    planned_stop = _float(plan.get("planned_stop")) or float(candidate.stop_price)
+    target = _target_price_from_plan(plan) or float(candidate.target_price)
+    invalidation = _float(plan.get("invalidation_price")) or planned_stop
+    lower, upper, range_source = _entry_range(
+        plan,
+        direction=candidate.direction,
+        planned_entry=planned_entry,
+        planned_stop=planned_stop,
+        target_price=target,
+        entry_tolerance_pct=entry_tolerance_pct,
+    )
+    valid_until = _parse_iso_datetime(plan.get("valid_until"))
+    state = {
+        "state": "waiting",
+        "reason": "awaiting_frozen_entry_range",
+        "plan_type": str(plan.get("plan_type") or "legacy_entry_plan"),
+        "evaluated_at": _iso(now),
+        "mark_price": float(mark_price),
+        "planned_entry": planned_entry,
+        "planned_stop": planned_stop,
+        "target_price": target,
+        "invalidation_price": invalidation,
+        "entry_range": {"lower": lower, "upper": upper, "source": range_source},
+        "valid_until": _iso(valid_until),
+    }
+    shape_error = _entry_plan_shape_error(
+        candidate.direction,
+        entry=planned_entry,
+        stop=planned_stop,
+        target=target,
+        lower=lower,
+        upper=upper,
+    )
+    if shape_error:
+        state.update({"state": "invalid_shape", "reason": shape_error})
+        return state
+    if valid_until is not None and _aware(now) > valid_until:
+        state.update({"state": "expired", "reason": "valid_until_passed"})
+        return state
+    if _price_invalidated(candidate.direction, mark_price=mark_price, invalidation=invalidation, stop=planned_stop):
+        state.update({"state": "invalidated", "reason": "price_crosses_invalidation"})
+        return state
+    if lower <= mark_price <= upper:
+        state.update({"state": "triggered", "reason": "mark_price_inside_frozen_entry_range"})
+        return state
+    if _entry_range_missed(candidate.direction, mark_price=mark_price, lower=lower, upper=upper):
+        state.update({"state": "missed", "reason": "entry_range_missed"})
+        return state
+    return state
+
+
+def _entry_plan(candidate: TradeCandidate) -> dict[str, Any]:
+    payload = candidate.decision_payload if isinstance(candidate.decision_payload, dict) else {}
+    plan = payload.get("entry_plan") if isinstance(payload.get("entry_plan"), dict) else {}
+    return dict(plan)
+
+
+def _entry_range(
+    plan: dict[str, Any],
+    *,
+    direction: str,
+    planned_entry: float,
+    planned_stop: float,
+    target_price: float,
+    entry_tolerance_pct: float,
+) -> tuple[float, float, str]:
+    raw = plan.get("entry_range") if isinstance(plan.get("entry_range"), dict) else {}
+    lower = _float(raw.get("lower"))
+    upper = _float(raw.get("upper"))
+    if lower is not None and upper is not None and lower > 0 and upper > 0 and lower < upper:
+        return float(lower), float(upper), str(raw.get("source") or "frozen_entry_range")
+    tolerance = max(0.0, float(entry_tolerance_pct))
+    width = planned_entry * tolerance
+    lower = planned_entry - width
+    upper = planned_entry + width
+    epsilon = max(abs(planned_entry) * 1e-9, 1e-9)
+    if direction == "long":
+        lower = max(lower, planned_stop + epsilon)
+        upper = min(upper, target_price - epsilon)
+    elif direction == "short":
+        lower = max(lower, target_price + epsilon)
+        upper = min(upper, planned_stop - epsilon)
+    return lower, upper, "runtime_entry_tolerance_fallback"
+
+
+def _entry_plan_shape_error(
+    direction: str,
+    *,
+    entry: float,
+    stop: float,
+    target: float,
+    lower: float,
+    upper: float,
+) -> str | None:
+    if direction not in {"long", "short"}:
+        return "unsupported_direction"
+    if min(entry, stop, target, lower, upper) <= 0 or lower >= upper:
+        return "invalid_plan_prices"
+    if direction == "long" and not (stop < lower <= entry <= upper < target):
+        return "invalid_long_frozen_entry_range"
+    if direction == "short" and not (target < lower <= entry <= upper < stop):
+        return "invalid_short_frozen_entry_range"
+    return None
+
+
+def _price_invalidated(direction: str, *, mark_price: float, invalidation: float, stop: float) -> bool:
+    boundary = invalidation if invalidation > 0 else stop
+    if direction == "long":
+        return mark_price <= boundary or mark_price <= stop
+    if direction == "short":
+        return mark_price >= boundary or mark_price >= stop
+    return True
+
+
+def _entry_range_missed(direction: str, *, mark_price: float, lower: float, upper: float) -> bool:
+    if direction == "long":
+        return mark_price > upper
+    if direction == "short":
+        return mark_price < lower
+    return False
+
+
+def _target_price_from_plan(plan: dict[str, Any]) -> float | None:
+    levels = plan.get("take_profit_levels")
+    if isinstance(levels, list) and levels:
+        first = levels[0]
+        if isinstance(first, dict):
+            return _float(first.get("price"))
+    return None
+
+
 def _shadow_trade_from_candidate(
     candidate: TradeCandidate,
     *,
     mark_price: float,
     now: datetime,
     entry_tolerance_pct: float,
+    entry_plan_state: dict[str, Any] | None = None,
 ) -> ShadowPaperTrade | None:
     asset_tier = _asset_tier(candidate.symbol)
     entry_price = _execution_price(candidate.direction, mark_price, side="entry", asset_tier=asset_tier)
@@ -423,6 +573,7 @@ def _shadow_trade_from_candidate(
             "mark_price_at_signal": mark_price,
             "planned_entry_price": candidate.entry_price,
             "entry_tolerance_pct": entry_tolerance_pct,
+            "entry_plan_state": entry_plan_state or {},
             "execution_model": _execution_model(asset_tier),
             "candidate_snapshot": _candidate_snapshot(candidate),
         },
@@ -574,6 +725,32 @@ def _close(left: Any, right: Any, *, rel_tol: float = 1e-9, abs_tol: float = 1e-
     left_f = float(left)
     right_f = float(right)
     return abs(left_f - right_f) <= max(abs_tol, rel_tol * max(abs(left_f), abs(right_f), 1.0))
+
+
+def _float(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+        return parsed if parsed == parsed else None
+    if isinstance(value, str):
+        try:
+            parsed = float(value)
+        except ValueError:
+            return None
+        return parsed if parsed == parsed else None
+    return None
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return _aware(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _iso(value: datetime | None) -> str | None:
+    return _aware(value).isoformat() if value is not None else None
 
 
 def _max_drawdown(returns: list[float]) -> float:
