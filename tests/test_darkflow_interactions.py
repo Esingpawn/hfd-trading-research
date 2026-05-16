@@ -102,6 +102,57 @@ def test_detect_darkflow_interactions_marks_reclaim_and_target_hit() -> None:
     assert interaction.r_multiple is not None and interaction.r_multiple > 0
 
 
+def test_detect_darkflow_interactions_uses_dynamic_darkflow_target_and_quality() -> None:
+    item = snapshot(
+        {
+            "klines": klines(),
+            "liquidity_sweep": [
+                {"timestamp": klines()[0][0], "lower_price": 100.0, "upper_price": 100.8, "type": "bottom_sweep", "score": 1.0},
+                {"timestamp": klines()[0][0], "lower_price": 103.0, "upper_price": 103.4, "type": "top_liquidity", "score": 0.9},
+            ],
+        },
+        indicator="liquidity_sweep",
+    )
+    zones = extract_darkflow_zones(item)
+    candles = normalize_klines(item.raw_payload["klines"])
+
+    interactions = detect_darkflow_interactions(zones[0], candles, max_hold_bars=4, target_zones=zones)
+
+    assert len(interactions) == 1
+    context = interactions[0].context
+    assert context["target_model"] == "tutorial_dynamic_zone_target_v1"
+    assert context["target_plan"]["source"] == "liquidity_sweep.liquidity_zone"
+    assert context["quality"]["score"] >= 70
+    assert "dynamic_darkflow_target" in context["quality"]["confirmations"]
+
+
+def test_parent_trend_conflict_blocks_quality_candidate() -> None:
+    item = snapshot(
+        {
+            "klines": klines(),
+            "liquidity_sweep": [
+                {"timestamp": klines()[0][0], "lower_price": 100.0, "upper_price": 100.8, "type": "bottom_sweep", "score": 1.0},
+                {"timestamp": klines()[0][0], "lower_price": 103.0, "upper_price": 103.4, "type": "top_liquidity", "score": 0.9},
+            ],
+        },
+        indicator="liquidity_sweep",
+    )
+    zones = extract_darkflow_zones(item)
+    candles = normalize_klines(item.raw_payload["klines"])
+
+    interactions = detect_darkflow_interactions(
+        zones[0],
+        candles,
+        max_hold_bars=4,
+        target_zones=zones,
+        trend_context={"states": [{"timeframe": "long", "bias": "short"}]},
+    )
+
+    quality = interactions[0].context["quality"]
+    assert "parent_trend_conflict" in quality["blockers"]
+    assert interactions[0].context["evidence"]["trend_alignment"]["aligned"] is False
+
+
 @pytest.mark.asyncio
 async def test_backfill_interactions_persists_zones_and_is_idempotent(session) -> None:
     item = snapshot(
@@ -176,3 +227,106 @@ async def test_interaction_backtest_persists_latest_and_shadow_replay_is_isolate
     assert paper_count == 0
     assert all(row.strategy_name == "darkflow_interaction_v1" for row in shadow_rows)
     assert all(row.context["historical_replay"] for row in shadow_rows)
+
+
+@pytest.mark.asyncio
+async def test_interaction_backtest_candidates_use_quality_filtered_samples(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    good_context = {"quality": {"score": 78.0, "confirmations": ["dynamic_darkflow_target"], "blockers": []}}
+    weak_context = {"quality": {"score": 30.0, "confirmations": [], "blockers": ["fixed_r_target_fallback"]}}
+    conflict_context = {"quality": {"score": 90.0, "confirmations": [], "blockers": ["parent_trend_conflict"]}}
+    for index in range(4):
+        session.add(
+            DarkflowInteraction(
+                interaction_key=f"quality-good-{index}",
+                zone_key=f"quality-zone-good-{index}",
+                source_snapshot_id=f"snapshot-good-{index}",
+                symbol="BTCUSDT",
+                timeframe="short",
+                interval="30m",
+                indicator="liquidity_sweep",
+                playbook="liquidity_sweep_reversal",
+                direction="long",
+                interaction_type="wick_pierce_reclaim",
+                event_ts=base + timedelta(hours=index),
+                entry_price=100.0,
+                stop_price=99.0,
+                target_price=102.0,
+                invalidation_price=99.0,
+                exit_price=102.0 if index < 3 else 99.0,
+                exit_ts=base + timedelta(hours=index, minutes=30),
+                exit_reason="target_hit" if index < 3 else "stop_loss",
+                pnl_pct=0.02 if index < 3 else -0.01,
+                r_multiple=2.0 if index < 3 else -1.0,
+                mfe=0.025,
+                mae=-0.004,
+                status="backtested",
+                context=good_context,
+            )
+        )
+    for index in range(12):
+        session.add(
+            DarkflowInteraction(
+                interaction_key=f"quality-weak-{index}",
+                zone_key=f"quality-zone-weak-{index}",
+                source_snapshot_id=f"snapshot-weak-{index}",
+                symbol="BTCUSDT",
+                timeframe="short",
+                interval="30m",
+                indicator="trend_price",
+                playbook="pullback_to_cost",
+                direction="long",
+                interaction_type="first_touch",
+                event_ts=base + timedelta(hours=10 + index),
+                entry_price=100.0,
+                stop_price=99.0,
+                target_price=102.0,
+                invalidation_price=99.0,
+                exit_price=102.0,
+                exit_ts=base + timedelta(hours=10 + index, minutes=30),
+                exit_reason="target_hit",
+                pnl_pct=0.02,
+                r_multiple=2.0,
+                mfe=0.025,
+                mae=-0.004,
+                status="backtested",
+                context=weak_context,
+            )
+        )
+    session.add(
+        DarkflowInteraction(
+            interaction_key="quality-conflict",
+            zone_key="quality-zone-conflict",
+            source_snapshot_id="snapshot-conflict",
+            symbol="BTCUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="liquidity_sweep",
+            playbook="liquidity_sweep_reversal",
+            direction="long",
+            interaction_type="wick_pierce_reclaim",
+            event_ts=base + timedelta(hours=30),
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(hours=30, minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context=conflict_context,
+        )
+    )
+    await session.commit()
+
+    report = await darkflow_interaction_backtest(session, min_samples=4, limit=100, min_quality_score=55.0)
+    rows = {row["playbook"]: row for row in report["playbooks"]}
+
+    assert report["quality_interaction_count"] == 4
+    assert rows["liquidity_sweep_reversal"]["readiness"]["status"] == "candidate"
+    assert rows["pullback_to_cost"]["quality_sample_count"] == 0
+    assert rows["pullback_to_cost"]["readiness"]["status"] == "rejected"

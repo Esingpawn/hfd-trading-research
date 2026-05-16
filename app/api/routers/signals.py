@@ -204,6 +204,7 @@ async def darkflow_interaction_backtest_report(
     min_samples: int = Query(default=30, ge=1, le=5000),
     min_win_rate: float = Query(default=0.52, ge=0.0, le=1.0),
     min_profit_factor: float = Query(default=1.15, ge=0.0, le=1000.0),
+    min_quality_score: float = Query(default=55.0, ge=0.0, le=100.0),
 ) -> dict[str, object]:
     return await darkflow_interaction_backtest(
         session,
@@ -211,6 +212,7 @@ async def darkflow_interaction_backtest_report(
         min_samples=min_samples,
         min_win_rate=min_win_rate,
         min_profit_factor=min_profit_factor,
+        min_quality_score=min_quality_score,
         persist=False,
     )
 
@@ -222,6 +224,7 @@ async def persist_darkflow_interaction_backtest_report(
     min_samples: int = Query(default=30, ge=1, le=5000),
     min_win_rate: float = Query(default=0.52, ge=0.0, le=1.0),
     min_profit_factor: float = Query(default=1.15, ge=0.0, le=1000.0),
+    min_quality_score: float = Query(default=55.0, ge=0.0, le=100.0),
 ) -> dict[str, object]:
     return await darkflow_interaction_backtest(
         session,
@@ -229,6 +232,7 @@ async def persist_darkflow_interaction_backtest_report(
         min_samples=min_samples,
         min_win_rate=min_win_rate,
         min_profit_factor=min_profit_factor,
+        min_quality_score=min_quality_score,
         persist=True,
     )
 

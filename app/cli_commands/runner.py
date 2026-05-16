@@ -431,6 +431,7 @@ def build_parser() -> argparse.ArgumentParser:
     darkflow_interaction_backtest.add_argument("--min-samples", type=int, default=30)
     darkflow_interaction_backtest.add_argument("--min-win-rate", type=float, default=0.52)
     darkflow_interaction_backtest.add_argument("--min-profit-factor", type=float, default=1.15)
+    darkflow_interaction_backtest.add_argument("--min-quality-score", type=float, default=55.0)
     darkflow_interaction_backtest.add_argument("--persist", action="store_true", help="Save the report as an experiment run")
 
     darkflow_shadow = subparsers.add_parser(
@@ -1167,6 +1168,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 min_samples=args.min_samples,
                 min_win_rate=args.min_win_rate,
                 min_profit_factor=args.min_profit_factor,
+                min_quality_score=args.min_quality_score,
                 persist=args.persist,
             )
         print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))

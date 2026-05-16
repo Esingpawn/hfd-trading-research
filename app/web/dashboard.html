@@ -2146,6 +2146,9 @@
         { label:"状态", render: row => tag((row.readiness || {}).status === "candidate" ? "ok" : (row.readiness || {}).status === "watchlist" ? "warn" : "neutral", esc((row.readiness || {}).status || "research")) }
       ], "暂无官方教程语义回测报告"));
       setHtml("darkflowInteractionSummary", kvRows([
+        ["Quality", `${fmt(darkflowInteractionBacktest.quality_interaction_count || 0, 0)} / ${fmt(darkflowInteractionBacktest.interaction_count || 0, 0)}`],
+        ["Quality Win", pct((darkflowInteractionBacktest.quality_stats || {}).win_rate, 1)],
+        ["Quality PF", fmt((darkflowInteractionBacktest.quality_stats || {}).profit_factor, 2)],
         ["交互样本", fmt(darkflowInteractionBacktest.interaction_count || 0, 0)],
         ["已回测", fmt(darkflowInteractionBacktest.backtested_count || 0, 0)],
         ["候选/观察", `${fmt(darkflowInteractionBacktest.candidate_playbook_count || 0, 0)} / ${fmt(darkflowInteractionBacktest.watchlist_playbook_count || 0, 0)}`],
@@ -2154,12 +2157,13 @@
         ["隔离", darkflowInteractionBacktest.policy && darkflowInteractionBacktest.policy.opens_paper_trades === false ? `<span class="green">仅研究</span>` : `<span class="amber">待确认</span>`]
       ]));
       setHtml("darkflowInteractions", table((darkflowInteractionBacktest.playbooks || []).slice(0, 8), [
+        { label:"Quality", render: row => `${fmt(row.quality_sample_count || 0, 0)} / ${fmt(row.sample_count || 0, 0)}` },
         { label:"玩法", render: row => esc(row.display_name || row.playbook) },
         { label:"样本", render: row => fmt(row.sample_count || 0, 0) },
         { label:"胜率", render: row => pct((row.stats || {}).win_rate, 1) },
         { label:"平均收益", render: row => coloredPct((row.stats || {}).avg_return) },
         { label:"R", render: row => fmt((row.stats || {}).avg_r_multiple, 2) },
-        { label:"PF", render: row => fmt((row.stats || {}).profit_factor, 2) },
+        { label:"PF", render: row => fmt((row.quality_stats || row.stats || {}).profit_factor, 2) },
         { label:"回撤", render: row => pct((row.stats || {}).max_drawdown, 1) },
         { label:"状态", render: row => tag((row.readiness || {}).status === "candidate" ? "ok" : (row.readiness || {}).status === "watchlist" ? "warn" : "neutral", esc((row.readiness || {}).status || "research")) }
       ], "暂无区间交互回测报告"));

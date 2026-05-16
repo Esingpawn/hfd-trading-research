@@ -462,6 +462,7 @@ async def test_run_task_by_id_executes_darkflow_interaction_pipeline(session) ->
 
     assert backfill_result["result"]["execution"]["interactions_inserted"] == 1
     assert report_result["result"]["execution"]["policy"]["opens_live_orders"] is False
+    assert report_result["result"]["execution"]["thresholds"]["min_quality_score"] == 55.0
     assert report_result["result"]["execution"]["candidate_playbook_count"] == 1
     assert shadow_result["result"]["execution"]["policy"]["opens_paper_trades"] is False
     assert len(interactions.scalars().all()) == 1

@@ -29,6 +29,10 @@ DEFAULT_TARGET_R = 1.8
 DEFAULT_STOP_BUFFER_BPS = 12.0
 DEFAULT_MIN_PROFIT_FACTOR = 1.15
 DEFAULT_MIN_WIN_RATE = 0.52
+DEFAULT_MIN_QUALITY_SCORE = 55.0
+DEFAULT_CONFIRMATION_WINDOW_MINUTES = 90
+DEFAULT_MIN_DYNAMIC_TARGET_R = 1.15
+DEFAULT_MAX_DYNAMIC_TARGET_R = 6.0
 DEFAULT_SHADOW_REPLAY_LIMIT = 500
 DARKFLOW_INTERACTION_STRATEGY = "darkflow_interaction_v1"
 
@@ -147,6 +151,8 @@ def detect_darkflow_interactions(
     candles: list[Candle],
     *,
     max_hold_bars: int = DEFAULT_MAX_HOLD_BARS,
+    target_zones: list[ExtractedDarkflowZone | DarkflowZone] | None = None,
+    trend_context: dict[str, Any] | None = None,
 ) -> list[DetectedDarkflowInteraction]:
     if not candles:
         return []
@@ -164,7 +170,21 @@ def detect_darkflow_interactions(
     direction = str(zone_payload["direction"])
     entry_price = _entry_price(zone_payload, touch)
     stop_price = _stop_price(zone_payload, touch)
-    target_price = _target_price(direction, entry_price, stop_price, target_r=DEFAULT_TARGET_R)
+    target_plan = _target_plan_for_interaction(
+        direction,
+        entry_price,
+        stop_price,
+        playbook=playbook,
+        source_zone=zone_payload,
+        target_zones=target_zones or [],
+    )
+    evidence = _interaction_evidence(
+        zone_payload,
+        playbook=playbook,
+        target_zones=target_zones or [],
+        trend_context=trend_context or {},
+    )
+    target_price = target_plan["price"]
     hold = candles[first_touch_index : first_touch_index + max(1, int(max_hold_bars)) + 1]
     outcome = _interaction_outcome(
         direction,
@@ -173,6 +193,13 @@ def detect_darkflow_interactions(
         stop_price=stop_price,
         target_price=target_price,
         zone=zone_payload,
+    )
+    runner_outcome = _runner_outcome(
+        direction,
+        hold,
+        entry_price=entry_price,
+        stop_price=stop_price,
+        target_price=target_price,
     )
     event_ts = touch.ts
     context = {
@@ -183,8 +210,19 @@ def detect_darkflow_interactions(
         "touch_candle": _candle_payload(touch),
         "hold_bars": len(hold),
         "tutorial_rule_family": zone_payload["family"],
-        "target_model": "fixed_r_until_liquidity_target_parser_v2",
+        "target_model": target_plan["model"],
+        "target_plan": _compact_context(target_plan),
+        "runner_outcome": runner_outcome,
+        "evidence": _json_safe(evidence),
     }
+    context["quality"] = _base_quality_profile(
+        indicator=str(zone_payload["indicator"]),
+        playbook=playbook,
+        interaction_type=interaction_type,
+        target_model=str(target_plan["model"]),
+        runner_outcome=runner_outcome,
+        evidence=evidence,
+    )
     return [
         DetectedDarkflowInteraction(
             interaction_key=_interaction_key(zone_payload["zone_key"], interaction_type, event_ts),
@@ -295,11 +333,18 @@ async def backfill_darkflow_interactions(
             continue
         zones = extract_darkflow_zones(snapshot, payload, max_zones_per_snapshot=max_zones_per_snapshot)
         zones_extracted += len(zones)
+        trend_context = await _trend_context_for_snapshot(session, snapshot)
         if persist_zones and zones:
             await _insert_zone_rows(session, [_zone_insert_row(zone) for zone in zones])
         interaction_rows = []
         for zone in zones:
-            for interaction in detect_darkflow_interactions(zone, candles, max_hold_bars=max_hold_bars):
+            for interaction in detect_darkflow_interactions(
+                zone,
+                candles,
+                max_hold_bars=max_hold_bars,
+                target_zones=zones,
+                trend_context=trend_context,
+            ):
                 interactions_detected += 1
                 if interaction.interaction_key in seen_interactions:
                     duplicates += 1
@@ -333,6 +378,7 @@ async def darkflow_interaction_backtest(
     min_samples: int = DEFAULT_MIN_SAMPLES,
     min_win_rate: float = DEFAULT_MIN_WIN_RATE,
     min_profit_factor: float = DEFAULT_MIN_PROFIT_FACTOR,
+    min_quality_score: float = DEFAULT_MIN_QUALITY_SCORE,
     persist: bool = False,
 ) -> dict[str, Any]:
     requested_limit = int(limit)
@@ -351,6 +397,7 @@ async def darkflow_interaction_backtest(
         min_samples=min_samples,
         min_win_rate=min_win_rate,
         min_profit_factor=min_profit_factor,
+        min_quality_score=min_quality_score,
     )
     if persist:
         report["experiment_run"] = await _persist_interaction_report(
@@ -361,6 +408,7 @@ async def darkflow_interaction_backtest(
             min_samples=min_samples,
             min_win_rate=min_win_rate,
             min_profit_factor=min_profit_factor,
+            min_quality_score=min_quality_score,
         )
     return report
 
@@ -438,6 +486,38 @@ async def darkflow_shadow_replay(
         "source_experiment_run_id": report.get("source_experiment_run_id"),
         "policy": _policy(),
     }
+
+
+async def _trend_context_for_snapshot(session: AsyncSession, snapshot: SignalSnapshot) -> dict[str, Any]:
+    rows = await session.execute(
+        select(SignalSnapshot)
+        .where(
+            SignalSnapshot.symbol == snapshot.symbol,
+            SignalSnapshot.indicator == "smart_money_cost",
+            SignalSnapshot.timeframe.in_(["mid", "long"]),
+        )
+        .order_by(SignalSnapshot.timeframe, SignalSnapshot.collected_at.desc(), SignalSnapshot.id.desc())
+        .limit(12)
+    )
+    latest_by_timeframe: dict[str, SignalSnapshot] = {}
+    for item in rows.scalars().all():
+        latest_by_timeframe.setdefault(item.timeframe, item)
+    states = []
+    for timeframe, item in sorted(latest_by_timeframe.items()):
+        payload = payload_for_snapshot(item)
+        zones = payload.get("smart_money_cost") or payload.get("zones") or []
+        bias = "unknown"
+        if zones:
+            bias = _trend_bias_from_item(zones[-1])
+        states.append(
+            {
+                "timeframe": timeframe,
+                "snapshot_id": item.id,
+                "bias": bias,
+                "collected_at": _iso(item.collected_at),
+            }
+        )
+    return {"states": states}
 
 
 def normalize_klines(raw_klines: list[Any]) -> list[Candle]:
@@ -824,6 +904,212 @@ def _interaction_outcome(
     }
 
 
+def _target_plan_for_interaction(
+    direction: str,
+    entry_price: float,
+    stop_price: float,
+    *,
+    playbook: str,
+    source_zone: dict[str, Any],
+    target_zones: list[ExtractedDarkflowZone | DarkflowZone],
+) -> dict[str, Any]:
+    fixed_target = _target_price(direction, entry_price, stop_price, target_r=DEFAULT_TARGET_R)
+    fixed_plan = {
+        "price": fixed_target,
+        "model": "fixed_r_fallback",
+        "r_multiple": DEFAULT_TARGET_R,
+        "source": "fixed_r",
+        "reason": "No tutorial target zone cleared minimum R, so the research backtest used the fixed-R fallback.",
+        "candidates": [],
+    }
+    stop_distance = abs(entry_price - stop_price)
+    if stop_distance <= 0:
+        return fixed_plan
+    candidates = []
+    for target_zone in target_zones:
+        payload = _zone_payload(target_zone)
+        if payload.get("zone_key") == source_zone.get("zone_key"):
+            continue
+        if not _target_zone_allowed(playbook, payload):
+            continue
+        price = _target_candidate_price(direction, payload)
+        if price is None or not _profitable_target(direction, entry_price, price):
+            continue
+        r_multiple = abs(price - entry_price) / stop_distance
+        if not (DEFAULT_MIN_DYNAMIC_TARGET_R <= r_multiple <= DEFAULT_MAX_DYNAMIC_TARGET_R):
+            continue
+        candidates.append(
+            {
+                "price": float(price),
+                "r_multiple": r_multiple,
+                "source": f"{payload.get('indicator')}.{payload.get('zone_type')}",
+                "indicator": payload.get("indicator"),
+                "family": payload.get("family"),
+                "zone_key": payload.get("zone_key"),
+                "strength": _float(payload.get("strength")) or 0.0,
+                "distance_pct": abs(float(price) - entry_price) / entry_price if entry_price else None,
+            }
+        )
+    if not candidates:
+        return fixed_plan
+    selected = sorted(
+        candidates,
+        key=lambda item: (
+            item["r_multiple"],
+            -_target_family_priority(str(item.get("family") or "")),
+            -float(item.get("strength") or 0.0),
+        ),
+    )[0]
+    return {
+        "price": selected["price"],
+        "model": "tutorial_dynamic_zone_target_v1",
+        "r_multiple": selected["r_multiple"],
+        "source": selected["source"],
+        "reason": "Target selected from a tutorial-defined darkflow zone that is profitable and clears minimum R.",
+        "selected": selected,
+        "candidates": candidates[:8],
+    }
+
+
+def _interaction_evidence(
+    zone: dict[str, Any],
+    *,
+    playbook: str,
+    target_zones: list[ExtractedDarkflowZone | DarkflowZone],
+    trend_context: dict[str, Any],
+) -> dict[str, Any]:
+    rule = official_rule_for_internal_indicator(str(zone.get("indicator") or ""))
+    confirmation_keys = set(rule.confirmation_required if rule else ())
+    blocker_keys = set(_playbook_blockers(playbook))
+    confirmation_hits = []
+    blocker_hits = []
+    for candidate in target_zones:
+        payload = _zone_payload(candidate)
+        if payload.get("zone_key") == zone.get("zone_key"):
+            continue
+        indicator = str(payload.get("indicator") or "")
+        tokens = _indicator_aliases(indicator)
+        hit = {
+            "indicator": indicator,
+            "family": payload.get("family"),
+            "zone_key": payload.get("zone_key"),
+            "direction": payload.get("direction"),
+        }
+        if confirmation_keys & tokens:
+            confirmation_hits.append(hit)
+        if blocker_keys & tokens and payload.get("direction") not in {zone.get("direction"), "neutral", None}:
+            blocker_hits.append(hit)
+    return {
+        "confirmation_hits": confirmation_hits[:6],
+        "blocker_hits": blocker_hits[:6],
+        "trend_alignment": _trend_alignment(str(zone.get("direction") or ""), trend_context),
+    }
+
+
+def _runner_outcome(
+    direction: str,
+    candles: list[Candle],
+    *,
+    entry_price: float,
+    stop_price: float,
+    target_price: float,
+) -> dict[str, Any]:
+    if not candles:
+        return {"extension_available": False, "max_r": None, "locked_r": None, "exit_after_target_reason": None}
+    risk = abs(entry_price - stop_price)
+    if risk <= 0:
+        return {"extension_available": False, "max_r": None, "locked_r": None, "exit_after_target_reason": "invalid_risk"}
+    target_seen = False
+    max_r = 0.0
+    final_r = 0.0
+    exit_after_target_reason: str | None = None
+    for candle in candles:
+        favorable = candle.high - entry_price if direction == "long" else entry_price - candle.low
+        close_gain = candle.close - entry_price if direction == "long" else entry_price - candle.close
+        max_r = max(max_r, favorable / risk)
+        final_r = close_gain / risk
+        if not target_seen:
+            target_seen = candle.high >= target_price if direction == "long" else candle.low <= target_price
+        elif direction == "long" and candle.close < target_price:
+            exit_after_target_reason = "target_reclaimed_against_position"
+            break
+        elif direction == "short" and candle.close > target_price:
+            exit_after_target_reason = "target_reclaimed_against_position"
+            break
+    extension_available = target_seen and max_r >= DEFAULT_TARGET_R + 0.8
+    return {
+        "extension_available": extension_available,
+        "target_seen": target_seen,
+        "max_r": round(max_r, 4),
+        "locked_r": round(max(final_r, 0.0), 4),
+        "exit_after_target_reason": exit_after_target_reason,
+    }
+
+
+def _base_quality_profile(
+    *,
+    indicator: str,
+    playbook: str,
+    interaction_type: str,
+    target_model: str,
+    runner_outcome: dict[str, Any],
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    confirmations = []
+    blockers = []
+    score = 35.0
+    rule = official_rule_for_internal_indicator(indicator)
+    if rule is not None:
+        confirmations.append("official_rule_mapped")
+        score += 10.0
+        if rule.single_trigger_allowed:
+            confirmations.append("tutorial_allows_single_trigger")
+            score += 5.0
+    else:
+        blockers.append("official_rule_unmapped")
+    if interaction_type == "wick_pierce_reclaim":
+        confirmations.append("wick_reclaim_after_sweep")
+        score += 20.0
+    elif interaction_type == "first_touch":
+        confirmations.append("first_touch_zone_reaction")
+        score += 10.0
+    elif interaction_type == "body_break":
+        blockers.append("body_break_invalidation")
+        score -= 25.0
+    if target_model == "tutorial_dynamic_zone_target_v1":
+        confirmations.append("dynamic_darkflow_target")
+        score += 15.0
+    else:
+        blockers.append("fixed_r_target_fallback")
+    if runner_outcome.get("extension_available"):
+        confirmations.append("trend_extension_available")
+        score += 8.0
+    trend_alignment = evidence.get("trend_alignment") or {}
+    if trend_alignment.get("aligned") is True:
+        confirmations.append("parent_trend_aligned")
+        score += 12.0
+    elif trend_alignment.get("aligned") is False:
+        blockers.append("parent_trend_conflict")
+        score -= 18.0
+    confirmation_hits = evidence.get("confirmation_hits") or []
+    blocker_hits = evidence.get("blocker_hits") or []
+    if confirmation_hits:
+        confirmations.append("confirmation_indicators_nearby")
+        score += min(10.0, len(confirmation_hits) * 4.0)
+    if blocker_hits:
+        blockers.append("blocker_indicators_nearby")
+        score -= min(15.0, len(blocker_hits) * 5.0)
+    if playbook == "exhaustion_exit_filter":
+        blockers.append("exit_filter_not_opening_playbook")
+        score -= 10.0
+    return {
+        "score": round(max(0.0, min(100.0, score)), 3),
+        "confirmations": confirmations,
+        "blockers": blockers,
+        "grade": _quality_grade(score),
+    }
+
+
 def _interaction_report(
     interactions: list[DarkflowInteraction],
     *,
@@ -832,6 +1118,7 @@ def _interaction_report(
     min_samples: int,
     min_win_rate: float,
     min_profit_factor: float,
+    min_quality_score: float,
 ) -> dict[str, Any]:
     buckets: dict[str, list[DarkflowInteraction]] = {}
     for item in interactions:
@@ -839,13 +1126,24 @@ def _interaction_report(
     rows = []
     for playbook, items in buckets.items():
         stats = _stats(items)
-        readiness = _readiness(stats, min_samples=min_samples, min_win_rate=min_win_rate, min_profit_factor=min_profit_factor)
+        quality_items = _quality_filtered(items, min_quality_score=min_quality_score)
+        quality_stats = _stats(quality_items)
+        readiness = _readiness(
+            quality_stats,
+            min_samples=min_samples,
+            min_win_rate=min_win_rate,
+            min_profit_factor=min_profit_factor,
+            quality_sample_count=len(quality_items),
+        )
         rows.append(
             {
                 "playbook": playbook,
                 "display_name": _playbook_display_name(playbook),
                 "sample_count": stats["trade_count"],
+                "quality_sample_count": quality_stats["trade_count"],
                 "stats": stats,
+                "quality_stats": quality_stats,
+                "quality": _quality_summary(items, min_quality_score=min_quality_score),
                 "top_interaction_types": _top_interaction_types(items),
                 "top_indicators": _top_indicators(items),
                 "latest_interactions": _latest_interactions(items),
@@ -853,6 +1151,8 @@ def _interaction_report(
             }
         )
     all_stats = _stats(interactions)
+    quality_interactions = _quality_filtered(interactions, min_quality_score=min_quality_score)
+    quality_stats = _stats(quality_interactions)
     return {
         "strategy_family": "darkflow_zone_interactions_v1",
         "requested_limit": requested_limit,
@@ -860,13 +1160,17 @@ def _interaction_report(
         "limit_capped": requested_limit != limit,
         "interaction_count": len(interactions),
         "backtested_count": all_stats["trade_count"],
+        "quality_interaction_count": quality_stats["trade_count"],
         "candidate_playbook_count": sum(1 for row in rows if row["readiness"]["status"] == "candidate"),
         "watchlist_playbook_count": sum(1 for row in rows if row["readiness"]["status"] == "watchlist"),
         "stats": all_stats,
+        "quality_stats": quality_stats,
+        "quality": _quality_summary(interactions, min_quality_score=min_quality_score),
         "thresholds": {
             "min_samples": int(min_samples),
             "min_win_rate": float(min_win_rate),
             "min_profit_factor": float(min_profit_factor),
+            "min_quality_score": float(min_quality_score),
         },
         "policy": _policy(),
         "playbooks": sorted(
@@ -874,16 +1178,16 @@ def _interaction_report(
             key=lambda row: (
                 row["readiness"]["status"] == "candidate",
                 row["readiness"]["status"] == "watchlist",
-                row["sample_count"],
-                row["stats"].get("profit_factor") or 0.0,
+                row["quality_sample_count"],
+                row["quality_stats"].get("profit_factor") or 0.0,
             ),
             reverse=True,
         ),
         "implementation_gap": {
             "remaining_before_real_paper_integration": [
-                "Use parsed heatmap/fuel zones as dynamic targets instead of fixed R only.",
                 "Add multi-timeframe parent trend agreement.",
                 "Run isolated shadow-paper forward sample before changing paper-scan openings.",
+                "Validate dynamic target and runner exits on fresh forward samples, not only historical replay.",
             ]
         },
     }
@@ -916,17 +1220,26 @@ def _stats(items: list[DarkflowInteraction]) -> dict[str, Any]:
     }
 
 
-def _readiness(stats: dict[str, Any], *, min_samples: int, min_win_rate: float, min_profit_factor: float) -> dict[str, Any]:
+def _readiness(
+    stats: dict[str, Any],
+    *,
+    min_samples: int,
+    min_win_rate: float,
+    min_profit_factor: float,
+    quality_sample_count: int | None = None,
+) -> dict[str, Any]:
     blockers = []
     if stats["trade_count"] < min_samples:
         blockers.append("sample_count_below_minimum")
+    if quality_sample_count is not None and quality_sample_count <= 0:
+        blockers.append("no_quality_samples")
     if stats["win_rate"] is None or stats["win_rate"] < min_win_rate:
         blockers.append("win_rate_below_minimum")
     if stats["profit_factor"] is None or stats["profit_factor"] < min_profit_factor:
         blockers.append("profit_factor_below_minimum")
     if not blockers:
         status = "candidate"
-    elif blockers == ["sample_count_below_minimum"] and (stats["profit_factor"] or 0) >= min_profit_factor:
+    elif set(blockers).issubset({"sample_count_below_minimum"}) and (stats["profit_factor"] or 0) >= min_profit_factor:
         status = "watchlist"
     else:
         status = "rejected"
@@ -942,12 +1255,18 @@ async def _persist_interaction_report(
     min_samples: int,
     min_win_rate: float,
     min_profit_factor: float,
+    min_quality_score: float,
 ) -> dict[str, str]:
     item = ExperimentRun(
         name="darkflow_interaction_backtest",
         status="research",
         scope={"requested_limit": requested_limit, "limit": limit, "interaction_count": report["interaction_count"]},
-        params={"min_samples": min_samples, "min_win_rate": min_win_rate, "min_profit_factor": min_profit_factor},
+        params={
+            "min_samples": min_samples,
+            "min_win_rate": min_win_rate,
+            "min_profit_factor": min_profit_factor,
+            "min_quality_score": min_quality_score,
+        },
         metrics={key: value for key, value in report.items() if key != "experiment_run"},
         notes="Darkflow zone-interaction backtest from tutorial semantics. Research-only; does not open paper/live orders.",
     )
@@ -1133,6 +1452,9 @@ def _shadow_trade_from_interaction(
             "darkflow_interaction_id": item.id,
             "playbook": item.playbook,
             "interaction_type": item.interaction_type,
+            "quality": (item.context or {}).get("quality"),
+            "target_plan": (item.context or {}).get("target_plan"),
+            "runner_outcome": (item.context or {}).get("runner_outcome"),
             "research_only": True,
             "opens_paper_trades": False,
             "opens_live_orders": False,
@@ -1147,7 +1469,7 @@ def _shadow_allowed_playbooks(report: dict[str, Any], *, min_profit_factor: floa
     for row in report.get("playbooks") or []:
         readiness = row.get("readiness") or {}
         status = readiness.get("status")
-        pf = ((row.get("stats") or {}).get("profit_factor"))
+        pf = ((row.get("quality_stats") or row.get("stats") or {}).get("profit_factor"))
         if status == "candidate" or (include_watchlist and status == "watchlist" and isinstance(pf, (int, float)) and pf >= min_profit_factor):
             allowed.append(str(row.get("playbook") or ""))
     return [item for item in allowed if item]
@@ -1178,6 +1500,92 @@ def _top_indicators(items: list[DarkflowInteraction]) -> list[dict[str, Any]]:
     return sorted(({"indicator": key, **_stats(value)} for key, value in buckets.items()), key=lambda row: row["trade_count"], reverse=True)[:8]
 
 
+def _quality_filtered(items: list[DarkflowInteraction], *, min_quality_score: float) -> list[DarkflowInteraction]:
+    return [item for item in items if _quality_score(item) >= min_quality_score and not _hard_quality_blocked(item)]
+
+
+def _quality_summary(items: list[DarkflowInteraction], *, min_quality_score: float) -> dict[str, Any]:
+    scores = [_quality_score(item) for item in items]
+    quality_items = _quality_filtered(items, min_quality_score=min_quality_score)
+    confirmations: dict[str, int] = {}
+    blockers: dict[str, int] = {}
+    target_models: dict[str, int] = {}
+    runner_extension_count = 0
+    parent_aligned_count = 0
+    parent_conflict_count = 0
+    for item in items:
+        context = item.context or {}
+        quality = context.get("quality") or {}
+        for key in quality.get("confirmations") or []:
+            confirmations[str(key)] = confirmations.get(str(key), 0) + 1
+        for key in quality.get("blockers") or []:
+            blockers[str(key)] = blockers.get(str(key), 0) + 1
+        target_model = str(context.get("target_model") or ((context.get("target_plan") or {}).get("model") or "unknown"))
+        target_models[target_model] = target_models.get(target_model, 0) + 1
+        if (context.get("runner_outcome") or {}).get("extension_available"):
+            runner_extension_count += 1
+        alignment = ((context.get("evidence") or {}).get("trend_alignment") or {}).get("aligned")
+        if alignment is True:
+            parent_aligned_count += 1
+        elif alignment is False:
+            parent_conflict_count += 1
+    return {
+        "min_quality_score": float(min_quality_score),
+        "quality_sample_count": len(quality_items),
+        "quality_ratio": len(quality_items) / len(items) if items else 0.0,
+        "avg_quality_score": mean(scores) if scores else None,
+        "median_quality_score": median(scores) if scores else None,
+        "top_confirmations": _top_counts(confirmations),
+        "top_blockers": _top_counts(blockers),
+        "target_models": _top_counts(target_models),
+        "runner_extension_count": runner_extension_count,
+        "runner_extension_rate": runner_extension_count / len(items) if items else 0.0,
+        "parent_aligned_count": parent_aligned_count,
+        "parent_conflict_count": parent_conflict_count,
+    }
+
+
+def _quality_score(item: DarkflowInteraction) -> float:
+    context = item.context or {}
+    if not context.get("quality"):
+        return _legacy_quality_score(item)
+    raw = (context.get("quality") or {}).get("score")
+    parsed = _float(raw)
+    return float(parsed or 0.0)
+
+
+def _hard_quality_blocked(item: DarkflowInteraction) -> bool:
+    blockers = set(((item.context or {}).get("quality") or {}).get("blockers") or [])
+    return bool(
+        blockers
+        & {"body_break_invalidation", "official_rule_unmapped", "exit_filter_not_opening_playbook", "parent_trend_conflict"}
+    )
+
+
+def _legacy_quality_score(item: DarkflowInteraction) -> float:
+    score = 35.0
+    if official_rule_for_internal_indicator(item.indicator) is not None:
+        score += 10.0
+    if item.interaction_type == "wick_pierce_reclaim":
+        score += 20.0
+    elif item.interaction_type == "first_touch":
+        score += 10.0
+    elif item.interaction_type == "body_break":
+        score -= 25.0
+    if item.exit_reason == "target_hit":
+        score += 10.0
+    if isinstance(item.r_multiple, (int, float)) and item.r_multiple >= DEFAULT_TARGET_R:
+        score += 5.0
+    return round(max(0.0, min(100.0, score)), 3)
+
+
+def _top_counts(counts: dict[str, int], *, limit: int = 8) -> list[dict[str, Any]]:
+    return [
+        {"key": key, "count": value}
+        for key, value in sorted(counts.items(), key=lambda item: item[1], reverse=True)[:limit]
+    ]
+
+
 def _latest_interactions(items: list[DarkflowInteraction]) -> list[dict[str, Any]]:
     latest = sorted(items, key=lambda item: _aware(item.event_ts), reverse=True)[:8]
     return [
@@ -1192,6 +1600,8 @@ def _latest_interactions(items: list[DarkflowInteraction]) -> list[dict[str, Any
             "pnl_pct": item.pnl_pct,
             "r_multiple": item.r_multiple,
             "exit_reason": item.exit_reason,
+            "quality_score": _quality_score(item),
+            "target_model": (item.context or {}).get("target_model"),
         }
         for item in latest
     ]
@@ -1221,6 +1631,102 @@ def _playbook_display_name(key: str) -> str:
         if playbook.key == key:
             return playbook.display_name
     return key
+
+
+def _playbook_blockers(key: str) -> tuple[str, ...]:
+    for playbook in PLAYBOOKS:
+        if playbook.key == key:
+            return playbook.blocker_indicators
+    return ()
+
+
+def _indicator_aliases(indicator: str) -> set[str]:
+    aliases = {indicator}
+    rule = official_rule_for_internal_indicator(indicator)
+    if rule is not None:
+        aliases.add(rule.official_key)
+        aliases.update(rule.internal_keys)
+    return aliases
+
+
+def _trend_alignment(direction: str, trend_context: dict[str, Any]) -> dict[str, Any]:
+    states = [item for item in trend_context.get("states") or [] if isinstance(item, dict)]
+    if not states:
+        return {"aligned": None, "reason": "missing_parent_trend", "states": []}
+    directional = [item for item in states if item.get("bias") in {"long", "short"}]
+    if not directional:
+        return {"aligned": None, "reason": "parent_trend_neutral", "states": states}
+    aligned = [item for item in directional if item.get("bias") == direction]
+    conflicts = [item for item in directional if item.get("bias") != direction]
+    return {
+        "aligned": bool(aligned) and not conflicts,
+        "aligned_count": len(aligned),
+        "conflict_count": len(conflicts),
+        "states": states,
+    }
+
+
+def _trend_bias_from_item(item: Any) -> str:
+    if not isinstance(item, dict):
+        return "unknown"
+    text = " ".join(
+        str(item.get(key) or "").lower()
+        for key in ("type", "direction", "side", "bias", "trend", "status", "label")
+    )
+    if any(token in text for token in ("accum", "bull", "long", "green", "support", "up")):
+        return "long"
+    if any(token in text for token in ("dist", "bear", "short", "red", "resistance", "down")):
+        return "short"
+    return "unknown"
+
+
+def _target_zone_allowed(playbook: str, zone: dict[str, Any]) -> bool:
+    indicator = str(zone.get("indicator") or "")
+    family = str(zone.get("family") or "")
+    if family in {"liquidity", "vacuum", "volume_profile", "cost_structure"}:
+        return True
+    for item in PLAYBOOKS:
+        if item.key == playbook and indicator in item.target_indicators:
+            return True
+    return False
+
+
+def _target_candidate_price(direction: str, zone: dict[str, Any]) -> float | None:
+    lower = _float(zone.get("lower_price"))
+    upper = _float(zone.get("upper_price"))
+    mid = _float(zone.get("mid_price"))
+    if lower is None or upper is None:
+        return mid
+    if direction == "long":
+        return lower if lower > 0 else mid
+    return upper if upper > 0 else mid
+
+
+def _target_family_priority(family: str) -> float:
+    return {
+        "liquidity": 4.0,
+        "vacuum": 3.5,
+        "volume_profile": 3.0,
+        "cost_structure": 2.5,
+    }.get(family, 1.0)
+
+
+def _profitable_target(direction: str, entry_price: float, target_price: float) -> bool:
+    if direction == "long":
+        return target_price > entry_price
+    if direction == "short":
+        return target_price < entry_price
+    return False
+
+
+def _quality_grade(score: float) -> str:
+    if score >= 75:
+        return "A"
+    if score >= 60:
+        return "B"
+    if score >= 45:
+        return "C"
+    return "D"
 
 
 def _family(indicator: str) -> str:

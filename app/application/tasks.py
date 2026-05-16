@@ -412,6 +412,7 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
             min_samples=_payload_int(payload, "min_samples", 30),
             min_win_rate=_payload_float(payload, "min_win_rate", 0.52),
             min_profit_factor=_payload_float(payload, "min_profit_factor", 1.15),
+            min_quality_score=_payload_float(payload, "min_quality_score", 55.0),
             persist=_payload_bool(payload, "persist", True),
         )
     if task_name in {"darkflow.shadow_replay", "darkflow-shadow-replay"}:
