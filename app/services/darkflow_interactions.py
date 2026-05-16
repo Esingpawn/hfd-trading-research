@@ -34,7 +34,8 @@ DEFAULT_CONFIRMATION_WINDOW_MINUTES = 90
 DEFAULT_MIN_DYNAMIC_TARGET_R = 1.15
 DEFAULT_MAX_DYNAMIC_TARGET_R = 6.0
 DEFAULT_SHADOW_REPLAY_LIMIT = 500
-DARKFLOW_INTERACTION_STRATEGY = "darkflow_interaction_v1"
+DARKFLOW_INTERACTION_SCHEMA = "v2"
+DARKFLOW_INTERACTION_STRATEGY = "darkflow_interaction_quality_v2"
 
 
 @dataclass(frozen=True)
@@ -1341,7 +1342,7 @@ def _zone_insert_row(zone: ExtractedDarkflowZone) -> dict[str, Any]:
         "touches": 0,
         "status": "active",
         "context": zone.context,
-        "created_at": utc_now(),
+            "created_at": utc_now(),
     }
 
 
@@ -1483,7 +1484,7 @@ async def _existing_shadow_keys(session: AsyncSession, signal_keys: list[str]) -
 
 
 def _shadow_signal_key(item: DarkflowInteraction) -> str:
-    return f"darkflow-interaction:{item.interaction_key}"
+    return f"darkflow-interaction:{DARKFLOW_INTERACTION_SCHEMA}:{item.interaction_key}"
 
 
 def _top_interaction_types(items: list[DarkflowInteraction]) -> list[dict[str, Any]]:
@@ -1763,7 +1764,7 @@ def _zone_key(**payload: Any) -> str:
 
 
 def _interaction_key(zone_key: str, interaction_type: str, event_ts: datetime) -> str:
-    raw = f"{zone_key}:{interaction_type}:{_aware(event_ts).isoformat()}"
+    raw = f"{DARKFLOW_INTERACTION_SCHEMA}:{zone_key}:{interaction_type}:{_aware(event_ts).isoformat()}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 

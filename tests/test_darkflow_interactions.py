@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.db import Base
 from app.models import DarkflowInteraction, DarkflowZone, ExperimentRun, PaperTrade, ShadowPaperTrade, SignalSnapshot
 from app.services.darkflow_interactions import (
+    DARKFLOW_INTERACTION_STRATEGY,
     backfill_darkflow_interactions,
     darkflow_interaction_backtest,
     darkflow_shadow_replay,
@@ -225,7 +226,7 @@ async def test_interaction_backtest_persists_latest_and_shadow_replay_is_isolate
     assert replay["policy"]["opens_paper_trades"] is False
     assert replay["inserted"] == 4
     assert paper_count == 0
-    assert all(row.strategy_name == "darkflow_interaction_v1" for row in shadow_rows)
+    assert all(row.strategy_name == DARKFLOW_INTERACTION_STRATEGY for row in shadow_rows)
     assert all(row.context["historical_replay"] for row in shadow_rows)
 
 
