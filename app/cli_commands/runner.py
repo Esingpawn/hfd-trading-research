@@ -592,6 +592,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only use strict segment candidates, not observation rows, for shadow paper",
     )
     experiment_loop.add_argument(
+        "--no-darkflow-pipeline",
+        action="store_true",
+        help="Do not maintain core darkflow v2 zones/interactions/candidates",
+    )
+    experiment_loop.add_argument(
+        "--darkflow-interval-seconds",
+        type=int,
+        default=900,
+        help="Seconds between core darkflow v2 pipeline refreshes",
+    )
+    experiment_loop.add_argument(
+        "--darkflow-limit",
+        type=int,
+        default=500,
+        help="Latest signal snapshots to scan into core darkflow v2 interactions each refresh",
+    )
+    experiment_loop.add_argument(
+        "--darkflow-backtest-limit",
+        type=int,
+        default=5000,
+        help="Latest darkflow interactions to include in the persisted v2 backtest report",
+    )
+    experiment_loop.add_argument(
+        "--darkflow-candidate-limit",
+        type=int,
+        default=200,
+        help="Maximum darkflow v2 trade candidates to materialize and audit each refresh",
+    )
+    experiment_loop.add_argument(
+        "--darkflow-shadow-limit",
+        type=int,
+        default=100,
+        help="Maximum audited darkflow v2 candidates to scan into isolated shadow-forward each refresh",
+    )
+    experiment_loop.add_argument(
+        "--darkflow-max-hold-bars",
+        type=int,
+        default=12,
+        help="Maximum bars used for darkflow interaction outcome and frozen entry-plan validity",
+    )
+    experiment_loop.add_argument(
         "--interval-seconds",
         type=int,
         default=300,
@@ -1398,11 +1439,19 @@ async def run(argv: Sequence[str] | None = None) -> int:
             shadow_paper_interval_seconds=args.shadow_paper_interval_seconds,
             shadow_paper_candidate_limit=args.shadow_paper_candidate_limit,
             shadow_paper_strict_only=args.shadow_paper_strict_only,
+            darkflow_pipeline_enabled=not args.no_darkflow_pipeline,
+            darkflow_interval_seconds=args.darkflow_interval_seconds,
+            darkflow_limit=args.darkflow_limit,
+            darkflow_backtest_limit=args.darkflow_backtest_limit,
+            darkflow_candidate_limit=args.darkflow_candidate_limit,
+            darkflow_shadow_limit=args.darkflow_shadow_limit,
+            darkflow_max_hold_bars=args.darkflow_max_hold_bars,
         )
         heartbeat_task = _start_runtime_heartbeat("experiment-loop", runtime_meta)
         run_number = 0
         last_research_report_at = 0.0
         last_shadow_paper_at = 0.0
+        last_darkflow_at = 0.0
         try:
             while True:
                 run_number += 1
@@ -1416,6 +1465,10 @@ async def run(argv: Sequence[str] | None = None) -> int:
                     include_shadow_paper = (
                         not args.no_shadow_paper
                         and (last_shadow_paper_at <= 0 or now - last_shadow_paper_at >= args.shadow_paper_interval_seconds)
+                    )
+                    include_darkflow_pipeline = (
+                        not args.no_darkflow_pipeline
+                        and (last_darkflow_at <= 0 or now - last_darkflow_at >= args.darkflow_interval_seconds)
                     )
                     async with SessionLocal() as session:
                         result = await run_experiment_backfill(
@@ -1433,11 +1486,19 @@ async def run(argv: Sequence[str] | None = None) -> int:
                             include_shadow_paper=include_shadow_paper,
                             shadow_candidate_limit=args.shadow_paper_candidate_limit,
                             shadow_include_watchlist=not args.shadow_paper_strict_only,
+                            include_darkflow_pipeline=include_darkflow_pipeline,
+                            darkflow_limit=args.darkflow_limit,
+                            darkflow_backtest_limit=args.darkflow_backtest_limit,
+                            darkflow_candidate_limit=args.darkflow_candidate_limit,
+                            darkflow_shadow_limit=args.darkflow_shadow_limit,
+                            darkflow_max_hold_bars=args.darkflow_max_hold_bars,
                         )
                     if include_reports and not result.get("research_reports", {}).get("error_count"):
                         last_research_report_at = now
                     if include_shadow_paper:
                         last_shadow_paper_at = now
+                    if include_darkflow_pipeline and result.get("darkflow", {}).get("enabled"):
+                        last_darkflow_at = now
                     print(
                         json.dumps(
                             jsonable({
@@ -1448,6 +1509,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
                                 "features": result["features"],
                                 "research_reports": result["research_reports"],
                                 "shadow_paper": result["shadow_paper"],
+                                "darkflow": result["darkflow"],
                             }),
                             ensure_ascii=False,
                         ),

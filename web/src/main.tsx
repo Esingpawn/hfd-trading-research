@@ -51,12 +51,25 @@ type TradeCandidateReport = {
 type EntryPlanStateReport = {
   candidate_count: number;
   generated_at?: string | null;
+  freshness?: DarkflowFreshness;
   state_counts: Record<string, number>;
   reason_counts: Record<string, number>;
   missing_price_count: number;
   samples: EntryPlanSample[];
   thresholds: { entry_tolerance_pct: number };
   policy: Policy & { report_only?: boolean; mutates_candidate_state?: boolean };
+};
+
+type DarkflowFreshness = {
+  status: "fresh" | "stale" | string;
+  stale_reasons: string[];
+  latest_price_at?: string | null;
+  latest_signal_snapshot_at?: string | null;
+  latest_interaction_event_at?: string | null;
+  latest_interaction_created_at?: string | null;
+  latest_candidate_setup_at?: string | null;
+  latest_candidate_updated_at?: string | null;
+  age_minutes?: Record<string, number | null>;
 };
 
 type EntryPlanSample = {
@@ -456,6 +469,7 @@ function EntryPlanStatePanel({ report }: { report: EntryPlanStateReport | null }
           <small>{topReason ? `${fmt(topReason[1], 0)} candidates` : "无"}</small>
         </div>
       </div>
+      {report.freshness && <FreshnessPanel freshness={report.freshness} />}
       <div className="stateBuckets">
         {states.map((state) => (
           <div className={`stateBucket ${stateTone(state)}`} key={state}>
@@ -474,6 +488,39 @@ function EntryPlanStatePanel({ report }: { report: EntryPlanStateReport | null }
             </small>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function FreshnessPanel({ freshness }: { freshness: DarkflowFreshness }) {
+  const stale = freshness.status !== "fresh";
+  return (
+    <div className={`freshnessPanel ${stale ? "stale" : "fresh"}`}>
+      <div>
+        <span>暗流链路</span>
+        <strong>{stale ? "滞后" : "新鲜"}</strong>
+        <small>{freshness.stale_reasons.length ? freshness.stale_reasons.map(freshnessReasonText).join(" / ") : "zone / interaction / candidate 跟随最新采集"}</small>
+      </div>
+      <div>
+        <span>最新行情</span>
+        <strong>{ageText(freshness.age_minutes?.price)}</strong>
+        <small>{timeText(freshness.latest_price_at)}</small>
+      </div>
+      <div>
+        <span>最新快照</span>
+        <strong>{ageText(freshness.age_minutes?.signal_snapshot)}</strong>
+        <small>{timeText(freshness.latest_signal_snapshot_at)}</small>
+      </div>
+      <div>
+        <span>最新暗流交互</span>
+        <strong>{ageText(freshness.age_minutes?.interaction_event)}</strong>
+        <small>{timeText(freshness.latest_interaction_event_at)}</small>
+      </div>
+      <div>
+        <span>最新候选</span>
+        <strong>{ageText(freshness.age_minutes?.candidate_setup)}</strong>
+        <small>{timeText(freshness.latest_candidate_setup_at)}</small>
       </div>
     </div>
   );
@@ -635,6 +682,22 @@ function stateReasonText(value: string) {
     invalid_long_frozen_entry_range: "多头区间异常",
     invalid_short_frozen_entry_range: "空头区间异常",
   }[value] ?? value.replace(/_/g, " ");
+}
+
+function freshnessReasonText(value: string) {
+  return {
+    latest_price_stale: "行情滞后",
+    latest_signal_snapshot_stale: "快照滞后",
+    darkflow_interactions_stale: "暗流交互滞后",
+    trade_candidates_stale: "候选滞后",
+  }[value] ?? value.replace(/_/g, " ");
+}
+
+function ageText(value?: number | null) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "--";
+  if (value < 1) return "<1m";
+  if (value < 120) return `${Math.round(value)}m`;
+  return `${(value / 60).toFixed(1)}h`;
 }
 
 function stateTone(value: string) {

@@ -143,6 +143,16 @@ services:
       - "3600"
       - --research-report-limit
       - "5000"
+      - --darkflow-interval-seconds
+      - "900"
+      - --darkflow-limit
+      - "500"
+      - --darkflow-backtest-limit
+      - "5000"
+      - --darkflow-candidate-limit
+      - "200"
+      - --darkflow-shadow-limit
+      - "100"
     depends_on:
       db-init:
         condition: service_completed_successfully

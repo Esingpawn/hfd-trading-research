@@ -40,6 +40,18 @@ def test_experiment_worker_uses_guarded_research_report_interval() -> None:
     assert '      - "5000"' in block
 
 
+def test_experiment_worker_maintains_core_darkflow_pipeline() -> None:
+    compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
+    block = _service_block(compose_text, "experiment-worker")
+
+    assert "--darkflow-interval-seconds" in block
+    assert '      - "900"' in block
+    assert "--darkflow-limit" in block
+    assert "--darkflow-backtest-limit" in block
+    assert "--darkflow-candidate-limit" in block
+    assert "--darkflow-shadow-limit" in block
+
+
 def _service_block(compose_text: str, service_name: str) -> str:
     lines = compose_text.splitlines()
     start = next(index for index, line in enumerate(lines) if line == f"  {service_name}:")

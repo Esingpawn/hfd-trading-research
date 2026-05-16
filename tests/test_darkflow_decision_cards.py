@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
-from app.models import DarkflowInteraction, PriceSnapshot, ShadowPaperTrade, TradeCandidate
+from app.models import DarkflowInteraction, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TradeCandidate
 from app.services.darkflow_candidate_promotion import (
     DARKFLOW_V2_SHADOW_STRATEGY_NAME,
     audit_darkflow_trade_candidates,
@@ -660,6 +660,20 @@ async def test_shadow_forward_skips_invalidated_frozen_entry_range(session) -> N
 @pytest.mark.asyncio
 async def test_entry_plan_state_report_summarizes_frozen_candidate_states(session) -> None:
     base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    session.add(
+        SignalSnapshot(
+            symbol="BTCUSDT",
+            asset_tier="core",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            endpoint="/api/pro/pro_data",
+            raw_payload={},
+            summary_payload={},
+            collected_at=base,
+            created_at=base,
+        )
+    )
     rows = [
         ("state-waiting", "BTCUSDT", 99.2),
         ("state-missed", "ETHUSDT", 101.0),
@@ -714,6 +728,8 @@ async def test_entry_plan_state_report_summarizes_frozen_candidate_states(sessio
 
     assert report["candidate_count"] == 4
     assert report["state_counts"] == {"waiting": 1, "missed": 1, "triggered": 1, "invalidated": 1}
+    assert report["freshness"]["status"] == "fresh"
+    assert report["freshness"]["pipeline"]["expected_worker"] == "experiment-worker"
     assert report["policy"]["report_only"] is True
     assert report["policy"]["mutates_candidate_state"] is False
     assert report["policy"]["opens_live_orders"] is False

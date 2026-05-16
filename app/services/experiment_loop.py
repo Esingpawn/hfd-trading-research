@@ -6,6 +6,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.feature_candidates import generate_default_research_reports
 from app.services.features import FeatureLabelBackfillResult, backfill_feature_events, backfill_feature_labels
+from app.services.darkflow_interactions import backfill_darkflow_interactions, darkflow_interaction_backtest
+from app.services.darkflow_decision_cards import materialize_darkflow_trade_candidates
+from app.services.darkflow_candidate_promotion import refresh_darkflow_candidate_promotion
 from app.services.shadow_paper import mark_shadow_paper_trades, shadow_paper_scan
 from app.services.signal_attribution import backfill_signal_outcomes
 
@@ -29,6 +32,12 @@ async def run_experiment_backfill(
     include_shadow_paper: bool = False,
     shadow_candidate_limit: int = 20,
     shadow_include_watchlist: bool = True,
+    include_darkflow_pipeline: bool = False,
+    darkflow_limit: int = 500,
+    darkflow_backtest_limit: int = 5000,
+    darkflow_candidate_limit: int = 200,
+    darkflow_shadow_limit: int = 100,
+    darkflow_max_hold_bars: int = 12,
 ) -> dict[str, Any]:
     signal_result = await backfill_signal_outcomes(
         session,
@@ -40,6 +49,7 @@ async def run_experiment_backfill(
         "features": {"enabled": False},
         "research_reports": {"enabled": False},
         "shadow_paper": {"enabled": False},
+        "darkflow": {"enabled": False},
     }
     if include_feature_research:
         horizons = list(feature_horizons or DEFAULT_FEATURE_HORIZONS)
@@ -79,7 +89,64 @@ async def run_experiment_backfill(
                 include_watchlist=shadow_include_watchlist,
             ),
         }
+    if include_darkflow_pipeline:
+        payload["darkflow"] = await _run_darkflow_pipeline(
+            session,
+            limit=darkflow_limit,
+            backtest_limit=darkflow_backtest_limit,
+            candidate_limit=darkflow_candidate_limit,
+            shadow_limit=darkflow_shadow_limit,
+            max_hold_bars=darkflow_max_hold_bars,
+        )
     return payload
+
+
+async def _run_darkflow_pipeline(
+    session: AsyncSession,
+    *,
+    limit: int,
+    backtest_limit: int,
+    candidate_limit: int,
+    shadow_limit: int,
+    max_hold_bars: int,
+) -> dict[str, Any]:
+    mark = await mark_shadow_paper_trades(session)
+    interactions = await backfill_darkflow_interactions(
+        session,
+        limit=max(1, int(limit)),
+        max_hold_bars=max(1, int(max_hold_bars)),
+        persist_zones=True,
+        commit=True,
+    )
+    backtest = await darkflow_interaction_backtest(
+        session,
+        limit=max(1, int(backtest_limit)),
+        persist=True,
+    )
+    candidates = await materialize_darkflow_trade_candidates(
+        session,
+        limit=max(1, int(candidate_limit)),
+    )
+    promotion = await refresh_darkflow_candidate_promotion(
+        session,
+        limit=max(1, int(candidate_limit)),
+        shadow_limit=max(1, int(shadow_limit)),
+    )
+    return {
+        "enabled": True,
+        "mark": mark,
+        "interactions": interactions.__dict__,
+        "interaction_backtest": backtest,
+        "trade_candidates": candidates,
+        "promotion": promotion,
+        "policy": {
+            "research_only": True,
+            "opens_live_orders": False,
+            "opens_paper_trades": False,
+            "uses_isolated_shadow_paper": True,
+            "purpose": "keep core_darkflow_v2 zones/interactions/candidates fresh from latest collected snapshots",
+        },
+    }
 
 
 async def _backfill_feature_labels_incremental(

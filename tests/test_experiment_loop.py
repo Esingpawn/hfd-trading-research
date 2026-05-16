@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
-from app.models import ExperimentRun, FeatureEvent, FeatureLabel, PriceSnapshot, ShadowPaperTrade, SignalSnapshot
+from app.models import DarkflowInteraction, ExperimentRun, FeatureEvent, FeatureLabel, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TradeCandidate
 from app.services.experiment_loop import run_experiment_backfill
 
 
@@ -285,3 +285,74 @@ async def test_experiment_backfill_can_maintain_shadow_paper(session) -> None:
     assert result["shadow_paper"]["scan"]["policy"]["opens_paper_trades"] is False
     assert len(result["shadow_paper"]["scan"]["opened"]) >= 1
     assert len(trades.scalars().all()) >= 1
+
+
+@pytest.mark.asyncio
+async def test_experiment_backfill_can_maintain_darkflow_pipeline(session) -> None:
+    await _add_darkflow_snapshot(session)
+
+    result = await run_experiment_backfill(
+        session,
+        signal_limit=10,
+        include_feature_research=False,
+        include_darkflow_pipeline=True,
+        darkflow_limit=10,
+        darkflow_backtest_limit=100,
+        darkflow_candidate_limit=10,
+        darkflow_shadow_limit=10,
+    )
+    interactions = await session.execute(select(DarkflowInteraction))
+    candidates = await session.execute(select(TradeCandidate))
+    shadows = await session.execute(select(ShadowPaperTrade))
+    experiments = await session.execute(select(ExperimentRun).where(ExperimentRun.name == "darkflow_interaction_backtest"))
+
+    assert result["darkflow"]["enabled"] is True
+    assert result["darkflow"]["policy"]["opens_live_orders"] is False
+    assert result["darkflow"]["policy"]["opens_paper_trades"] is False
+    assert result["darkflow"]["interactions"]["interactions_inserted"] == 1
+    assert result["darkflow"]["trade_candidates"]["inserted"] == 1
+    assert result["darkflow"]["promotion"]["policy"]["opens_live_orders"] is False
+    assert len(interactions.scalars().all()) == 1
+    assert len(candidates.scalars().all()) == 1
+    assert len(shadows.scalars().all()) == 1
+    assert experiments.scalar_one().status == "research"
+
+
+async def _add_darkflow_snapshot(session) -> None:
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    rows = []
+    for index, (open_price, high, low, close) in enumerate(
+        [
+            (101.0, 102.0, 100.5, 101.5),
+            (101.5, 101.8, 99.6, 100.6),
+            (100.6, 103.8, 100.4, 103.2),
+            (103.2, 104.4, 102.9, 104.0),
+        ]
+    ):
+        rows.append([int((base + timedelta(minutes=30 * index)).timestamp() * 1000), open_price, close, low, high, 10.0])
+    session.add(
+        SignalSnapshot(
+            symbol="BTCUSDT",
+            asset_tier="core",
+            timeframe="short",
+            interval="30m",
+            indicator="liquidity_sweep",
+            endpoint="/api/pro/pro_data",
+            raw_payload={
+                "klines": rows,
+                "liquidity_sweep": [
+                    {
+                        "timestamp": rows[0][0],
+                        "lower_price": 100.0,
+                        "upper_price": 100.8,
+                        "type": "bottom_sweep",
+                        "score": 1.0,
+                    }
+                ],
+            },
+            summary_payload={},
+            collected_at=base + timedelta(minutes=30),
+        )
+    )
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=base + timedelta(minutes=30)))
+    await session.commit()

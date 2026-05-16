@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import DarkflowInteraction, PriceSnapshot, ShadowPaperTrade, TradeCandidate, utc_now
+from app.models import DarkflowInteraction, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TradeCandidate, utc_now
 from app.services.darkflow_decision_cards import (
     PROMOTION_BLOCKER_ANTI_REPAINT_FAILED,
     PROMOTION_BLOCKER_ANTI_REPAINT_MISSING,
@@ -294,6 +294,7 @@ async def darkflow_entry_plan_state_report(
         "requested_limit": max(1, int(limit)),
         "candidate_count": len(rows),
         "generated_at": _iso(now),
+        "freshness": await _darkflow_freshness(session, now=now, rows=rows),
         "state_counts": counts,
         "reason_counts": reason_counts,
         "missing_price_count": missing_price_count,
@@ -303,6 +304,58 @@ async def darkflow_entry_plan_state_report(
             "opens_paper_trades": False,
             "opens_live_orders": False,
             "mutates_candidate_state": False,
+            "report_only": True,
+        },
+    }
+
+
+async def _darkflow_freshness(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    rows: list[TradeCandidate],
+) -> dict[str, Any]:
+    latest_price_at = await session.scalar(select(PriceSnapshot.created_at).order_by(PriceSnapshot.created_at.desc()).limit(1))
+    latest_snapshot_at = await session.scalar(select(SignalSnapshot.created_at).order_by(SignalSnapshot.created_at.desc()).limit(1))
+    latest_interaction_event_at = await session.scalar(
+        select(DarkflowInteraction.event_ts).order_by(DarkflowInteraction.event_ts.desc(), DarkflowInteraction.id.desc()).limit(1)
+    )
+    latest_interaction_created_at = await session.scalar(
+        select(DarkflowInteraction.created_at).order_by(DarkflowInteraction.created_at.desc(), DarkflowInteraction.id.desc()).limit(1)
+    )
+    latest_candidate_setup_at = max((_aware(item.setup_time) for item in rows if item.setup_time is not None), default=None)
+    latest_candidate_updated_at = max((_aware(item.updated_at) for item in rows if item.updated_at is not None), default=None)
+    candidate_age_minutes = _age_minutes(now, latest_candidate_setup_at)
+    interaction_age_minutes = _age_minutes(now, latest_interaction_event_at)
+    snapshot_age_minutes = _age_minutes(now, latest_snapshot_at)
+    price_age_minutes = _age_minutes(now, latest_price_at)
+    stale_reasons: list[str] = []
+    if price_age_minutes is None or price_age_minutes > 60:
+        stale_reasons.append("latest_price_stale")
+    if snapshot_age_minutes is None or snapshot_age_minutes > 60:
+        stale_reasons.append("latest_signal_snapshot_stale")
+    if interaction_age_minutes is None or interaction_age_minutes > 90:
+        stale_reasons.append("darkflow_interactions_stale")
+    if candidate_age_minutes is None or candidate_age_minutes > 90:
+        stale_reasons.append("trade_candidates_stale")
+    return {
+        "status": "stale" if stale_reasons else "fresh",
+        "stale_reasons": stale_reasons,
+        "latest_price_at": _iso(_aware(latest_price_at)),
+        "latest_signal_snapshot_at": _iso(_aware(latest_snapshot_at)),
+        "latest_interaction_event_at": _iso(latest_interaction_event_at),
+        "latest_interaction_created_at": _iso(_aware(latest_interaction_created_at)),
+        "latest_candidate_setup_at": _iso(latest_candidate_setup_at),
+        "latest_candidate_updated_at": _iso(latest_candidate_updated_at),
+        "age_minutes": {
+            "price": price_age_minutes,
+            "signal_snapshot": snapshot_age_minutes,
+            "interaction_event": interaction_age_minutes,
+            "candidate_setup": candidate_age_minutes,
+        },
+        "pipeline": {
+            "expected_worker": "experiment-worker",
+            "expected_command": "python -m app.cli experiment-loop --darkflow-interval-seconds 900",
             "report_only": True,
         },
     }
@@ -879,6 +932,12 @@ def _max_drawdown(returns: list[float]) -> float:
         if peak:
             drawdown = max(drawdown, (peak - equity) / peak)
     return drawdown
+
+
+def _age_minutes(now: datetime, value: datetime | None) -> float | None:
+    if value is None:
+        return None
+    return round(max(0.0, (_aware(now) - _aware(value)).total_seconds() / 60.0), 3)
 
 
 def _aware(value: datetime | None) -> datetime | None:
