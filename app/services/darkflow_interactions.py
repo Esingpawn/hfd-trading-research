@@ -35,6 +35,7 @@ DEFAULT_MIN_DYNAMIC_TARGET_R = 1.15
 DEFAULT_MAX_DYNAMIC_TARGET_R = 6.0
 DEFAULT_SHADOW_REPLAY_LIMIT = 500
 DARKFLOW_INTERACTION_SCHEMA = "v2"
+DARKFLOW_INTERACTION_LEGACY_SCHEMA = "legacy"
 DARKFLOW_INTERACTION_STRATEGY = "darkflow_interaction_quality_v2"
 
 
@@ -207,6 +208,8 @@ def detect_darkflow_interactions(
         "research_only": True,
         "opens_live_orders": False,
         "opens_paper_trades": False,
+        "interaction_schema": DARKFLOW_INTERACTION_SCHEMA,
+        "strategy_name": DARKFLOW_INTERACTION_STRATEGY,
         "zone": _compact_context(zone_payload),
         "touch_candle": _candle_payload(touch),
         "hold_bars": len(hold),
@@ -391,10 +394,12 @@ async def darkflow_interaction_backtest(
         .limit(effective_limit)
     )
     interactions = list(rows.scalars().all())
+    scoped_interactions = [item for item in interactions if _interaction_schema(item) == DARKFLOW_INTERACTION_SCHEMA]
     report = _interaction_report(
-        interactions,
+        scoped_interactions,
         requested_limit=requested_limit,
         limit=effective_limit,
+        raw_interaction_count=len(interactions),
         min_samples=min_samples,
         min_win_rate=min_win_rate,
         min_profit_factor=min_profit_factor,
@@ -1116,6 +1121,7 @@ def _interaction_report(
     *,
     requested_limit: int,
     limit: int,
+    raw_interaction_count: int,
     min_samples: int,
     min_win_rate: float,
     min_profit_factor: float,
@@ -1156,9 +1162,11 @@ def _interaction_report(
     quality_stats = _stats(quality_interactions)
     return {
         "strategy_family": "darkflow_zone_interactions_v1",
+        "interaction_schema": DARKFLOW_INTERACTION_SCHEMA,
         "requested_limit": requested_limit,
         "limit": limit,
         "limit_capped": requested_limit != limit,
+        "raw_interaction_count": raw_interaction_count,
         "interaction_count": len(interactions),
         "backtested_count": all_stats["trade_count"],
         "quality_interaction_count": quality_stats["trade_count"],
@@ -1451,6 +1459,7 @@ def _shadow_trade_from_interaction(
         context={
             "historical_replay": True,
             "darkflow_interaction_id": item.id,
+            "interaction_schema": _interaction_schema(item),
             "playbook": item.playbook,
             "interaction_type": item.interaction_type,
             "quality": (item.context or {}).get("quality"),
@@ -1553,6 +1562,16 @@ def _quality_score(item: DarkflowInteraction) -> float:
     raw = (context.get("quality") or {}).get("score")
     parsed = _float(raw)
     return float(parsed or 0.0)
+
+
+def _interaction_schema(item: DarkflowInteraction) -> str:
+    context = item.context or {}
+    raw = (item.context or {}).get("interaction_schema")
+    if raw:
+        return str(raw)
+    if context.get("quality") and context.get("evidence") and context.get("target_plan"):
+        return DARKFLOW_INTERACTION_SCHEMA
+    return DARKFLOW_INTERACTION_LEGACY_SCHEMA
 
 
 def _hard_quality_blocked(item: DarkflowInteraction) -> bool:

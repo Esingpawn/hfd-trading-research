@@ -121,6 +121,7 @@ def test_detect_darkflow_interactions_uses_dynamic_darkflow_target_and_quality()
 
     assert len(interactions) == 1
     context = interactions[0].context
+    assert context["interaction_schema"] == "v2"
     assert context["target_model"] == "tutorial_dynamic_zone_target_v1"
     assert context["target_plan"]["source"] == "liquidity_sweep.liquidity_zone"
     assert context["quality"]["score"] >= 70
@@ -208,7 +209,10 @@ async def test_interaction_backtest_persists_latest_and_shadow_replay_is_isolate
                 mfe=0.02,
                 mae=-0.004,
                 status="backtested",
-                context={"research_only": True},
+                context={
+                    "interaction_schema": "v2",
+                    "quality": {"score": 70.0, "confirmations": ["first_touch_zone_reaction"], "blockers": []},
+                },
             )
         )
     await session.commit()
@@ -233,9 +237,18 @@ async def test_interaction_backtest_persists_latest_and_shadow_replay_is_isolate
 @pytest.mark.asyncio
 async def test_interaction_backtest_candidates_use_quality_filtered_samples(session) -> None:
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    good_context = {"quality": {"score": 78.0, "confirmations": ["dynamic_darkflow_target"], "blockers": []}}
-    weak_context = {"quality": {"score": 30.0, "confirmations": [], "blockers": ["fixed_r_target_fallback"]}}
-    conflict_context = {"quality": {"score": 90.0, "confirmations": [], "blockers": ["parent_trend_conflict"]}}
+    good_context = {
+        "interaction_schema": "v2",
+        "quality": {"score": 78.0, "confirmations": ["dynamic_darkflow_target"], "blockers": []},
+    }
+    weak_context = {
+        "interaction_schema": "v2",
+        "quality": {"score": 30.0, "confirmations": [], "blockers": ["fixed_r_target_fallback"]},
+    }
+    conflict_context = {
+        "interaction_schema": "v2",
+        "quality": {"score": 90.0, "confirmations": [], "blockers": ["parent_trend_conflict"]},
+    }
     for index in range(4):
         session.add(
             DarkflowInteraction(
@@ -331,3 +344,47 @@ async def test_interaction_backtest_candidates_use_quality_filtered_samples(sess
     assert rows["liquidity_sweep_reversal"]["readiness"]["status"] == "candidate"
     assert rows["pullback_to_cost"]["quality_sample_count"] == 0
     assert rows["pullback_to_cost"]["readiness"]["status"] == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_interaction_backtest_excludes_legacy_rows_by_default(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for key, context in (
+        ("legacy", {"quality": {"score": 90.0, "confirmations": [], "blockers": []}}),
+        ("v2", {"interaction_schema": "v2", "quality": {"score": 90.0, "confirmations": [], "blockers": []}}),
+    ):
+        session.add(
+            DarkflowInteraction(
+                interaction_key=f"schema-{key}",
+                zone_key=f"schema-zone-{key}",
+                source_snapshot_id=f"snapshot-{key}",
+                symbol="BTCUSDT",
+                timeframe="short",
+                interval="30m",
+                indicator="liquidity_sweep",
+                playbook="liquidity_sweep_reversal",
+                direction="long",
+                interaction_type="wick_pierce_reclaim",
+                event_ts=base,
+                entry_price=100.0,
+                stop_price=99.0,
+                target_price=102.0,
+                invalidation_price=99.0,
+                exit_price=102.0,
+                exit_ts=base + timedelta(minutes=30),
+                exit_reason="target_hit",
+                pnl_pct=0.02,
+                r_multiple=2.0,
+                mfe=0.025,
+                mae=-0.004,
+                status="backtested",
+                context=context,
+            )
+        )
+    await session.commit()
+
+    report = await darkflow_interaction_backtest(session, min_samples=1, limit=100, min_quality_score=55.0)
+
+    assert report["raw_interaction_count"] == 2
+    assert report["interaction_count"] == 1
+    assert report["interaction_schema"] == "v2"
