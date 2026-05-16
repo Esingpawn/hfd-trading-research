@@ -225,6 +225,8 @@ async def test_interaction_backtest_persists_latest_and_shadow_replay_is_isolate
     experiment = await session.scalar(select(ExperimentRun).where(ExperimentRun.name == "darkflow_interaction_backtest"))
 
     assert report["candidate_playbook_count"] == 1
+    assert report["policy"]["lineage"]["lineage"] == "core_darkflow_v2"
+    assert report["policy"]["lineage"]["is_primary_darkflow_path"] is True
     assert latest["materialized"] is True
     assert experiment is not None and experiment.status == "research"
     assert replay["policy"]["opens_paper_trades"] is False

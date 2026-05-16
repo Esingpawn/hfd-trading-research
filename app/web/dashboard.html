@@ -1758,6 +1758,22 @@
       }[value] || fmt(value);
     }
 
+    function lineageText(policy) {
+      const lineage = policy && policy.lineage && policy.lineage.lineage;
+      return {
+        core_darkflow_v2: "核心暗流 v2",
+        legacy_feature_research: "Legacy/Control",
+        legacy_baseline_v0: "Legacy Baseline",
+        infrastructure_only: "基础设施"
+      }[lineage] || "未标记";
+    }
+
+    function lineageTag(policy) {
+      const lineage = policy && policy.lineage && policy.lineage.lineage;
+      const cls = lineage === "core_darkflow_v2" ? "ok" : lineage && lineage.startsWith("legacy") ? "warn" : "neutral";
+      return tag(cls, lineageText(policy));
+    }
+
     function sortOpportunities(a, b) {
       const stageRank = { paper_ready: 4, waiting_entry: 3, risk_incomplete: 2, structure_watch: 1, data_incomplete: 0 };
       const aStage = a.risk && a.risk.opportunity_stage && a.risk.opportunity_stage.key;
@@ -2133,6 +2149,7 @@
         ["已标注", fmt(darkflowPlaybookBacktest.labeled_count || 0, 0)],
         ["教程覆盖", `${fmt(darkflowPlaybookBacktest.covered_labeled_count || 0, 0)} / ${fmt(darkflowPlaybookBacktest.uncovered_labeled_count || 0, 0)}`],
         ["候选/观察", `${fmt(darkflowPlaybookBacktest.candidate_playbook_count || 0, 0)} / ${fmt(darkflowPlaybookBacktest.watchlist_playbook_count || 0, 0)}`],
+        ["谱系", lineageTag(darkflowPlaybookBacktest.policy)],
         ["隔离", darkflowPlaybookBacktest.policy && darkflowPlaybookBacktest.policy.opens_paper_trades === false ? `<span class="green">仅研究</span>` : `<span class="amber">待确认</span>`]
       ]));
       setHtml("darkflowPlaybooks", table((darkflowPlaybookBacktest.playbooks || []).slice(0, 8), [
@@ -2154,6 +2171,7 @@
         ["候选/观察", `${fmt(darkflowInteractionBacktest.candidate_playbook_count || 0, 0)} / ${fmt(darkflowInteractionBacktest.watchlist_playbook_count || 0, 0)}`],
         ["胜率", pct((darkflowInteractionBacktest.stats || {}).win_rate, 1)],
         ["PF", fmt((darkflowInteractionBacktest.stats || {}).profit_factor, 2)],
+        ["谱系", lineageTag(darkflowInteractionBacktest.policy)],
         ["隔离", darkflowInteractionBacktest.policy && darkflowInteractionBacktest.policy.opens_paper_trades === false ? `<span class="green">仅研究</span>` : `<span class="amber">待确认</span>`]
       ]));
       setHtml("darkflowInteractions", table((darkflowInteractionBacktest.playbooks || []).slice(0, 8), [
@@ -2174,6 +2192,7 @@
         ["样本上限", researchLimitMeta(featureCandidates)],
         ["候选", fmt(featureCandidates.candidate_count || 0, 0)],
         ["观察", fmt(featureCandidates.watchlist_count || 0, 0)],
+        ["谱系", lineageTag(featureCandidates.policy)],
         ["保守 PF 门槛", fmt((featureCandidates.thresholds || {}).min_profit_factor_lower, 2)]
       ]));
       setHtml("featureCandidates", table((featureCandidates.candidates || []).slice(0, 8), [
@@ -2260,6 +2279,7 @@
         ["可晋级", fmt((shadowPromotion.ready || []).length, 0)],
         ["有边际不稳", fmt((shadowPromotion.edge_unstable || []).length, 0)],
         ["候选组", fmt((shadowPaperStats.by_candidate || []).length, 0)],
+        ["谱系", lineageTag(shadowPaperStats.policy)],
         ["隔离", shadowPaperStats.policy && shadowPaperStats.policy.opens_paper_trades === false ? `<span class="green">仅研究</span>` : `<span class="amber">待确认</span>`]
       ]));
       setHtml("shadowPaperTrades", table(shadowPaperTrades.slice(0, 8), [

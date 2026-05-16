@@ -18,6 +18,7 @@ from app.services.darkflow_playbooks import DEFAULT_MIN_SAMPLES, PLAYBOOKS
 from app.services.darkflow_rules import official_rule_for_internal_indicator
 from app.services.feature_candidates import research_query_max_limit
 from app.services.raw_payloads import payload_for_snapshot
+from app.services.research_lineage import core_darkflow_v2_lineage
 
 
 DEFAULT_DARKFLOW_ZONE_LIMIT = 500
@@ -1291,6 +1292,7 @@ def _policy() -> dict[str, Any]:
         "opens_paper_trades": False,
         "changes_strategy_weights": False,
         "used_for_opening_decisions": False,
+        "lineage": core_darkflow_v2_lineage(),
         "strategy_boundary": "eligible for isolated shadow-paper only after interaction backtest evidence",
     }
 

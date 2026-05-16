@@ -30,6 +30,7 @@ from app.services.darkflow_interactions import (
     darkflow_interaction_backtest,
     darkflow_shadow_replay,
 )
+from app.services.darkflow_decision_cards import materialize_darkflow_trade_candidates
 from app.services.paper import mark_open_trades, paper_scan
 from app.services.shadow_paper import (
     mark_shadow_paper_trades,
@@ -415,6 +416,13 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
             min_quality_score=_payload_float(payload, "min_quality_score", 55.0),
             persist=_payload_bool(payload, "persist", True),
         )
+    if task_name in {"darkflow.trade_candidates", "darkflow-trade-candidates"}:
+        return await materialize_darkflow_trade_candidates(
+            session,
+            limit=_payload_int(payload, "limit", 100),
+            min_quality_score=_payload_float(payload, "min_quality_score", 55.0),
+            min_rr_ratio=_payload_float(payload, "min_rr_ratio", 1.5),
+        )
     if task_name in {"darkflow.shadow_replay", "darkflow-shadow-replay"}:
         return await darkflow_shadow_replay(
             session,
@@ -501,6 +509,12 @@ async def _research_acceleration_cycle(session: AsyncSession, payload: dict[str,
         min_win_rate=_payload_float(payload, "darkflow_interaction_min_win_rate", 0.52),
         min_profit_factor=_payload_float(payload, "darkflow_interaction_min_profit_factor", 1.15),
         persist=_payload_bool(payload, "darkflow_interaction_persist", True),
+    )
+    result["steps"]["darkflow_trade_candidates"] = await materialize_darkflow_trade_candidates(
+        session,
+        limit=_payload_int(payload, "trade_candidate_limit", _payload_int(payload, "darkflow_backtest_limit", report_limit)),
+        min_quality_score=_payload_float(payload, "trade_candidate_min_quality_score", 55.0),
+        min_rr_ratio=_payload_float(payload, "trade_candidate_min_rr_ratio", 1.5),
     )
     result["steps"]["shadow_mark"] = await mark_shadow_paper_trades(session)
     result["steps"]["darkflow_shadow_replay"] = await darkflow_shadow_replay(

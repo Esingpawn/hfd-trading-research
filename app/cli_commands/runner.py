@@ -29,6 +29,7 @@ from app.services.darkflow_interactions import (
     darkflow_interaction_backtest,
     darkflow_shadow_replay,
 )
+from app.services.darkflow_decision_cards import materialize_darkflow_trade_candidates
 from app.services.darkflow_rules import darkflow_rulebook
 from app.services.feature_candidates import (
     feature_candidate_screen,
@@ -441,6 +442,14 @@ def build_parser() -> argparse.ArgumentParser:
     darkflow_shadow.add_argument("--limit", type=int, default=500)
     darkflow_shadow.add_argument("--min-profit-factor", type=float, default=1.15)
     darkflow_shadow.add_argument("--no-watchlist", action="store_true", help="Only replay strict candidates")
+
+    darkflow_candidates = subparsers.add_parser(
+        "darkflow-trade-candidates",
+        help="Materialize research-only darkflow decision cards into trade candidates",
+    )
+    darkflow_candidates.add_argument("--limit", type=int, default=100)
+    darkflow_candidates.add_argument("--min-quality-score", type=float, default=55.0)
+    darkflow_candidates.add_argument("--min-rr-ratio", type=float, default=1.5)
 
     subparsers.add_parser("storage-health", help="Show database storage health")
     storage_maintain = subparsers.add_parser("storage-maintain", help="Run safe database maintenance")
@@ -1182,6 +1191,18 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 limit=args.limit,
                 min_profit_factor=args.min_profit_factor,
                 include_watchlist=not args.no_watchlist,
+            )
+        print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
+        await engine.dispose()
+        return 0
+
+    if args.command == "darkflow-trade-candidates":
+        async with SessionLocal() as session:
+            result = await materialize_darkflow_trade_candidates(
+                session,
+                limit=args.limit,
+                min_quality_score=args.min_quality_score,
+                min_rr_ratio=args.min_rr_ratio,
             )
         print(json.dumps(jsonable(result), ensure_ascii=False, indent=2))
         await engine.dispose()

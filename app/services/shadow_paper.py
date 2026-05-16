@@ -20,6 +20,7 @@ from app.services.paper import (
     _stop_exit_reason,
     _take_profit_touched,
 )
+from app.services.research_lineage import legacy_feature_research_lineage
 from app.services.risk import template_for_tier
 
 
@@ -939,6 +940,7 @@ def _shadow_policy() -> dict[str, Any]:
         "opens_paper_trades": False,
         "opens_live_orders": False,
         "sends_entry_notifications": False,
+        "lineage": legacy_feature_research_lineage(),
         "isolated_table": "shadow_paper_trades",
         "uses_fee_and_slippage": True,
         "default_execution_model": _execution_model("mixed"),

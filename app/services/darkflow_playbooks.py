@@ -12,6 +12,7 @@ from app.models import ExperimentRun, FeatureEvent, FeatureLabel
 from app.services.darkflow_rules import OFFICIAL_INDICATOR_RULES, official_rule_for_internal_indicator
 from app.services.feature_candidates import research_query_max_limit
 from app.services.features import FEATURE_HORIZONS
+from app.services.research_lineage import core_darkflow_v2_lineage
 
 
 DEFAULT_DARKFLOW_PLAYBOOK_LIMIT = 5000
@@ -629,6 +630,7 @@ def _policy() -> dict[str, Any]:
         "changes_strategy_weights": False,
         "used_for_opening_decisions": False,
         "baseline_v0_status": "control_only",
+        "lineage": core_darkflow_v2_lineage(),
         "promotion_requirement": "Must pass zone-interaction backtest and isolated shadow-paper before paper-scan integration.",
     }
 

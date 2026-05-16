@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from app.services.research_lineage import core_darkflow_v2_lineage, legacy_baseline_v0_lineage
+
 
 @dataclass(frozen=True)
 class DarkflowIndicatorRule:
@@ -504,6 +506,8 @@ def darkflow_rulebook() -> dict[str, Any]:
             "baseline_v0_status": "infrastructure_and_control_only",
             "no_opening_from_unmapped_indicators": True,
             "requires_playbook_before_scoring": True,
+            "lineage": core_darkflow_v2_lineage(),
+            "baseline_v0_lineage": legacy_baseline_v0_lineage(),
         },
         "official_to_internal": {key: list(value) for key, value in OFFICIAL_TO_INTERNAL.items()},
         "rules": [asdict(rule) for rule in OFFICIAL_INDICATOR_RULES.values()],
@@ -515,4 +519,3 @@ def official_rule_for_internal_indicator(indicator: str) -> DarkflowIndicatorRul
         if indicator in rule.internal_keys:
             return rule
     return None
-

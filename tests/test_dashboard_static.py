@@ -30,3 +30,12 @@ def test_dashboard_exposes_darkflow_interaction_report() -> None:
     assert "/darkflow/interactions/backtest/latest" in html
     assert "darkflowInteractionSummary" in html
     assert "darkflowInteractions" in html
+
+
+def test_dashboard_exposes_research_lineage_labels() -> None:
+    html = Path("app/web/dashboard.html").read_text(encoding="utf-8")
+
+    assert "lineageTag" in html
+    assert "core_darkflow_v2" in html
+    assert "legacy_feature_research" in html
+    assert "Legacy/Control" in html

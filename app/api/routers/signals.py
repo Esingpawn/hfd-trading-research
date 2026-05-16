@@ -44,6 +44,11 @@ from app.services.darkflow_interactions import (
     darkflow_shadow_replay,
     latest_darkflow_interaction_backtest,
 )
+from app.services.darkflow_decision_cards import (
+    latest_darkflow_decision_cards,
+    latest_materialized_trade_candidates,
+    materialize_darkflow_trade_candidates,
+)
 from app.services.darkflow_rules import darkflow_rulebook
 from app.services.indicator_catalog import indicator_experiment_coverage
 from app.services.signal_attribution import backfill_signal_outcomes, signal_effectiveness
@@ -195,6 +200,44 @@ async def backfill_darkflow_interaction_rows(
 @router.get("/darkflow/interactions/backtest/latest")
 async def latest_darkflow_interaction_backtest_report(session: SessionDep) -> dict[str, object]:
     return await latest_darkflow_interaction_backtest(session)
+
+
+@router.get("/darkflow/decision-cards")
+async def latest_darkflow_decision_card_report(
+    session: SessionDep,
+    limit: int = Query(default=20, ge=1, le=100),
+    min_quality_score: float = Query(default=55.0, ge=0.0, le=100.0),
+    min_rr_ratio: float = Query(default=1.5, ge=0.0, le=20.0),
+) -> dict[str, object]:
+    return await latest_darkflow_decision_cards(
+        session,
+        limit=limit,
+        min_quality_score=min_quality_score,
+        min_rr_ratio=min_rr_ratio,
+    )
+
+
+@router.get("/darkflow/trade-candidates")
+async def latest_darkflow_trade_candidates_report(
+    session: SessionDep,
+    limit: int = Query(default=20, ge=1, le=200),
+) -> dict[str, object]:
+    return await latest_materialized_trade_candidates(session, limit=limit)
+
+
+@router.post("/darkflow/trade-candidates/materialize")
+async def materialize_darkflow_trade_candidates_report(
+    session: SessionDep,
+    limit: int = Query(default=100, ge=1, le=1000),
+    min_quality_score: float = Query(default=55.0, ge=0.0, le=100.0),
+    min_rr_ratio: float = Query(default=1.5, ge=0.0, le=20.0),
+) -> dict[str, object]:
+    return await materialize_darkflow_trade_candidates(
+        session,
+        limit=limit,
+        min_quality_score=min_quality_score,
+        min_rr_ratio=min_rr_ratio,
+    )
 
 
 @router.get("/darkflow/interactions/backtest")

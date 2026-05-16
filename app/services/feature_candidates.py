@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CollectionRun, ExperimentRun, FeatureEvent as FeatureEventModel, FeatureLabel, SignalSnapshot
 from app.services.features import FEATURE_HORIZONS
+from app.services.research_lineage import legacy_feature_research_lineage
 
 
 DEFAULT_MIN_SAMPLES = 30
@@ -1886,6 +1887,7 @@ def _research_policy() -> dict[str, Any]:
         "used_for_live_trading": False,
         "used_for_execution_weights": False,
         "used_for_opening_decisions": False,
+        "lineage": legacy_feature_research_lineage(),
         "reason": "Candidate screening and paper A/B are research reports until separately promoted.",
     }
 

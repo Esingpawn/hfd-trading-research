@@ -148,6 +148,8 @@ async def test_mark_shadow_paper_trades_closes_take_profit(session) -> None:
     assert stored.context["exit_execution_price"] < 103.0
     assert stats["closed_trades"] == 1
     assert stats["policy"]["opens_live_orders"] is False
+    assert stats["policy"]["lineage"]["lineage"] == "legacy_feature_research"
+    assert stats["policy"]["lineage"]["legacy_control"] is True
     assert stats["policy"]["uses_fee_and_slippage"] is True
 
 

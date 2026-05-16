@@ -327,6 +327,8 @@ async def test_feature_paper_ab_is_report_only_and_does_not_open_paper_trades(se
 
     assert report["policy"]["opens_paper_trades"] is False
     assert report["policy"]["changes_strategy_weights"] is False
+    assert report["policy"]["lineage"]["lineage"] == "legacy_feature_research"
+    assert report["policy"]["lineage"]["legacy_control"] is True
     assert report["selected_candidate_count"] == 1
     assert report["arms"]["candidate"]["trade_count"] == 12
     assert report["arms"]["control"]["trade_count"] == 6
@@ -376,6 +378,7 @@ async def test_segment_candidate_screen_promotes_local_segments_when_global_feat
     experiment = await session.scalar(select(ExperimentRun).where(ExperimentRun.name == "feature_segment_candidates_30m"))
 
     assert global_report["candidate_count"] == 0
+    assert segment_report["policy"]["lineage"]["lineage"] == "legacy_feature_research"
     assert segment_report["candidate_count"] == 1
     assert segment_report["candidates"][0]["segment_key"] == "inst_choch:CHoCH_Bullish:long:BTCUSDT:short"
     assert segment_report["by_feature"][0]["feature_key"] == "inst_choch:CHoCH_Bullish:long"
