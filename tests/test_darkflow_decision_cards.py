@@ -1221,6 +1221,61 @@ async def test_shadow_forward_scans_past_expired_front_rows_to_open_later_candid
 
 
 @pytest.mark.asyncio
+async def test_shadow_forward_skips_candidate_when_latest_price_is_stale(session) -> None:
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    stale_price_at = datetime.now(timezone.utc) - timedelta(minutes=45)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-stale-price-shadow-forward",
+            zone_key="zone-stale-price-shadow-forward",
+            source_snapshot_id="snapshot-stale-price-shadow-forward",
+            symbol="BTCUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            playbook="pullback_to_cost",
+            direction="long",
+            interaction_type="wick_pierce_reclaim",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+            },
+        )
+    )
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=stale_price_at, created_at=stale_price_at))
+    await session.commit()
+    await materialize_darkflow_trade_candidates(session, limit=10)
+    await audit_darkflow_trade_candidates(session, limit=10)
+
+    result = await open_darkflow_shadow_forward_samples(
+        session,
+        limit=10,
+        max_candidate_age_hours=0,
+        entry_tolerance_pct=0.05,
+    )
+    trades = (await session.execute(select(ShadowPaperTrade))).scalars().all()
+
+    assert result["opened"] == []
+    assert result["skipped_count"] == 1
+    assert result["skip_reason_counts"] == {"latest_price_stale": 1}
+    assert result["skipped"][0]["price_age_seconds"] >= 30 * 60
+    assert trades == []
+
+
+@pytest.mark.asyncio
 async def test_shadow_forward_round_robins_markets_for_sample_coverage(session) -> None:
     base = datetime.now(timezone.utc) - timedelta(minutes=5)
     rows = [

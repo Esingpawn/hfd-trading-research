@@ -43,6 +43,7 @@ DEFAULT_MAX_CANDIDATE_AGE_HOURS = 72.0
 DEFAULT_ENTRY_TOLERANCE_PCT = 0.025
 DEFAULT_PAUSED_GROUP_EXPLORATION_LIMIT = 1
 DEFAULT_MAX_OPEN_SHADOW_TRADES_PER_MARKET = 3
+DEFAULT_MAX_PRICE_AGE_SECONDS = 30 * 60
 SHADOW_FEE_RATE = 0.0004
 SHADOW_SLIPPAGE_RATE_BY_TIER = {
     "core": 0.0002,
@@ -239,9 +240,24 @@ async def open_darkflow_shadow_forward_samples(
                     updated.append(_candidate_update_row(candidate, stats, reason=plan_check))
             skipped.append({"candidate_key": candidate.candidate_key, "reason": plan_check})
             continue
-        price = latest_prices.get(candidate.symbol)
+        price_snapshot = latest_prices.get(candidate.symbol)
+        price = price_snapshot["price"] if isinstance(price_snapshot, dict) else None
         if price is None or price <= 0:
             skipped.append({"candidate_key": candidate.candidate_key, "symbol": candidate.symbol, "reason": "missing_latest_price"})
+            continue
+        price_created_at = _aware(price_snapshot.get("created_at"))
+        price_age_seconds = (now - price_created_at).total_seconds() if price_created_at is not None else None
+        if price_age_seconds is None or price_age_seconds > DEFAULT_MAX_PRICE_AGE_SECONDS:
+            skipped.append(
+                {
+                    "candidate_key": candidate.candidate_key,
+                    "symbol": candidate.symbol,
+                    "reason": "latest_price_stale",
+                    "price_created_at": _iso(price_created_at),
+                    "price_age_seconds": price_age_seconds,
+                    "max_price_age_seconds": DEFAULT_MAX_PRICE_AGE_SECONDS,
+                }
+            )
             continue
         entry_plan_state = _candidate_entry_plan_state(
             candidate,
@@ -391,7 +407,8 @@ async def darkflow_candidate_promotion_report(
         anti_counts[candidate.anti_repaint_status] = anti_counts.get(candidate.anti_repaint_status, 0) + 1
         shadow_counts[candidate.shadow_status] = shadow_counts.get(candidate.shadow_status, 0) + 1
         stats = _candidate_stats(stats_by_candidate, candidate)
-        price = latest_prices.get(candidate.symbol)
+        price_snapshot = latest_prices.get(candidate.symbol)
+        price = price_snapshot["price"] if isinstance(price_snapshot, dict) else None
         if price is None or price <= 0:
             entry_plan_state = _missing_price_entry_plan_state(candidate, now=now)
         else:
@@ -493,7 +510,8 @@ async def darkflow_entry_plan_state_report(
     missing_price_count = 0
     samples: list[dict[str, Any]] = []
     for candidate in rows:
-        price = prices.get(candidate.symbol)
+        price_snapshot = prices.get(candidate.symbol)
+        price = price_snapshot["price"] if isinstance(price_snapshot, dict) else None
         if price is None or price <= 0:
             state = _missing_price_entry_plan_state(candidate, now=now)
             missing_price_count += 1
@@ -766,7 +784,7 @@ async def _latest_price(session: AsyncSession, symbol: str) -> float | None:
     return float(row) if isinstance(row, (int, float)) else None
 
 
-async def _latest_prices(session: AsyncSession, symbols: list[str]) -> dict[str, float]:
+async def _latest_prices(session: AsyncSession, symbols: list[str]) -> dict[str, dict[str, Any]]:
     if not symbols:
         return {}
     ranked = (
@@ -780,11 +798,15 @@ async def _latest_prices(session: AsyncSession, symbols: list[str]) -> dict[str,
         .subquery()
     )
     rows = await session.execute(
-        select(PriceSnapshot.symbol, PriceSnapshot.price)
+        select(PriceSnapshot.symbol, PriceSnapshot.price, PriceSnapshot.created_at, PriceSnapshot.collected_at)
         .join(ranked, PriceSnapshot.id == ranked.c.id)
         .where(ranked.c.rn == 1)
     )
-    return {symbol: float(price) for symbol, price in rows.all() if isinstance(price, (int, float)) and float(price) > 0}
+    return {
+        symbol: {"price": float(price), "created_at": created_at, "collected_at": collected_at}
+        for symbol, price, created_at, collected_at in rows.all()
+        if isinstance(price, (int, float)) and float(price) > 0
+    }
 
 
 async def _shadow_stats(session: AsyncSession, candidate_key: str) -> dict[str, Any]:
