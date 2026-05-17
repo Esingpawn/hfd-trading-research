@@ -534,10 +534,24 @@ type ShadowStats = {
   win_rate?: number | null;
   profit_factor?: number | null;
   avg_pnl?: number | null;
+  unique_plan_stats?: ShadowUniquePlanStats;
   policy?: Policy;
   by_candidate?: ShadowGroupStats[];
   by_symbol?: ShadowGroupStats[];
   by_horizon?: ShadowGroupStats[];
+};
+
+type ShadowUniquePlanStats = {
+  total_trades?: number;
+  open_trades?: number;
+  closed_trades?: number;
+  win_rate?: number | null;
+  profit_factor?: number | null;
+  avg_pnl?: number | null;
+  max_drawdown?: number | null;
+  source_trade_count?: number;
+  duplicate_trade_count?: number;
+  dedupe_method?: string;
 };
 
 type TradingSafety = {
@@ -1177,14 +1191,18 @@ function EntryPlansPage({ report, rows, onSelect }: { report: EntryPlanStateRepo
 function ShadowPage({ data, rows }: { data: LoadState; rows: CardRow[] }) {
   const equity = shadowEquitySeries(data.shadowTrades ?? []);
   const topGroups = (data.shadow?.by_candidate ?? []).slice(0, 10);
+  const unique = data.shadow?.unique_plan_stats;
   return (
     <div className="pageStack">
       <section className="metricGrid compactMetrics">
-        <Metric title="影子总交易" value={fmt(data.shadow?.total_trades, 0)} detail="隔离表 shadow_paper_trades" tone="info" />
-        <Metric title="影子胜率" value={pct(data.shadow?.win_rate)} detail="只用于研究观察" tone="good" />
-        <Metric title="影子盈利因子" value={fmt(data.shadow?.profit_factor, 2)} detail="未进入实盘" tone="good" />
-        <Metric title="等待影子样本" value={fmt(rows.filter((row) => row.shadowStatus === "not_started").length, 0)} detail="价格未触发或样本未开" tone="warn" />
+        <Metric title="唯一计划样本" value={fmt(unique?.total_trades ?? data.shadow?.total_trades, 0)} detail={`原始 ${fmt(data.shadow?.total_trades, 0)} · 重复 ${fmt(unique?.duplicate_trade_count, 0)}`} tone="info" />
+        <Metric title="唯一计划胜率" value={pct(unique?.win_rate ?? data.shadow?.win_rate)} detail={`原始胜率 ${pct(data.shadow?.win_rate)}`} tone="good" />
+        <Metric title="唯一计划盈利因子" value={fmt(unique?.profit_factor ?? data.shadow?.profit_factor, 2)} detail={`原始 PF ${fmt(data.shadow?.profit_factor, 2)}`} tone="good" />
+        <Metric title="唯一计划回撤" value={pct(unique?.max_drawdown)} detail={`已平仓 ${fmt(unique?.closed_trades ?? data.shadow?.closed_trades, 0)} · 开仓 ${fmt(unique?.open_trades ?? data.shadow?.open_trades, 0)}`} tone="warn" />
       </section>
+      <Panel title="影子统计口径" subtitle="默认看去重后的唯一市场暴露，原始交易记录仍完整保留">
+        <p className="bodyText">唯一计划口径会把同一策略、币种、方向和相近入场计划的重复影子样本折叠后再计算胜率、盈利因子和回撤；原始口径用于审计数据库记录，不能单独作为晋级依据。</p>
+      </Panel>
       <Panel title="影子权益曲线" subtitle="根据最近影子交易的已平仓盈亏重建，不代表实盘账户">
         {equity.length > 1 ? <EquityChart points={equity} /> : <StateBox type="empty" title="权益曲线样本不足" text="当前影子交易还没有足够的已平仓记录，先展示聚合统计。" />}
       </Panel>
@@ -1249,7 +1267,7 @@ function ExperimentLabPage({ data, rows, onNavigate }: { data: LoadState; rows: 
           <div className="auditGrid labAudit">
             <AuditItem label="指标深度使用" ok={deepUsed > 0} text={`${deepUsed} 个`} />
             <AuditItem label="候选 A/B" ok={selectedCount > 0} text={selectedCount > 0 ? "已有候选" : "暂无候选"} />
-            <AuditItem label="影子交易" ok={Number(data.shadow?.closed_trades ?? 0) > 0} text={`${fmt(data.shadow?.closed_trades, 0)} 已平仓`} />
+            <AuditItem label="影子交易" ok={Number(data.shadow?.unique_plan_stats?.closed_trades ?? data.shadow?.closed_trades ?? 0) > 0} text={`${fmt(data.shadow?.unique_plan_stats?.closed_trades ?? data.shadow?.closed_trades, 0)} 唯一计划已平仓`} />
             <AuditItem label="纸上样本" ok={Boolean(data.paperStats?.sample_ready)} text={`${fmt(data.paperStats?.closed_trades, 0)} / ${fmt(data.paperStats?.minimum_sample, 0)}`} />
           </div>
           <div className="actionList compactActions">
