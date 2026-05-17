@@ -75,6 +75,35 @@ async def darkflow_alpha_scoreboard(
     }
 
 
+async def darkflow_alpha_sampling_plan(
+    session: AsyncSession,
+    *,
+    limit: int = DEFAULT_ALPHA_SCOREBOARD_LIMIT,
+) -> dict[str, Any]:
+    scoreboard = await darkflow_alpha_scoreboard(session, limit=limit, min_closed_trades=1)
+    rows = list(scoreboard.get("rows") or [])
+    priority = [row for row in rows if row.get("conclusion") in {"样本收集中", "可进入人工复核"}]
+    paused = [row for row in rows if row.get("conclusion") == "暂停观察"]
+    priority_groups = [_sampling_group_row(row, action="prioritize") for row in priority]
+    paused_groups = [_sampling_group_row(row, action="pause") for row in paused]
+    return {
+        "strategy_name": DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+        "lineage": CORE_DARKFLOW_V2,
+        "generated_at": _iso(utc_now()),
+        "priority_group_count": len(priority_groups),
+        "paused_group_count": len(paused_groups),
+        "priority_groups": priority_groups,
+        "paused_groups": paused_groups,
+        "scoreboard_totals": scoreboard.get("totals") or {},
+        "thresholds": scoreboard.get("thresholds") or {},
+        "policy": _policy() | {
+            "report_only": True,
+            "mutates_candidates": False,
+            "sampling_plan_only": True,
+        },
+    }
+
+
 async def accelerate_darkflow_alpha(
     session: AsyncSession,
     *,
@@ -89,6 +118,9 @@ async def accelerate_darkflow_alpha(
     mark_result: dict[str, Any] = {"enabled": False, "reason": "mark_first_disabled"}
     if mark_first:
         mark_result = await mark_shadow_paper_trades(session)
+    sampling_plan = await darkflow_alpha_sampling_plan(session, limit=scoreboard_limit)
+    priority_group_keys = [str(item["group_key"]) for item in sampling_plan["priority_groups"]]
+    paused_group_keys = [str(item["group_key"]) for item in sampling_plan["paused_groups"]]
     refresh = await refresh_darkflow_candidate_promotion(
         session,
         limit=candidate_limit,
@@ -96,6 +128,8 @@ async def accelerate_darkflow_alpha(
         max_candidate_age_hours=max_candidate_age_hours,
         entry_tolerance_pct=entry_tolerance_pct,
         materialize=materialize,
+        priority_group_keys=priority_group_keys,
+        paused_group_keys=paused_group_keys,
     )
     scoreboard = await darkflow_alpha_scoreboard(session, limit=scoreboard_limit, min_closed_trades=1)
     return {
@@ -106,6 +140,12 @@ async def accelerate_darkflow_alpha(
             "mark_shadow_trades": mark_result,
             "promotion_refresh": refresh,
             "alpha_scoreboard": scoreboard,
+        },
+        "sampling_plan": {
+            "priority_group_count": sampling_plan["priority_group_count"],
+            "paused_group_count": sampling_plan["paused_group_count"],
+            "priority_groups": sampling_plan["priority_groups"][:20],
+            "paused_groups": sampling_plan["paused_groups"][:20],
         },
         "policy": _policy(),
     }
@@ -146,6 +186,7 @@ def _grouped_rows(
         conclusion = _alpha_conclusion(stats)
         rows.append(
             {
+                "group_key": _group_key_text(key),
                 "strategy_id": strategy_id,
                 "strategy_name": _strategy_name(trades),
                 "symbol": symbol,
@@ -161,6 +202,35 @@ def _grouped_rows(
             }
         )
     return rows
+
+
+def _sampling_group_row(row: dict[str, Any], *, action: str) -> dict[str, Any]:
+    return {
+        "group_key": str(row.get("group_key") or _group_key_text((
+            str(row.get("strategy_id") or "unknown"),
+            str(row.get("symbol") or "unknown"),
+            str(row.get("direction") or "unknown"),
+            str(row.get("timeframe") or "unknown"),
+            str(row.get("market_state") or "unknown"),
+        ))),
+        "action": action,
+        "strategy_id": row.get("strategy_id"),
+        "strategy_name": row.get("strategy_name"),
+        "symbol": row.get("symbol"),
+        "direction": row.get("direction"),
+        "timeframe": row.get("timeframe"),
+        "market_state": row.get("market_state"),
+        "closed_trades": row.get("closed_trades"),
+        "win_rate": row.get("win_rate"),
+        "profit_factor": row.get("profit_factor"),
+        "max_drawdown": row.get("max_drawdown"),
+        "conclusion": row.get("conclusion"),
+        "reason": row.get("next_action"),
+    }
+
+
+def _group_key_text(key: tuple[str, str, str, str, str]) -> str:
+    return "|".join(str(item) for item in key)
 
 
 def _source_counts_by_group(trades: list[ShadowPaperTrade]) -> dict[tuple[str, str, str, str, str], int]:

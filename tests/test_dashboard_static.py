@@ -110,3 +110,6 @@ def test_react_dashboard_exposes_darkflow_alpha_scoreboard() -> None:
     assert "排队加速巡检" in source
     assert "只运行隔离影子前向路径" in source
     assert "可进入人工复核" in source
+    assert "优先补样分组" in source
+    assert "暂停污染分组" in source
+    assert "暂停补样" in source

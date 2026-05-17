@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
 from app.models import DarkflowInteraction, PaperTrade, PriceSnapshot, ShadowPaperTrade, TradeCandidate
-from app.services.darkflow_alpha import accelerate_darkflow_alpha, darkflow_alpha_scoreboard
+from app.services.darkflow_alpha import accelerate_darkflow_alpha, darkflow_alpha_sampling_plan, darkflow_alpha_scoreboard
 from app.services.darkflow_candidate_promotion import DARKFLOW_V2_SHADOW_STRATEGY_NAME
 
 
@@ -119,6 +119,49 @@ async def test_darkflow_alpha_scoreboard_groups_shadow_forward_by_playbook_symbo
 
 
 @pytest.mark.asyncio
+async def test_darkflow_alpha_sampling_plan_prioritizes_strong_groups_and_pauses_weak_groups(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            _shadow_trade(
+                f"strong-{index}",
+                candidate_key=f"strong-candidate-{index}",
+                symbol="BTCUSDT",
+                direction="long",
+                strategy_id="pullback_to_cost",
+                market_state="trend_pullback",
+                pnl=0.02,
+                opened_at=base + timedelta(minutes=index),
+            )
+            for index in range(3)
+        ]
+        + [
+            _shadow_trade(
+                f"weak-{index}",
+                candidate_key=f"weak-candidate-{index}",
+                symbol="BTCUSDT",
+                direction="long",
+                strategy_id="liquidity_sweep_reversal",
+                market_state="liquidity_hunt_reversal",
+                pnl=-0.02,
+                opened_at=base + timedelta(hours=1, minutes=index),
+            )
+            for index in range(3)
+        ]
+    )
+    await session.commit()
+
+    plan = await darkflow_alpha_sampling_plan(session, limit=10)
+
+    priority_keys = {item["group_key"] for item in plan["priority_groups"]}
+    paused_keys = {item["group_key"] for item in plan["paused_groups"]}
+    assert "pullback_to_cost|BTCUSDT|long|short|trend_pullback" in priority_keys
+    assert "liquidity_sweep_reversal|BTCUSDT|long|short|liquidity_hunt_reversal" in paused_keys
+    assert plan["policy"]["opens_paper_trades"] is False
+    assert plan["policy"]["opens_live_orders"] is False
+
+
+@pytest.mark.asyncio
 async def test_accelerate_darkflow_alpha_opens_only_isolated_shadow_forward_samples(session) -> None:
     now = datetime.now(timezone.utc)
     source = _source_interaction(setup_time=now - timedelta(minutes=15))
@@ -149,6 +192,94 @@ async def test_accelerate_darkflow_alpha_opens_only_isolated_shadow_forward_samp
     assert shadow_rows[0].context["shadow_forward"] is True
     assert shadow_rows[0].context["opens_paper_trades"] is False
     assert shadow_rows[0].context["opens_live_orders"] is False
+    assert paper_rows == []
+
+
+@pytest.mark.asyncio
+async def test_accelerate_darkflow_alpha_uses_sampling_plan_to_skip_weak_same_market_group(session) -> None:
+    now = datetime.now(timezone.utc)
+    history_base = now - timedelta(hours=3)
+    session.add_all(
+        [
+            _shadow_trade(
+                f"strong-history-{index}",
+                candidate_key=f"strong-history-candidate-{index}",
+                symbol="BTCUSDT",
+                direction="long",
+                strategy_id="pullback_to_cost",
+                market_state="trend_pullback",
+                pnl=0.02,
+                opened_at=history_base + timedelta(minutes=index),
+            )
+            for index in range(3)
+        ]
+        + [
+            _shadow_trade(
+                f"weak-history-{index}",
+                candidate_key=f"weak-history-candidate-{index}",
+                symbol="BTCUSDT",
+                direction="long",
+                strategy_id="liquidity_sweep_reversal",
+                market_state="liquidity_hunt_reversal",
+                pnl=-0.02,
+                opened_at=history_base + timedelta(minutes=30 + index),
+            )
+            for index in range(3)
+        ]
+    )
+    strong_source = _source_interaction(
+        interaction_key="strong-source",
+        playbook="pullback_to_cost",
+        setup_time=now - timedelta(minutes=15),
+    )
+    weak_source = _source_interaction(
+        interaction_key="weak-source",
+        playbook="liquidity_sweep_reversal",
+        setup_time=now - timedelta(minutes=14),
+    )
+    session.add_all([strong_source, weak_source])
+    await session.flush()
+    session.add(
+        _candidate(
+            "darkflow-card:v2:strong-source",
+            setup_time=now - timedelta(minutes=15),
+            source_interaction_id=strong_source.id,
+            strategy_id="pullback_to_cost",
+            market_state="trend_pullback",
+        )
+    )
+    session.add(
+        _candidate(
+            "darkflow-card:v2:weak-source",
+            setup_time=now - timedelta(minutes=14),
+            source_interaction_id=weak_source.id,
+            strategy_id="liquidity_sweep_reversal",
+            market_state="liquidity_hunt_reversal",
+        )
+    )
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=now, created_at=now))
+    await session.commit()
+
+    result = await accelerate_darkflow_alpha(
+        session,
+        candidate_limit=10,
+        shadow_limit=5,
+        materialize=False,
+        mark_first=False,
+        entry_tolerance_pct=0.01,
+    )
+
+    opened_keys = {item["candidate_key"] for item in result["steps"]["promotion_refresh"]["shadow_forward"]["opened"]}
+    skipped = result["steps"]["promotion_refresh"]["shadow_forward"]["skipped"]
+    shadow_rows = (await session.scalars(select(ShadowPaperTrade).where(ShadowPaperTrade.status == "open"))).all()
+    paper_rows = (await session.scalars(select(PaperTrade))).all()
+
+    assert "darkflow-card:v2:strong-source" in opened_keys
+    assert "darkflow-card:v2:weak-source" not in opened_keys
+    assert any(item["candidate_key"] == "darkflow-card:v2:weak-source" and item["reason"] == "alpha_group_shadow_performance_paused" for item in skipped)
+    assert result["sampling_plan"]["priority_group_count"] >= 1
+    assert result["sampling_plan"]["paused_group_count"] >= 1
+    assert all(row.context.get("opens_paper_trades") is False for row in shadow_rows)
     assert paper_rows == []
 
 
@@ -204,21 +335,28 @@ def _shadow_trade(
     )
 
 
-def _candidate(candidate_key: str, *, setup_time: datetime, source_interaction_id: str | None = None) -> TradeCandidate:
+def _candidate(
+    candidate_key: str,
+    *,
+    setup_time: datetime,
+    source_interaction_id: str | None = None,
+    strategy_id: str = "pullback_to_cost",
+    market_state: str = "trend_pullback",
+) -> TradeCandidate:
     return TradeCandidate(
         candidate_key=candidate_key,
         source_type="darkflow_interaction",
         source_interaction_id=source_interaction_id,
         lineage="core_darkflow_v2",
         strategy_family="darkflow_v2",
-        strategy_id="pullback_to_cost",
-        strategy_name="Pullback To Cost",
+        strategy_id=strategy_id,
+        strategy_name=strategy_id.replace("_", " ").title(),
         symbol="BTCUSDT",
         timeframe="short",
         interval="30m",
         direction="long",
         setup_type="first_touch",
-        market_state="trend_pullback",
+        market_state=market_state,
         setup_time=setup_time,
         entry_price=100.0,
         stop_price=99.0,
@@ -251,16 +389,21 @@ def _candidate(candidate_key: str, *, setup_time: datetime, source_interaction_i
     )
 
 
-def _source_interaction(*, setup_time: datetime) -> DarkflowInteraction:
+def _source_interaction(
+    *,
+    setup_time: datetime,
+    interaction_key: str = "source-triggered",
+    playbook: str = "pullback_to_cost",
+) -> DarkflowInteraction:
     return DarkflowInteraction(
-        interaction_key="source-triggered",
-        zone_key="zone-source-triggered",
-        source_snapshot_id="snapshot-source-triggered",
+        interaction_key=interaction_key,
+        zone_key=f"zone-{interaction_key}",
+        source_snapshot_id=f"snapshot-{interaction_key}",
         symbol="BTCUSDT",
         timeframe="short",
         interval="30m",
         indicator="trend_price",
-        playbook="pullback_to_cost",
+        playbook=playbook,
         direction="long",
         interaction_type="first_touch",
         event_ts=setup_time,

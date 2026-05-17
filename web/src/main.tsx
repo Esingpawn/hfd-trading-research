@@ -313,6 +313,7 @@ type DarkflowAlphaScoreboard = {
 };
 
 type DarkflowAlphaRow = ShadowUniquePlanStats & {
+  group_key?: string;
   strategy_id: string;
   strategy_name?: string;
   symbol: string;
@@ -1306,6 +1307,17 @@ function ShadowPage({ data, rows, onAccelerate }: { data: LoadState; rows: CardR
           </div>
           <button onClick={onAccelerate}><RefreshCcw size={15} />排队加速巡检</button>
         </div>
+        <div className="samplingSummary">
+          <div>
+            <strong>{fmt(alphaRows.filter((item) => alphaSamplingAction(item) === "prioritize").length, 0)}</strong>
+            <span>优先补样分组</span>
+          </div>
+          <div>
+            <strong>{fmt(alphaRows.filter((item) => alphaSamplingAction(item) === "pause").length, 0)}</strong>
+            <span>暂停污染分组</span>
+          </div>
+          <p>加速巡检会优先尝试给“样本收集中/人工复核”分组补影子前向样本；“暂停观察”分组会被跳过，避免低质量方向继续污染统计。</p>
+        </div>
         <AlphaScoreboardRows rows={alphaRows} />
         {!alphaRows.length && <StateBox type="empty" title="Alpha 记分牌暂无可读样本" text="还没有足够的暗流 v2 影子前向闭合样本。点击排队加速巡检，让后台标记旧样本并尝试打开新的冻结入场影子样本。" />}
       </Panel>
@@ -1366,6 +1378,7 @@ function AlphaScoreboardRows({ rows }: { rows: DarkflowAlphaRow[] }) {
           </div>
           <div>
             <StatusBadge tone={alphaTone(row.conclusion)} label={row.conclusion} />
+            <span className={`samplingTag ${alphaSamplingAction(row)}`}>{alphaSamplingText(row)}</span>
             <p>{row.next_action}</p>
           </div>
         </div>
@@ -2246,6 +2259,8 @@ function timeframeText(value: string) { return value === "30m" ? "30分钟" : va
 function strategyText(value: string) { return ({ pullback_to_cost: "成本带回踩", liquidity_sweep_reversal: "扫损反转", breakout_confirmation: "突破确认", trend_ride_extension: "趋势延展", darkflow_entry_plan: "冻结入场计划" } as Record<string, string>)[value] ?? value.replace(/_/g, " "); }
 function marketStateText(value: string) { return ({ trend_pullback: "趋势回踩", cost_pullback: "成本回踩", sweep_reversal: "扫损反转", liquidity_hunt_reversal: "扫损反转", structure_breakout: "结构突破", trend_extension: "趋势延展", darkflow_zone_reaction: "暗流区域反应", invalidation_or_breakdown: "结构破坏" } as Record<string, string>)[value] ?? readableCode(value || "未知市场"); }
 function alphaTone(value: string) { return ({ 可进入人工复核: "good", 样本收集中: "info", 观察名单: "warn", 暂停观察: "bad" } as Record<string, string>)[value] ?? "info"; }
+function alphaSamplingAction(row: DarkflowAlphaRow) { if (row.conclusion === "可进入人工复核" || row.conclusion === "样本收集中") return "prioritize"; if (row.conclusion === "暂停观察") return "pause"; return "watch"; }
+function alphaSamplingText(row: DarkflowAlphaRow) { return ({ prioritize: "优先补样", pause: "暂停补样", watch: "继续观察" } as Record<string, string>)[alphaSamplingAction(row)]; }
 function signalText(value: string) { return signalDetail(value).title; }
 function signalDetail(value: string): ReasonItem {
   return ({

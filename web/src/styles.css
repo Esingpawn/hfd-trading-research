@@ -559,6 +559,22 @@ button { color: inherit; }
 .researchRow:hover, .compactRow:hover, .paperTradeRow:hover { border-color: var(--line-soft); background: #0b1118; }
 
 .alphaTable { display: grid; gap: 8px; }
+.samplingSummary {
+  display: grid;
+  grid-template-columns: 120px 120px minmax(0, 1fr);
+  gap: 10px;
+  align-items: stretch;
+  margin-bottom: 10px;
+}
+.samplingSummary div, .samplingSummary p {
+  border: 1px solid var(--line-soft);
+  background: #0b1118;
+  border-radius: 8px;
+  padding: 10px;
+  margin: 0;
+}
+.samplingSummary strong { display: block; color: var(--green); font-family: "Cascadia Mono", Consolas, monospace; font-size: 20px; }
+.samplingSummary span, .samplingSummary p { color: var(--muted); font-size: 13px; line-height: 1.5; }
 .alphaHeader, .alphaRow {
   display: grid;
   grid-template-columns: minmax(150px, 0.9fr) minmax(150px, 0.9fr) minmax(160px, 0.9fr) minmax(190px, 1fr) minmax(230px, 1.2fr);
@@ -579,6 +595,17 @@ button { color: inherit; }
 .alphaRow strong { display: block; color: var(--text); }
 .alphaRow span, .alphaRow p { display: block; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .alphaRow p { margin: 6px 0 0; color: #cbd5e1; }
+.samplingTag {
+  display: inline-block !important;
+  margin-top: 7px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 3px 8px;
+  width: fit-content;
+}
+.samplingTag.prioritize { color: #bbf7d0; border-color: #1f8f75; background: var(--green-soft); }
+.samplingTag.pause { color: #fecaca; border-color: #6b2b2e; background: var(--red-soft); }
+.samplingTag.watch { color: #fde68a; border-color: #715a18; background: var(--amber-soft); }
 
 .loopSteps {
   display: grid;
@@ -748,7 +775,7 @@ button { color: inherit; }
   .mobileQuickLinks button.active { color: var(--text); border-color: #36526f; background: #121d2a; }
   .topbar { align-items: flex-start; flex-direction: column; }
   .statusRail { justify-content: flex-start; }
-  .metricGrid, .filterBar, .auditGrid, .safetyGrid, .priceGrid, .detailSection.twoPane, .definitionGrid, .stateBuckets, .candidateGroup, .indicatorRow, .playbookItem div, .loopSteps, .abCompareGrid, .alphaHeader, .alphaRow { grid-template-columns: 1fr; }
+  .metricGrid, .filterBar, .auditGrid, .safetyGrid, .priceGrid, .detailSection.twoPane, .definitionGrid, .stateBuckets, .candidateGroup, .indicatorRow, .playbookItem div, .loopSteps, .abCompareGrid, .alphaHeader, .alphaRow, .samplingSummary { grid-template-columns: 1fr; }
   .alphaHeader { display: none; }
   .panelToolbar { align-items: stretch; flex-direction: column; }
   .panelToolbar button { justify-content: center; }

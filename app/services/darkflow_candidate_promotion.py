@@ -121,10 +121,16 @@ async def open_darkflow_shadow_forward_samples(
     limit: int = DEFAULT_SHADOW_FORWARD_LIMIT,
     max_candidate_age_hours: float = DEFAULT_MAX_CANDIDATE_AGE_HOURS,
     entry_tolerance_pct: float = DEFAULT_ENTRY_TOLERANCE_PCT,
+    priority_group_keys: list[str] | set[str] | tuple[str, ...] | None = None,
+    paused_group_keys: list[str] | set[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     requested_limit = max(1, int(limit))
     scan_limit = _shadow_candidate_scan_limit(requested_limit)
     rows = await _shadow_ready_candidate_rows(session, limit=scan_limit)
+    priority_groups = _normalized_group_keys(priority_group_keys)
+    paused_groups = _normalized_group_keys(paused_group_keys)
+    if priority_groups or paused_groups:
+        rows = _sort_candidates_by_alpha_sampling_plan(rows, priority_groups=priority_groups, paused_groups=paused_groups)
     market_stats = await _shadow_market_performance_stats(session)
     stats_by_candidate = await _shadow_stats_by_candidate(session, [candidate.candidate_key for candidate in rows])
     latest_prices = await _latest_prices(session, sorted({candidate.symbol for candidate in rows}))
@@ -137,6 +143,20 @@ async def open_darkflow_shadow_forward_samples(
     scanned = 0
     for candidate in rows:
         scanned += 1
+        alpha_group_key = _candidate_alpha_group_key(candidate)
+        if alpha_group_key in paused_groups:
+            if _pause_shadow_candidate_for_alpha_group(candidate, group_key=alpha_group_key, now=now):
+                updated.append(_candidate_update_row(candidate, _candidate_stats(stats_by_candidate, candidate), reason="alpha_group_shadow_performance_paused"))
+            skipped.append(
+                {
+                    "candidate_key": candidate.candidate_key,
+                    "symbol": candidate.symbol,
+                    "direction": candidate.direction,
+                    "reason": "alpha_group_shadow_performance_paused",
+                    "alpha_group_key": alpha_group_key,
+                }
+            )
+            continue
         market_gate = _shadow_market_gate_from_stats(candidate, market_stats)
         if market_gate["decision"] == "paused":
             if _pause_shadow_candidate_for_market(candidate, gate=market_gate, now=now):
@@ -281,6 +301,11 @@ async def open_darkflow_shadow_forward_samples(
             "max_candidate_age_hours": float(max_candidate_age_hours),
             "entry_tolerance_pct": float(entry_tolerance_pct),
         },
+        "alpha_sampling": {
+            "applied": bool(priority_groups or paused_groups),
+            "priority_group_count": len(priority_groups),
+            "paused_group_count": len(paused_groups),
+        },
         "policy": _policy(),
     }
 
@@ -293,6 +318,8 @@ async def refresh_darkflow_candidate_promotion(
     max_candidate_age_hours: float = DEFAULT_MAX_CANDIDATE_AGE_HOURS,
     entry_tolerance_pct: float = DEFAULT_ENTRY_TOLERANCE_PCT,
     materialize: bool = True,
+    priority_group_keys: list[str] | set[str] | tuple[str, ...] | None = None,
+    paused_group_keys: list[str] | set[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     materialize_result: dict[str, Any] = {"enabled": False}
     if materialize:
@@ -303,6 +330,8 @@ async def refresh_darkflow_candidate_promotion(
         limit=shadow_limit,
         max_candidate_age_hours=max_candidate_age_hours,
         entry_tolerance_pct=entry_tolerance_pct,
+        priority_group_keys=priority_group_keys,
+        paused_group_keys=paused_group_keys,
     )
     summary = await darkflow_candidate_promotion_report(session, limit=limit)
     return {
@@ -870,6 +899,80 @@ def _pause_shadow_candidate_for_market(candidate: TradeCandidate, *, gate: dict[
         candidate.promotion_status,
         tuple(candidate.promotion_blockers or []),
         candidate.decision_payload,
+    )
+
+
+def _pause_shadow_candidate_for_alpha_group(candidate: TradeCandidate, *, group_key: str, now: datetime) -> bool:
+    previous = (
+        candidate.status,
+        candidate.shadow_status,
+        candidate.promotion_status,
+        tuple(candidate.promotion_blockers or []),
+        candidate.decision_payload,
+    )
+    blockers = set(str(item) for item in (candidate.promotion_blockers or []))
+    blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
+    blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
+    blockers.add(PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED)
+    candidate.promotion_blockers = _ordered_blockers(blockers)
+    candidate.shadow_status = "retired"
+    candidate.status = "entry_plan_retired"
+    payload = dict(candidate.decision_payload or {})
+    payload["alpha_sampling_gate"] = {
+        "decision": "paused",
+        "reason": "weak_alpha_group_shadow_performance",
+        "group_key": group_key,
+        "paused_at": _iso(now),
+    }
+    candidate.decision_payload = payload
+    candidate.updated_at = now
+    _apply_lifecycle(candidate)
+    return previous != (
+        candidate.status,
+        candidate.shadow_status,
+        candidate.promotion_status,
+        tuple(candidate.promotion_blockers or []),
+        candidate.decision_payload,
+    )
+
+
+def _normalized_group_keys(values: list[str] | set[str] | tuple[str, ...] | None) -> set[str]:
+    return {str(item) for item in (values or []) if str(item)}
+
+
+def _sort_candidates_by_alpha_sampling_plan(
+    candidates: list[TradeCandidate],
+    *,
+    priority_groups: set[str],
+    paused_groups: set[str],
+) -> list[TradeCandidate]:
+    def rank(candidate: TradeCandidate) -> tuple[int, datetime, datetime, str]:
+        group_key = _candidate_alpha_group_key(candidate)
+        if group_key in priority_groups:
+            group_rank = 2
+        elif group_key in paused_groups:
+            group_rank = 0
+        else:
+            group_rank = 1
+        return (
+            group_rank,
+            _aware(candidate.setup_time or datetime.min.replace(tzinfo=timezone.utc)),
+            _aware(candidate.updated_at or datetime.min.replace(tzinfo=timezone.utc)),
+            candidate.id,
+        )
+
+    return sorted(candidates, key=rank, reverse=True)
+
+
+def _candidate_alpha_group_key(candidate: TradeCandidate) -> str:
+    return "|".join(
+        [
+            candidate.strategy_id,
+            candidate.symbol,
+            candidate.direction,
+            candidate.timeframe,
+            candidate.market_state,
+        ]
     )
 
 
