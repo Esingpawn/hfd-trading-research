@@ -12,6 +12,7 @@ from app.models import DarkflowInteraction, ExperimentRun, PriceSnapshot, Shadow
 from app.services.darkflow_decision_cards import (
     PROMOTION_BLOCKER_ANTI_REPAINT_FAILED,
     PROMOTION_BLOCKER_ANTI_REPAINT_MISSING,
+    PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED,
     PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING,
     PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED,
     PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING,
@@ -33,6 +34,14 @@ SHADOW_FORWARD_MIN_CLOSED_TRADES = 10
 SHADOW_FORWARD_MIN_WIN_RATE = 0.52
 SHADOW_FORWARD_MIN_PROFIT_FACTOR = 1.15
 SHADOW_FORWARD_MAX_DRAWDOWN = 0.12
+_TERMINAL_PLAN_CHECK_REASONS = {
+    "unsupported_direction",
+    "invalid_plan_prices",
+    "invalid_long_reward_shape",
+    "invalid_short_reward_shape",
+    "stale_candidate",
+}
+_TERMINAL_ENTRY_PLAN_STATES = {"expired", "missed", "invalidated", "invalid_shape"}
 
 
 async def audit_darkflow_trade_candidates(
@@ -123,6 +132,9 @@ async def open_darkflow_shadow_forward_samples(
             max_candidate_age_hours=max_candidate_age_hours,
         )
         if plan_check is not None:
+            if plan_check in _TERMINAL_PLAN_CHECK_REASONS:
+                if _retire_shadow_candidate(candidate, reason=plan_check, entry_plan_state=None, now=now):
+                    updated.append(_candidate_update_row(candidate, stats, reason=plan_check))
             skipped.append({"candidate_key": candidate.candidate_key, "reason": plan_check})
             continue
         price = await _latest_price(session, candidate.symbol)
@@ -136,6 +148,10 @@ async def open_darkflow_shadow_forward_samples(
             entry_tolerance_pct=entry_tolerance_pct,
         )
         if entry_plan_state["state"] != "triggered":
+            if entry_plan_state["state"] in _TERMINAL_ENTRY_PLAN_STATES:
+                reason = f"entry_plan_{entry_plan_state['state']}"
+                if _retire_shadow_candidate(candidate, reason=reason, entry_plan_state=entry_plan_state, now=now):
+                    updated.append(_candidate_update_row(candidate, stats, reason=reason))
             skipped.append(
                 {
                     "candidate_key": candidate.candidate_key,
@@ -514,6 +530,10 @@ async def _shadow_stats(session: AsyncSession, candidate_key: str) -> dict[str, 
 
 def _update_shadow_lifecycle(candidate: TradeCandidate, stats: dict[str, Any], *, now: datetime) -> bool:
     previous = (candidate.shadow_status, candidate.promotion_status, tuple(candidate.promotion_blockers or []))
+    if candidate.shadow_status == "retired":
+        candidate.updated_at = now
+        _apply_lifecycle(candidate)
+        return previous != (candidate.shadow_status, candidate.promotion_status, tuple(candidate.promotion_blockers or []))
     if stats["closed_trades"] >= SHADOW_FORWARD_MIN_CLOSED_TRADES:
         candidate.shadow_status = "passed" if _shadow_stats_pass(stats) else "failed"
     elif stats["open_trades"] or stats["total_trades"]:
@@ -523,6 +543,53 @@ def _update_shadow_lifecycle(candidate: TradeCandidate, stats: dict[str, Any], *
     candidate.updated_at = now
     _apply_lifecycle(candidate)
     return previous != (candidate.shadow_status, candidate.promotion_status, tuple(candidate.promotion_blockers or []))
+
+
+def _retire_shadow_candidate(
+    candidate: TradeCandidate,
+    *,
+    reason: str,
+    entry_plan_state: dict[str, Any] | None,
+    now: datetime,
+) -> bool:
+    previous = (
+        candidate.status,
+        candidate.shadow_status,
+        candidate.promotion_status,
+        tuple(candidate.promotion_blockers or []),
+        candidate.decision_payload,
+    )
+    candidate.status = "entry_plan_retired"
+    candidate.shadow_status = "retired"
+    payload = dict(candidate.decision_payload or {})
+    payload["entry_plan_retirement"] = {
+        "reason": reason,
+        "retired_at": _iso(now),
+        "entry_plan_state": entry_plan_state or {},
+    }
+    candidate.decision_payload = payload
+    candidate.updated_at = now
+    _apply_lifecycle(candidate)
+    return previous != (
+        candidate.status,
+        candidate.shadow_status,
+        candidate.promotion_status,
+        tuple(candidate.promotion_blockers or []),
+        candidate.decision_payload,
+    )
+
+
+def _candidate_update_row(candidate: TradeCandidate, stats: dict[str, Any], *, reason: str | None = None) -> dict[str, Any]:
+    row = {
+        "candidate_key": candidate.candidate_key,
+        "shadow_status": candidate.shadow_status,
+        "promotion_status": candidate.promotion_status,
+        "closed_trades": stats["closed_trades"],
+        "open_trades": stats["open_trades"],
+    }
+    if reason:
+        row["reason"] = reason
+    return row
 
 
 def _shadow_stats_pass(stats: dict[str, Any]) -> bool:
@@ -807,15 +874,23 @@ def _apply_lifecycle(candidate: TradeCandidate) -> None:
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
+        blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
     elif candidate.shadow_status == "collecting":
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
+        blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
         blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
     elif candidate.shadow_status == "failed":
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
         blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
+    elif candidate.shadow_status == "retired":
+        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
+        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
+        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
+        blockers.add(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
     else:
+        blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
         blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
     candidate.promotion_blockers = _ordered_blockers(blockers)
     candidate.paper_eligible = False
@@ -825,6 +900,8 @@ def _apply_lifecycle(candidate: TradeCandidate) -> None:
 
 def _promotion_status(candidate: TradeCandidate) -> str:
     blockers = set(candidate.promotion_blockers or [])
+    if candidate.shadow_status == "retired" or PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED in blockers:
+        return "entry_plan_retired"
     if candidate.status != "shadow_candidate":
         return "blocked"
     if candidate.anti_repaint_status == "failed" or PROMOTION_BLOCKER_ANTI_REPAINT_FAILED in blockers:
@@ -847,6 +924,7 @@ def _ordered_blockers(blockers: set[str]) -> list[str]:
         PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING,
         PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING,
         PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED,
+        PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED,
     ]
     return [item for item in ordered if item in blockers] + sorted(blockers - set(ordered))
 

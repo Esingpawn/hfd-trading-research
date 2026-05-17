@@ -25,6 +25,7 @@ PROMOTION_BLOCKER_ANTI_REPAINT_FAILED = "anti_repaint_audit_failed"
 PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING = "isolated_v2_shadow_forward_sample_missing"
 PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING = "isolated_v2_shadow_forward_sample_collecting"
 PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED = "isolated_v2_shadow_forward_sample_failed"
+PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED = "entry_plan_retired"
 PROMOTION_BLOCKER_PERSISTENT_TABLE_MISSING = "persistent_trade_candidate_table_missing"
 _HARD_QUALITY_BLOCKERS = {
     "body_break_invalidation",
@@ -539,6 +540,9 @@ def _preserve_candidate_lifecycle(existing: TradeCandidate, payload: dict[str, A
         "promotion_status",
     ):
         preserved[field] = getattr(existing, field)
+    if existing.shadow_status == "retired" or existing.status == "entry_plan_retired":
+        preserved["status"] = existing.status
+        preserved["decision_payload"] = existing.decision_payload
     preserved["promotion_blockers"] = _merge_lifecycle_blockers(
         payload["promotion_blockers"],
         existing.promotion_blockers,
@@ -576,15 +580,23 @@ def _merge_lifecycle_blockers(
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
+        blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
     elif shadow_status == "collecting":
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
+        blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
         blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
     elif shadow_status == "failed":
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
         blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
+    elif shadow_status == "retired":
+        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
+        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
+        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
+        blockers.add(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
     else:
+        blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
         blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
     ordered = [
         PROMOTION_BLOCKER_ANTI_REPAINT_MISSING,
@@ -592,6 +604,7 @@ def _merge_lifecycle_blockers(
         PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING,
         PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING,
         PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED,
+        PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED,
     ]
     return [item for item in ordered if item in blockers] + sorted(blockers - set(ordered))
 

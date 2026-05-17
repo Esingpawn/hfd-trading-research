@@ -775,11 +775,26 @@ async def test_shadow_forward_skips_missed_frozen_entry_range(session) -> None:
         entry_tolerance_pct=0.05,
     )
     trades = (await session.execute(select(ShadowPaperTrade))).scalars().all()
+    candidate = await session.scalar(select(TradeCandidate))
 
     assert result["opened"] == []
     assert len(trades) == 0
     assert result["skipped"][0]["reason"] == "entry_plan_missed"
     assert result["skipped"][0]["entry_plan_state"]["reason"] == "entry_range_missed"
+    assert result["updated"][0]["reason"] == "entry_plan_missed"
+    assert candidate is not None
+    assert candidate.status == "entry_plan_retired"
+    assert candidate.shadow_status == "retired"
+    assert candidate.promotion_status == "entry_plan_retired"
+    assert "entry_plan_retired" in candidate.promotion_blockers
+    assert candidate.decision_payload["entry_plan_retirement"]["reason"] == "entry_plan_missed"
+
+    await materialize_darkflow_trade_candidates(session, limit=10)
+    await session.refresh(candidate)
+
+    assert candidate.status == "entry_plan_retired"
+    assert candidate.shadow_status == "retired"
+    assert candidate.promotion_status == "entry_plan_retired"
 
 
 @pytest.mark.asyncio

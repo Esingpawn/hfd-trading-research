@@ -1986,6 +1986,8 @@ function blockerDetail(value: string): ReasonItem {
     isolated_v2_shadow_forward_sample_missing: { group: "样本", title: "缺少隔离影子样本", text: "还没有在独立影子交易里积累足够的前向样本，暂时只能研究观察。", tone: "warn" },
     isolated_v2_shadow_forward_sample_collecting: { group: "样本", title: "影子样本采集中", text: "该候选已经进入影子观察，但样本数量或结果还不足以晋级。", tone: "warn" },
     isolated_v2_shadow_forward_sample_weak: { group: "样本", title: "影子样本表现不足", text: "前向影子表现没有达到胜率、盈利因子或回撤门槛，暂不晋级。", tone: "warn" },
+    isolated_v2_shadow_forward_sample_failed: { group: "样本", title: "影子样本未达标", text: "前向影子样本已经闭合，但胜率、盈利因子或回撤没有达到晋级门槛。", tone: "warn" },
+    entry_plan_retired: { group: "入场计划", title: "入场计划已退休", text: "原来的冻结入场区间已经过期、错过或失效，不能继续追价，需要等待新的暗流信号。", tone: "warn" },
     parent_trend_conflict: { group: "趋势", title: "与更高周期趋势冲突", text: "入场方向和更大周期趋势相反，容易变成逆势接刀或逆势摸顶。", tone: "warn" },
     quality_score_below_threshold: { group: "评分", title: "质量评分不足", text: "当前综合评分低于候选晋级门槛，可能是确认不足、趋势冲突或样本证据不够。", tone: "warn" },
     rr_ratio_below_threshold: { group: "风控", title: "盈亏比不足", text: "计划止损和目标之间的收益空间不够，即使方向对也不值得承担这笔风险。", tone: "warn" },
@@ -1994,10 +1996,10 @@ function blockerDetail(value: string): ReasonItem {
     blocker_indicators_nearby: { group: "阻断", title: "附近有阻断类指标", text: "入场区域附近出现耗尽、反向大单或结构破坏信号，需要暂停追踪。", tone: "warn" },
   } as Record<string, ReasonItem>)[value] ?? { title: readableCode(value), text: "系统返回了新的阻断码，当前先按原始含义展示，后续可补充风控解释。", tone: "warn" };
 }
-function promotionText(value: string) { return ({ blocked: "研究阻断", shadow_ready_pending_audit: "待防重绘审计", shadow_forward_pending: "待影子入场", shadow_forward_collecting: "影子样本采集中", shadow_running: "影子运行中" } as Record<string, string>)[value] ?? value.replace(/_/g, " "); }
+function promotionText(value: string) { return ({ blocked: "研究阻断", shadow_ready_pending_audit: "待防重绘审计", shadow_forward_pending: "待影子入场", shadow_forward_collecting: "影子样本采集中", shadow_forward_failed: "影子样本未达标", entry_plan_retired: "入场计划已退休", shadow_running: "影子运行中", paper_review_ready: "待人工复核" } as Record<string, string>)[value] ?? value.replace(/_/g, " "); }
 function auditText(value: string) { return ({ missing: "缺失", passed: "通过", failed: "失败" } as Record<string, string>)[value] ?? value; }
-function shadowText(value: string) { return ({ not_started: "未开始", collecting: "采集中", closed: "已结束" } as Record<string, string>)[value] ?? value; }
-function entryStateText(value: string) { return ({ triggered: "已触发", waiting: "等待入场", missed: "已错过", expired: "时间过期", invalidated: "条件作废", missing_price: "缺少价格", invalid_shape: "形态异常", blocked: "研究阻断", shadow_candidate: "影子候选" } as Record<string, string>)[value] ?? value.replace(/_/g, " "); }
+function shadowText(value: string) { return ({ not_started: "未开始", collecting: "采集中", retired: "已退休", failed: "未达标", passed: "已达标", closed: "已结束" } as Record<string, string>)[value] ?? value; }
+function entryStateText(value: string) { return ({ triggered: "已触发", waiting: "等待入场", missed: "已错过", expired: "时间过期", invalidated: "条件作废", missing_price: "缺少价格", invalid_shape: "形态异常", entry_plan_retired: "入场计划已退休", blocked: "研究阻断", shadow_candidate: "影子候选" } as Record<string, string>)[value] ?? value.replace(/_/g, " "); }
 function stateReasonText(value: string) { return ({ mark_price_inside_frozen_entry_range: "价格进入冻结入场区间", awaiting_frozen_entry_range: "尚未进入冻结入场区间", entry_range_missed: "价格已越过入场区间", valid_until_passed: "超过有效期", price_crosses_invalidation: "触发失效价", missing_latest_price: "缺少最新价格", invalid_long_frozen_entry_range: "多头入场区间异常", invalid_short_frozen_entry_range: "空头入场区间异常" } as Record<string, string>)[value] ?? blockerText(value); }
 function sectionLabel(key: SectionKey) { return ({ summary: "系统摘要", quality: "数据质量", cards: "交易卡片", candidates: "候选池", entryStates: "入场计划", darkflow: "暗流交互回测", backtestsLatest: "批量回测", playbookBacktest: "剧本回测", paperStats: "纸上统计", paperTrades: "纸上交易明细", shadow: "影子纸上", shadowTrades: "影子交易明细", rulebook: "教程规则", playbooks: "策略剧本", indicatorCoverage: "指标覆盖", experimentEffectiveness: "实验有效性", featurePaperAb: "特征纸上 A/B", featureSegmentPaperAb: "分段纸上 A/B", safety: "安全开关" } as Record<SectionKey, string>)[key]; }
 function pageLabel(page: PageId) { return NAV_GROUPS.flatMap((group) => group.items).find((item) => item.id === page)?.label ?? page; }
