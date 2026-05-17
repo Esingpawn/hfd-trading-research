@@ -54,3 +54,22 @@ docker compose exec -T postgres pg_restore -U hfd -d hfd --clean --if-exists /ba
 - `feature_events` 和 `feature_labels` 行数为 0。
 - 根盘可用空间明显增加。
 - `darkflow-worker` 仍在运行，`LIVE_TRADING_ENABLED=false`，`TRADING_GATEWAY=disabled`。
+
+## Raw Payload 冷归档
+
+2026-05-17 已将 `hfd_hfd_raw_payloads` 中较旧的在线 raw payload 目录归档：
+
+- 已归档在线目录：`/var/lib/docker/volumes/hfd_hfd_raw_payloads/_data/2026/05/{05..14}`
+- 保留在线热目录：`/var/lib/docker/volumes/hfd_hfd_raw_payloads/_data/2026/05/{15..17}`
+- 归档位置：`/opt/hfd_backups/raw-payload-archive-20260517T155522Z/raw_payloads_2026-05-05_to_2026-05-14.tar.gz`
+- 校验文件：同目录 `.sha256`
+
+恢复示例：
+
+```bash
+cd /var/lib/docker/volumes/hfd_hfd_raw_payloads/_data/2026/05
+sha256sum -c /opt/hfd_backups/raw-payload-archive-20260517T155522Z/raw_payloads_2026-05-05_to_2026-05-14.tar.gz.sha256
+tar -xzf /opt/hfd_backups/raw-payload-archive-20260517T155522Z/raw_payloads_2026-05-05_to_2026-05-14.tar.gz
+```
+
+注意：归档包当前仍保留在 124 本机，因此它降低了在线热数据体积，但不会释放这 8.2G 的整机占用。若要继续释放空间，需要先把归档迁移到 154、本地冷备份盘或对象存储，校验通过后再删除 124 本机归档包。
