@@ -304,11 +304,19 @@ async def open_darkflow_shadow_forward_samples(
             break
     if opened or updated:
         await session.commit()
+    skip_reason_counts: dict[str, int] = {}
+    for item in skipped:
+        reason = str(item.get("reason") or "unknown")
+        skip_reason_counts[reason] = skip_reason_counts.get(reason, 0) + 1
     return {
         "strategy_name": DARKFLOW_V2_SHADOW_STRATEGY_NAME,
         "requested_limit": requested_limit,
         "scan_limit": scan_limit,
         "scanned": scanned,
+        "opened_count": len(opened),
+        "updated_count": len(updated),
+        "skipped_count": len(skipped),
+        "skip_reason_counts": skip_reason_counts,
         "opened": opened,
         "updated": updated[:100],
         "skipped": skipped[:100],

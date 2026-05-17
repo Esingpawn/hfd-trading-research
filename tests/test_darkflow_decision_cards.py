@@ -282,6 +282,56 @@ async def test_decision_cards_allow_low_rr_candidates_into_shadow_research(sessi
 
 
 @pytest.mark.asyncio
+async def test_decision_cards_allow_marginal_quality_candidates_into_shadow_research(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="decision-marginal-quality-shadow-research",
+            zone_key="zone-marginal-quality-shadow-research",
+            source_snapshot_id="snapshot-marginal-quality-shadow-research",
+            symbol="SOLUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            playbook="pullback_to_cost",
+            direction="long",
+            interaction_type="wick_pierce_reclaim",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {
+                    "score": 52.0,
+                    "confirmations": ["official_rule_mapped"],
+                    "blockers": [],
+                },
+            },
+        )
+    )
+    await session.commit()
+
+    report = await latest_darkflow_decision_cards(session, limit=5)
+    card = report["cards"][0]
+
+    assert card["scores"]["quality_score"] == 52.0
+    assert card["risk_gate"]["status"] == "shadow_candidate"
+    assert card["risk_gate"]["blockers"] == ["quality_score_below_threshold"]
+    assert card["risk_gate"]["paper_eligible"] is False
+    assert card["risk_gate"]["live_eligible"] is False
+
+
+@pytest.mark.asyncio
 async def test_refresh_opens_low_rr_candidates_for_shadow_but_gate_blocks_review(session) -> None:
     base = datetime.now(timezone.utc) - timedelta(minutes=5)
     session.add(
@@ -335,6 +385,8 @@ async def test_refresh_opens_low_rr_candidates_for_shadow_but_gate_blocks_review
     trades = (await session.execute(select(ShadowPaperTrade))).scalars().all()
 
     assert len(result["shadow_forward"]["opened"]) == 1
+    assert result["shadow_forward"]["opened_count"] == 1
+    assert result["shadow_forward"]["skipped_count"] == 0
     assert candidate is not None
     assert candidate.status == "shadow_candidate"
     assert candidate.blockers == ["rr_ratio_below_threshold"]
@@ -354,6 +406,72 @@ async def test_refresh_opens_low_rr_candidates_for_shadow_but_gate_blocks_review
 
     assert gate["gate_status"] == "blocked"
     assert gate["primary_blocker"] == "rr_ratio_below_threshold"
+
+
+@pytest.mark.asyncio
+async def test_refresh_opens_marginal_quality_candidates_for_shadow_but_gate_blocks_review(session) -> None:
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-marginal-quality-shadow-forward",
+            zone_key="zone-marginal-quality-shadow-forward",
+            source_snapshot_id="snapshot-marginal-quality-shadow-forward",
+            symbol="SOLUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            playbook="pullback_to_cost",
+            direction="long",
+            interaction_type="wick_pierce_reclaim",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {"score": 52.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+            },
+        )
+    )
+    session.add(PriceSnapshot(symbol="SOLUSDT", price=100.0, raw_payload={}, collected_at=base, created_at=base))
+    await session.commit()
+
+    result = await refresh_darkflow_candidate_promotion(
+        session,
+        limit=10,
+        shadow_limit=10,
+        max_candidate_age_hours=0,
+        entry_tolerance_pct=0.05,
+    )
+    candidate = await session.scalar(select(TradeCandidate))
+    trades = (await session.execute(select(ShadowPaperTrade))).scalars().all()
+
+    assert len(result["shadow_forward"]["opened"]) == 1
+    assert result["shadow_forward"]["opened_count"] == 1
+    assert candidate is not None
+    assert candidate.status == "shadow_candidate"
+    assert candidate.blockers == ["quality_score_below_threshold"]
+    assert candidate.shadow_status == "collecting"
+    assert len(trades) == 1
+
+    candidate.shadow_status = "passed"
+    candidate.promotion_blockers = []
+    await session.commit()
+
+    report = await darkflow_candidate_promotion_report(session, limit=10)
+    gate = report["gate_samples"][0]
+
+    assert gate["gate_status"] == "blocked"
+    assert gate["primary_blocker"] == "quality_score_below_threshold"
 
 
 @pytest.mark.asyncio
@@ -760,6 +878,8 @@ async def test_refresh_audits_blocked_candidates_without_promoting_to_shadow(ses
     assert candidate.promotion_status == "blocked"
     assert "anti_repaint_audit_missing" not in candidate.promotion_blockers
     assert "quality_score_below_threshold" in candidate.blockers
+    assert result["summary"]["gate_samples"][0]["gate_status"] == "blocked"
+    assert result["summary"]["gate_samples"][0]["primary_blocker"] == "quality_score_below_threshold"
     assert trades == []
 
 

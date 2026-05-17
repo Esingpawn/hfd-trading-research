@@ -104,6 +104,9 @@ def gate_status_for(evidence: PromotionGateEvidence, groups: dict[str, list[dict
 
 def blocker_detail(code: str, *, evidence: PromotionGateEvidence | None = None) -> tuple[str, str, str]:
     rr_severity = "blocker" if evidence is not None and evidence.shadow_status == "passed" else "waiting"
+    weak_quality_severity = "waiting"
+    if evidence is not None and (evidence.status != "shadow_candidate" or evidence.shadow_status == "passed"):
+        weak_quality_severity = "blocker"
     details = {
         PROMOTION_BLOCKER_ANTI_REPAINT_MISSING: ("anti_repaint", "blocker", "防重绘证据缺失，不能证明信号在决策当时可见。"),
         PROMOTION_BLOCKER_ANTI_REPAINT_FAILED: ("anti_repaint", "blocker", "防重绘审计失败，历史证据存在重绘风险。"),
@@ -114,7 +117,7 @@ def blocker_detail(code: str, *, evidence: PromotionGateEvidence | None = None) 
         PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN: ("dedupe", "blocker", "存在重复的影子前向计划，避免重复统计同一机会。"),
         PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED: ("market_quality", "blocker", "该币种/方向的影子前向表现较弱，已暂停继续开新样本。"),
         PROMOTION_BLOCKER_RR_RATIO_BELOW_THRESHOLD: ("risk_shape", rr_severity, "盈亏比低于晋级阈值，可以继续积累影子样本，但不能进入纸上复核。"),
-        "quality_score_below_threshold": ("risk_shape", "blocker", "质量评分低于候选阈值，教程规则、暗流共振或风险形态证据不足。"),
+        "quality_score_below_threshold": ("risk_shape", weak_quality_severity, "质量评分低于晋级阈值，可以继续积累隔离影子样本，但不能进入纸上复核。"),
         "parent_trend_conflict": ("risk_shape", "blocker", "父级趋势与当前入场方向冲突，顺大势条件不成立。"),
         "body_break_invalidation": ("risk_shape", "blocker", "价格出现实体突破失效区，原暗流反应区已被破坏。"),
         "official_rule_unmapped": ("risk_shape", "blocker", "该信号尚未映射到明确教程规则，不能作为可信入场依据。"),

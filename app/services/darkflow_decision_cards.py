@@ -27,6 +27,7 @@ from app.services.research_lineage import core_darkflow_v2_lineage
 
 DEFAULT_DECISION_CARD_LIMIT = 20
 DEFAULT_MIN_DECISION_CARD_QUALITY = 55.0
+DEFAULT_MIN_SHADOW_RESEARCH_QUALITY = 50.0
 DEFAULT_MIN_RR_RATIO = 1.5
 DEFAULT_TRADE_CANDIDATE_LIMIT = 100
 DEFAULT_TRADE_CANDIDATE_FETCH_MULTIPLIER = 3
@@ -266,7 +267,7 @@ def _decision_card(
         "supporting_signals": confirmations,
         "blocking_risks": quality_blockers,
         "risk_gate": {
-            "status": "shadow_candidate" if not _shadow_sampling_blockers(gate_blockers) else "research_blocked",
+            "status": "shadow_candidate" if not _shadow_sampling_blockers(gate_blockers, quality_score=quality_score) else "research_blocked",
             "blockers": gate_blockers,
             "paper_eligible": False,
             "live_eligible": False,
@@ -324,8 +325,11 @@ def _gate_blockers(
     return blockers
 
 
-def _shadow_sampling_blockers(blockers: list[str]) -> list[str]:
-    return [blocker for blocker in blockers if blocker not in _SHADOW_RESEARCH_ONLY_BLOCKERS]
+def _shadow_sampling_blockers(blockers: list[str], *, quality_score: float | None = None) -> list[str]:
+    research_only = set(_SHADOW_RESEARCH_ONLY_BLOCKERS)
+    if isinstance(quality_score, (int, float)) and float(quality_score) >= DEFAULT_MIN_SHADOW_RESEARCH_QUALITY:
+        research_only.add("quality_score_below_threshold")
+    return [blocker for blocker in blockers if blocker not in research_only]
 
 
 def _take_profit_levels(item: DarkflowInteraction, target: float) -> list[dict[str, Any]]:
@@ -526,10 +530,11 @@ def _representative_rank(card: dict[str, Any]) -> tuple[int, float, float, str]:
     risk = card.get("risk") if isinstance(card.get("risk"), dict) else {}
     risk_gate = card.get("risk_gate") if isinstance(card.get("risk_gate"), dict) else {}
     blockers = [str(value) for value in risk_gate.get("blockers") or []]
-    sampleable_rank = 1 if not _shadow_sampling_blockers(blockers) else 0
+    quality_score = _float(scores.get("quality_score")) or 0.0
+    sampleable_rank = 1 if not _shadow_sampling_blockers(blockers, quality_score=quality_score) else 0
     return (
         sampleable_rank,
-        _float(scores.get("quality_score")) or 0.0,
+        quality_score,
         _float(risk.get("rr_ratio")) or 0.0,
         str(card.get("card_id") or ""),
     )
