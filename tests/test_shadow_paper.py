@@ -154,6 +154,133 @@ async def test_mark_shadow_paper_trades_closes_take_profit(session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_mark_shadow_paper_trades_time_closes_expired_darkflow_shadow_forward(session) -> None:
+    now = datetime.now(timezone.utc)
+    session.add(
+        ShadowPaperTrade(
+            strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+            candidate_type="trade_candidate",
+            candidate_key="darkflow-expired-candidate",
+            signal_key="darkflow-expired-signal",
+            symbol="BTCUSDT",
+            timeframe="short",
+            direction="long",
+            entry_price=100.0,
+            stop_loss=98.0,
+            take_profit=105.0,
+            position_size=1.0,
+            status="open",
+            opened_at=now - timedelta(hours=3),
+            context={
+                "shadow_forward": True,
+                "entry_plan_state": {
+                    "state": "triggered",
+                    "valid_until": (now - timedelta(minutes=30)).isoformat(),
+                },
+                "candidate_snapshot": {"interval": "30m"},
+            },
+        )
+    )
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=101.0, raw_payload={}, collected_at=now))
+    await session.commit()
+
+    mark = await mark_shadow_paper_trades(session)
+    stored = await session.scalar(select(ShadowPaperTrade))
+
+    assert mark["closed"][0]["exit_reason"] == "shadow_forward_time_exit"
+    assert stored.status == "closed"
+    assert stored.exit_reason == "shadow_forward_time_exit"
+    assert stored.context["closed_by_shadow_mark"] is True
+    assert stored.context["shadow_forward_time_exit"] is True
+    assert stored.context["time_exit_basis"] == "entry_plan_valid_until"
+    assert stored.context["max_hold_until"] == (now - timedelta(minutes=30)).isoformat()
+    assert mark["policy"]["opens_paper_trades"] is False
+    assert mark["policy"]["opens_live_orders"] is False
+
+
+@pytest.mark.asyncio
+async def test_mark_shadow_paper_trades_keeps_fresh_darkflow_shadow_forward_open(session) -> None:
+    now = datetime.now(timezone.utc)
+    session.add(
+        ShadowPaperTrade(
+            strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+            candidate_type="trade_candidate",
+            candidate_key="darkflow-fresh-candidate",
+            signal_key="darkflow-fresh-signal",
+            symbol="BTCUSDT",
+            timeframe="short",
+            direction="long",
+            entry_price=100.0,
+            stop_loss=98.0,
+            take_profit=105.0,
+            position_size=1.0,
+            status="open",
+            opened_at=now - timedelta(minutes=20),
+            context={
+                "shadow_forward": True,
+                "entry_plan_state": {
+                    "state": "triggered",
+                    "valid_until": (now + timedelta(hours=1)).isoformat(),
+                },
+                "candidate_snapshot": {"interval": "30m"},
+            },
+        )
+    )
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=101.0, raw_payload={}, collected_at=now))
+    await session.commit()
+
+    mark = await mark_shadow_paper_trades(session)
+    stored = await session.scalar(select(ShadowPaperTrade))
+
+    assert mark["closed"] == []
+    assert mark["updated"][0]["symbol"] == "BTCUSDT"
+    assert stored.status == "open"
+    assert stored.exit_reason is None
+    assert stored.context["last_mark_price"] == 101.0
+    assert "shadow_forward_time_exit" not in stored.context
+
+
+@pytest.mark.asyncio
+async def test_mark_shadow_paper_trades_does_not_time_close_legacy_shadow_trades(session) -> None:
+    now = datetime.now(timezone.utc)
+    session.add(
+        ShadowPaperTrade(
+            strategy_name="shadow_feature_candidates_v1",
+            candidate_type="observation_segment",
+            candidate_key="legacy-candidate",
+            signal_key="legacy-signal-no-time-exit",
+            symbol="BTCUSDT",
+            timeframe="short",
+            direction="long",
+            entry_price=100.0,
+            stop_loss=98.0,
+            take_profit=105.0,
+            position_size=1.0,
+            status="open",
+            opened_at=now - timedelta(hours=24),
+            context={
+                "entry_plan_state": {
+                    "state": "triggered",
+                    "valid_until": (now - timedelta(hours=12)).isoformat(),
+                },
+                "candidate_snapshot": {"interval": "30m"},
+            },
+        )
+    )
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=101.0, raw_payload={}, collected_at=now))
+    await session.commit()
+
+    mark = await mark_shadow_paper_trades(session)
+    stored = await session.scalar(select(ShadowPaperTrade))
+
+    assert mark["closed"] == []
+    assert stored.status == "open"
+    assert stored.exit_reason is None
+    assert stored.context["last_mark_price"] == 101.0
+    assert "shadow_forward_time_exit" not in stored.context
+
+
+@pytest.mark.asyncio
 async def test_mark_shadow_paper_trades_extends_high_volatility_runner(session) -> None:
     session.add(
         ShadowPaperTrade(

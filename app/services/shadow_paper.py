@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from statistics import mean
 from typing import Any
 
@@ -25,6 +25,8 @@ from app.services.risk import template_for_tier
 
 
 SHADOW_STRATEGY_NAME = "shadow_feature_candidates_v1"
+DARKFLOW_V2_SHADOW_STRATEGY_NAME = "darkflow_v2_trade_candidate_shadow_forward_v1"
+DARKFLOW_SHADOW_FORWARD_TIME_EXIT_REASON = "shadow_forward_time_exit"
 SHADOW_FEE_RATE = 0.0004
 SHADOW_SLIPPAGE_RATE_BY_TIER = {
     "core": 0.0002,
@@ -244,6 +246,7 @@ async def mark_shadow_paper_trades(session: AsyncSession) -> dict[str, Any]:
         previous_stop_loss = trade.stop_loss
         previous_take_profit = trade.take_profit
         exit_reason = _stop_exit_reason(trade, price)
+        exit_context: dict[str, Any] = {}
         runner_decision: dict[str, Any] | None = None
         if exit_reason is None and _take_profit_touched(trade, price):
             runner_decision = _shadow_runner_decision(trade, price)
@@ -251,6 +254,11 @@ async def mark_shadow_paper_trades(session: AsyncSession) -> dict[str, Any]:
                 _extend_take_profit_runner(trade, price)
             else:
                 exit_reason = "take_profit"
+        if exit_reason is None:
+            time_exit_context = _darkflow_shadow_forward_time_exit_context(trade, now=datetime.now(timezone.utc))
+            if time_exit_context is not None:
+                exit_reason = DARKFLOW_SHADOW_FORWARD_TIME_EXIT_REASON
+                exit_context = time_exit_context
         if exit_reason:
             exit_price = _execution_price(trade.direction, price, side="exit", asset_tier=_asset_tier(trade.symbol))
             pnl = _net_pnl(trade, exit_price, exit_side="executed")
@@ -272,6 +280,7 @@ async def mark_shadow_paper_trades(session: AsyncSession) -> dict[str, Any]:
                     "total_fee_rate": SHADOW_FEE_RATE * 2,
                     "closed_by_shadow_mark": True,
                     "runner_decision": runner_decision,
+                    **exit_context,
                 },
             )
             closed.append({"id": trade.id, "symbol": trade.symbol, "exit_reason": exit_reason, "pnl": pnl, "mark_pnl": mark_pnl})
@@ -764,6 +773,83 @@ def _net_pnl(trade: ShadowPaperTrade, price: float, *, exit_side: str) -> float:
     gross = _pnl(trade.direction, trade.entry_price, price)
     fee_cost = SHADOW_FEE_RATE if exit_side == "mark" else SHADOW_FEE_RATE * 2
     return gross - fee_cost
+
+
+def _darkflow_shadow_forward_time_exit_context(trade: ShadowPaperTrade, *, now: datetime) -> dict[str, Any] | None:
+    context = trade.context if isinstance(trade.context, dict) else {}
+    if trade.strategy_name != DARKFLOW_V2_SHADOW_STRATEGY_NAME or context.get("shadow_forward") is not True:
+        return None
+    deadline, basis = _darkflow_shadow_forward_deadline(trade)
+    if deadline is None:
+        return None
+    now = _aware(now)
+    if now <= deadline:
+        return None
+    opened_at = _aware(trade.opened_at) if isinstance(trade.opened_at, datetime) else None
+    payload: dict[str, Any] = {
+        "shadow_forward_time_exit": True,
+        "time_exit_basis": basis,
+        "max_hold_until": deadline.isoformat(),
+        "time_exit_checked_at": now.isoformat(),
+    }
+    if opened_at is not None:
+        payload["hold_seconds"] = max(0.0, (deadline - opened_at).total_seconds())
+        payload["age_seconds_at_time_exit"] = max(0.0, (now - opened_at).total_seconds())
+    return payload
+
+
+def _darkflow_shadow_forward_deadline(trade: ShadowPaperTrade) -> tuple[datetime | None, str | None]:
+    context = trade.context if isinstance(trade.context, dict) else {}
+    entry_plan_state = context.get("entry_plan_state") if isinstance(context.get("entry_plan_state"), dict) else {}
+    valid_until = _parse_iso_datetime(entry_plan_state.get("valid_until"))
+    if valid_until is not None:
+        return valid_until, "entry_plan_valid_until"
+    opened_at = _aware(trade.opened_at) if isinstance(trade.opened_at, datetime) else None
+    if opened_at is None:
+        return None, None
+    snapshot = context.get("candidate_snapshot") if isinstance(context.get("candidate_snapshot"), dict) else {}
+    interval = str(snapshot.get("interval") or context.get("horizon") or "").strip().lower()
+    return opened_at + _darkflow_shadow_forward_max_hold(interval, trade.timeframe), "interval_fallback"
+
+
+def _darkflow_shadow_forward_max_hold(interval: str | None, timeframe: str | None) -> timedelta:
+    interval_delta = _interval_delta(interval)
+    if interval_delta is not None:
+        return max(timedelta(hours=2), min(interval_delta * 12, timedelta(hours=72)))
+    raw_timeframe = str(timeframe or "").lower()
+    if raw_timeframe in {"long", "daily", "4h", "24h"}:
+        return timedelta(hours=24)
+    if raw_timeframe in {"mid", "1h"}:
+        return timedelta(hours=12)
+    return timedelta(hours=6)
+
+
+def _interval_delta(value: str | None) -> timedelta | None:
+    raw = str(value or "").strip().lower()
+    if len(raw) < 2 or not raw[:-1].isdigit():
+        return None
+    count = int(raw[:-1])
+    unit = raw[-1]
+    if count <= 0:
+        return None
+    if unit == "m":
+        return timedelta(minutes=count)
+    if unit == "h":
+        return timedelta(hours=count)
+    if unit == "d":
+        return timedelta(days=count)
+    return None
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return _aware(value)
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return _aware(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except ValueError:
+        return None
 
 
 def _slippage_rate(asset_tier: str) -> float:
