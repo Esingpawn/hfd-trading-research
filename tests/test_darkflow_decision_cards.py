@@ -460,6 +460,61 @@ async def test_refresh_audits_blocked_candidates_without_promoting_to_shadow(ses
 
 
 @pytest.mark.asyncio
+async def test_refresh_materializes_latest_candidates_before_promotion(session) -> None:
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-refresh-materializes-latest",
+            zone_key="zone-refresh-materializes-latest",
+            source_snapshot_id="snapshot-refresh-materializes-latest",
+            symbol="BTCUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            playbook="pullback_to_cost",
+            direction="long",
+            interaction_type="wick_pierce_reclaim",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+            },
+        )
+    )
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=base, created_at=base))
+    await session.commit()
+
+    result = await refresh_darkflow_candidate_promotion(
+        session,
+        limit=10,
+        shadow_limit=10,
+        max_candidate_age_hours=0,
+        entry_tolerance_pct=0.05,
+    )
+    candidate = await session.scalar(select(TradeCandidate))
+    trades = (await session.execute(select(ShadowPaperTrade))).scalars().all()
+
+    assert result["materialize"]["inserted"] == 1
+    assert result["audit"]["audited"] == 1
+    assert len(result["shadow_forward"]["opened"]) == 1
+    assert candidate is not None
+    assert candidate.shadow_status == "collecting"
+    assert len(trades) == 1
+
+
+@pytest.mark.asyncio
 async def test_shadow_forward_opens_isolated_v2_sample_after_audit(session) -> None:
     base = datetime.now(timezone.utc) - timedelta(minutes=5)
     session.add(

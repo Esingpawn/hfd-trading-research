@@ -18,6 +18,7 @@ from app.services.darkflow_decision_cards import (
     PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED,
     PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING,
     decision_card_from_interaction,
+    materialize_darkflow_trade_candidates,
 )
 DARKFLOW_V2_SHADOW_STRATEGY_NAME = "darkflow_v2_trade_candidate_shadow_forward_v1"
 DEFAULT_PROMOTION_LIMIT = 500
@@ -236,7 +237,11 @@ async def refresh_darkflow_candidate_promotion(
     shadow_limit: int = DEFAULT_SHADOW_FORWARD_LIMIT,
     max_candidate_age_hours: float = DEFAULT_MAX_CANDIDATE_AGE_HOURS,
     entry_tolerance_pct: float = DEFAULT_ENTRY_TOLERANCE_PCT,
+    materialize: bool = True,
 ) -> dict[str, Any]:
+    materialize_result: dict[str, Any] = {"enabled": False}
+    if materialize:
+        materialize_result = await materialize_darkflow_trade_candidates(session, limit=limit)
     audit = await audit_darkflow_trade_candidates(session, limit=limit, include_blocked=True)
     shadow = await open_darkflow_shadow_forward_samples(
         session,
@@ -245,7 +250,14 @@ async def refresh_darkflow_candidate_promotion(
         entry_tolerance_pct=entry_tolerance_pct,
     )
     summary = await darkflow_candidate_promotion_report(session, limit=limit)
-    return {"strategy_name": DARKFLOW_V2_SHADOW_STRATEGY_NAME, "audit": audit, "shadow_forward": shadow, "summary": summary, "policy": _policy()}
+    return {
+        "strategy_name": DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+        "materialize": materialize_result,
+        "audit": audit,
+        "shadow_forward": shadow,
+        "summary": summary,
+        "policy": _policy(),
+    }
 
 
 async def darkflow_candidate_promotion_report(

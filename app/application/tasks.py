@@ -449,6 +449,7 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
             shadow_limit=_payload_int(payload, "shadow_limit", 100),
             max_candidate_age_hours=_payload_float(payload, "max_candidate_age_hours", 72.0),
             entry_tolerance_pct=_payload_float(payload, "entry_tolerance_pct", 0.025),
+            materialize=_payload_bool(payload, "materialize", True),
         )
     if task_name in {"darkflow.trade_candidate_promotion_report", "darkflow-trade-candidate-promotion-report"}:
         return await darkflow_candidate_promotion_report(

@@ -157,6 +157,7 @@ async def run_darkflow_pipeline(
             session,
             limit=params["candidate_limit"],
             shadow_limit=params["shadow_limit"],
+            materialize=False,
         )
         payload = {
             "enabled": True,

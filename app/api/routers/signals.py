@@ -299,6 +299,7 @@ async def refresh_darkflow_trade_candidate_promotion_report(
     shadow_limit: int = Query(default=100, ge=1, le=1000),
     max_candidate_age_hours: float = Query(default=72.0, ge=0.0, le=720.0),
     entry_tolerance_pct: float = Query(default=0.025, ge=0.0, le=0.2),
+    materialize: bool = Query(default=True),
 ) -> dict[str, object]:
     return await refresh_darkflow_candidate_promotion(
         session,
@@ -306,6 +307,7 @@ async def refresh_darkflow_trade_candidate_promotion_report(
         shadow_limit=shadow_limit,
         max_candidate_age_hours=max_candidate_age_hours,
         entry_tolerance_pct=entry_tolerance_pct,
+        materialize=materialize,
     )
 
 
