@@ -10,6 +10,13 @@ def test_task_enqueue_exposes_research_quality_params() -> None:
     assert "min_unique_event_days" in query_params
     assert "min_unique_collection_runs" in query_params
     assert "replay_limit" in query_params
+    assert "shadow_limit" in query_params
+    assert "scoreboard_limit" in query_params
+    assert "min_closed_trades" in query_params
+    assert "max_candidate_age_hours" in query_params
+    assert "entry_tolerance_pct" in query_params
+    assert "materialize" in query_params
+    assert "mark_first" in query_params
     assert "force" in query_params
     assert "confirmation_window_minutes" in query_params
 
@@ -48,6 +55,8 @@ def test_expected_api_routes_are_registered() -> None:
         ("POST", "/darkflow/trade-candidates/audit"),
         ("POST", "/darkflow/trade-candidates/shadow-forward"),
         ("POST", "/darkflow/trade-candidates/promotion/refresh"),
+        ("GET", "/darkflow/alpha-scoreboard"),
+        ("POST", "/darkflow/alpha/accelerate"),
         ("GET", "/darkflow/interactions/backtest"),
         ("GET", "/darkflow/interactions/backtest/latest"),
         ("POST", "/darkflow/interactions/backtest"),

@@ -56,6 +56,7 @@ from app.services.darkflow_candidate_promotion import (
     open_darkflow_shadow_forward_samples,
     refresh_darkflow_candidate_promotion,
 )
+from app.services.darkflow_alpha import accelerate_darkflow_alpha, darkflow_alpha_scoreboard
 from app.services.darkflow_rules import darkflow_rulebook
 from app.services.indicator_catalog import indicator_experiment_coverage
 from app.services.signal_attribution import backfill_signal_outcomes, signal_effectiveness
@@ -308,6 +309,36 @@ async def refresh_darkflow_trade_candidate_promotion_report(
         max_candidate_age_hours=max_candidate_age_hours,
         entry_tolerance_pct=entry_tolerance_pct,
         materialize=materialize,
+    )
+
+
+@router.get("/darkflow/alpha-scoreboard")
+async def darkflow_alpha_scoreboard_report(
+    session: SessionDep,
+    limit: int = Query(default=50, ge=1, le=500),
+    min_closed_trades: int = Query(default=5, ge=0, le=5000),
+) -> dict[str, object]:
+    return await darkflow_alpha_scoreboard(session, limit=limit, min_closed_trades=min_closed_trades)
+
+
+@router.post("/darkflow/alpha/accelerate")
+async def accelerate_darkflow_alpha_report(
+    session: SessionDep,
+    candidate_limit: int = Query(default=500, ge=1, le=5000),
+    shadow_limit: int = Query(default=100, ge=1, le=1000),
+    max_candidate_age_hours: float = Query(default=72.0, ge=0.0, le=720.0),
+    entry_tolerance_pct: float = Query(default=0.025, ge=0.0, le=0.2),
+    materialize: bool = Query(default=True),
+    mark_first: bool = Query(default=True),
+) -> dict[str, object]:
+    return await accelerate_darkflow_alpha(
+        session,
+        candidate_limit=candidate_limit,
+        shadow_limit=shadow_limit,
+        max_candidate_age_hours=max_candidate_age_hours,
+        entry_tolerance_pct=entry_tolerance_pct,
+        materialize=materialize,
+        mark_first=mark_first,
     )
 
 

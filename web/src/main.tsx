@@ -298,6 +298,33 @@ type ShadowGroupStats = {
   promotion_blockers?: string[];
 };
 
+type DarkflowAlphaScoreboard = {
+  strategy_name?: string;
+  lineage?: string;
+  generated_at?: string | null;
+  rows?: DarkflowAlphaRow[];
+  totals?: ShadowUniquePlanStats & {
+    source_trade_count?: number;
+    unique_plan_count?: number;
+    duplicate_trade_count?: number;
+  };
+  thresholds?: Record<string, number>;
+  policy?: Policy & { report_only?: boolean; uses_shadow_forward_only?: boolean };
+};
+
+type DarkflowAlphaRow = ShadowUniquePlanStats & {
+  strategy_id: string;
+  strategy_name?: string;
+  symbol: string;
+  direction: string;
+  timeframe: string;
+  market_state: string;
+  unique_plan_count?: number;
+  source_trade_count?: number;
+  conclusion: string;
+  next_action: string;
+};
+
 type FrozenEntryPlan = {
   plan_type?: string;
   status?: string;
@@ -611,6 +638,7 @@ type LoadState = {
   paperTrades: PaperTrade[] | null;
   shadow: ShadowStats | null;
   shadowTrades: ShadowTrade[] | null;
+  alphaScoreboard: DarkflowAlphaScoreboard | null;
   rulebook: RulebookReport | null;
   playbooks: PlaybookCatalogReport | null;
   indicatorCoverage: IndicatorCoverageReport | null;
@@ -641,6 +669,7 @@ const EMPTY_STATE: LoadState = {
   paperTrades: null,
   shadow: null,
   shadowTrades: null,
+  alphaScoreboard: null,
   rulebook: null,
   playbooks: null,
   indicatorCoverage: null,
@@ -735,6 +764,7 @@ function App() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [taskMessage, setTaskMessage] = useState<string | null>(null);
 
   async function refresh() {
     setLoading(true);
@@ -747,6 +777,7 @@ function App() {
       loadSection("promotionGate", () => fetchJson<PromotionGateReport>("/darkflow/trade-candidates/promotion?limit=250", 45000)),
       loadSection("entryStates", () => fetchFirstJson<EntryPlanStateReport>(["/darkflow/trade-candidates/entry-plan-states?limit=250", "/darkflow/trade-candidates/entry-plan-states?limit=100"], 45000)),
       loadSection("darkflow", () => fetchJson<DarkflowBacktest>("/darkflow/interactions/backtest/latest")),
+      loadSection("alphaScoreboard", () => fetchJson<DarkflowAlphaScoreboard>("/darkflow/alpha-scoreboard?limit=50&min_closed_trades=1", 16000)),
       loadSection("safety", () => fetchJson<TradingSafety>("/trading/safety")),
     ]);
     setLoading(false);
@@ -787,8 +818,14 @@ function App() {
       if (data.paperStats === null && !errors.paperStats) void loadSection("paperStats", () => fetchJson<PaperStats>("/paper/stats", 12000));
       if (data.paperTrades === null && !errors.paperTrades) void loadSection("paperTrades", () => fetchJson<PaperTrade[]>("/paper/trades?limit=80", 12000));
     }
+    if (activePage === "experimentLab" && data.alphaScoreboard === null && !errors.alphaScoreboard) {
+      void loadSection("alphaScoreboard", () => fetchJson<DarkflowAlphaScoreboard>("/darkflow/alpha-scoreboard?limit=50&min_closed_trades=1", 16000));
+    }
     if (activePage === "shadow" && data.shadow === null && !errors.shadow) {
       void loadSection("shadow", () => fetchJson<ShadowStats>(`/shadow-paper/stats?strategy_name=${DARKFLOW_SHADOW_STRATEGY}`, 12000));
+    }
+    if (activePage === "shadow" && data.alphaScoreboard === null && !errors.alphaScoreboard) {
+      void loadSection("alphaScoreboard", () => fetchJson<DarkflowAlphaScoreboard>("/darkflow/alpha-scoreboard?limit=50&min_closed_trades=1", 16000));
     }
     if (activePage === "shadow" && data.shadowTrades === null && !errors.shadowTrades) {
       void loadSection("shadowTrades", () => fetchJson<ShadowTrade[]>(`/shadow-paper/trades?limit=80&strategy_name=${DARKFLOW_SHADOW_STRATEGY}`, 12000));
@@ -806,7 +843,18 @@ function App() {
       if (data.featurePaperAb === null && !errors.featurePaperAb) void loadSection("featurePaperAb", () => fetchJson<FeaturePaperAbReport>("/features/paper-ab/latest?horizon=30m", 16000));
       if (data.featureSegmentPaperAb === null && !errors.featureSegmentPaperAb) void loadSection("featureSegmentPaperAb", () => fetchJson<FeaturePaperAbReport>("/features/segment-paper-ab/latest?horizon=30m", 16000));
     }
-  }, [activePage, data.backtestsLatest, data.playbookBacktest, data.paperStats, data.paperTrades, data.shadow, data.shadowTrades, data.rulebook, data.playbooks, data.indicatorCoverage, data.experimentEffectiveness, data.featurePaperAb, data.featureSegmentPaperAb, errors.backtestsLatest, errors.playbookBacktest, errors.paperStats, errors.paperTrades, errors.shadow, errors.shadowTrades, errors.rulebook, errors.playbooks, errors.indicatorCoverage, errors.experimentEffectiveness, errors.featurePaperAb, errors.featureSegmentPaperAb]);
+  }, [activePage, data.backtestsLatest, data.playbookBacktest, data.paperStats, data.paperTrades, data.shadow, data.shadowTrades, data.alphaScoreboard, data.rulebook, data.playbooks, data.indicatorCoverage, data.experimentEffectiveness, data.featurePaperAb, data.featureSegmentPaperAb, errors.backtestsLatest, errors.playbookBacktest, errors.paperStats, errors.paperTrades, errors.shadow, errors.shadowTrades, errors.alphaScoreboard, errors.rulebook, errors.playbooks, errors.indicatorCoverage, errors.experimentEffectiveness, errors.featurePaperAb, errors.featureSegmentPaperAb]);
+
+  async function queueDarkflowAlphaAcceleration() {
+    setTaskMessage("正在排队暗流 Alpha 加速巡检...");
+    try {
+      const result = await fetchJson<{ task_run_id?: string; status?: string }>("/tasks/enqueue?task_name=darkflow.alpha_accelerate&candidate_limit=500&shadow_limit=100&scoreboard_limit=50", 16000, 1);
+      setTaskMessage(`已排队暗流 Alpha 加速巡检：${result.status ?? "recorded"}${result.task_run_id ? ` · ${result.task_run_id}` : ""}`);
+      void loadSection("alphaScoreboard", () => fetchJson<DarkflowAlphaScoreboard>("/darkflow/alpha-scoreboard?limit=50&min_closed_trades=1", 16000));
+    } catch (err) {
+      setTaskMessage(`排队失败：${errorText(err)}`);
+    }
+  }
 
   const rows = useMemo(() => buildRows(data), [data]);
   const tradeRows = useMemo(() => rows.filter(hasTradeEvidence), [rows]);
@@ -839,6 +887,7 @@ function App() {
         <MobileTopNav activePage={activePage} onNavigate={navigate} onMenu={() => setMobileMenuOpen(true)} />
         <TopStatusBar data={data} errors={relevantErrors} loading={loading} onRefresh={refresh} onJumpFreshness={() => navigate("dataFreshness")} />
         {Object.keys(relevantErrors).length > 0 && <LoadErrorBanner errors={relevantErrors} />}
+        {taskMessage && <div className="taskToast"><span>{taskMessage}</span><button onClick={() => setTaskMessage(null)} aria-label="关闭提示"><X size={14} /></button></div>}
         {activePage === "overview" && <OverviewPage data={data} rows={tradeRows} onNavigate={navigate} />}
         {activePage === "tradeCards" && (
           <TradeCardsPage
@@ -860,10 +909,10 @@ function App() {
         )}
         {activePage === "candidates" && <CandidatePoolPage rows={tradeRows} promotionGate={data.promotionGate} onSelect={(key) => { setSelectedKey(key); navigate("tradeCards"); }} />}
         {activePage === "entryPlans" && <EntryPlansPage report={data.entryStates} rows={rows} onSelect={(key) => { setSelectedKey(key); navigate("tradeCards"); }} />}
-        {activePage === "experimentLab" && <ExperimentLabPage data={data} rows={rows} onNavigate={navigate} />}
+        {activePage === "experimentLab" && <ExperimentLabPage data={data} rows={rows} onNavigate={navigate} onAccelerate={queueDarkflowAlphaAcceleration} />}
         {activePage === "backtest" && <BacktestPage data={data} />}
         {activePage === "paperTrading" && <PaperTradingPage stats={data.paperStats} trades={data.paperTrades} />}
-        {activePage === "shadow" && <ShadowPage data={data} rows={rows} />}
+        {activePage === "shadow" && <ShadowPage data={data} rows={rows} onAccelerate={queueDarkflowAlphaAcceleration} />}
         {activePage === "legacyLab" && <LegacyLabPage data={data} />}
         {activePage === "dataFreshness" && <DataFreshnessPage data={data} errors={errors} />}
         {activePage === "safety" && <SafetyPage safety={data.safety} />}
@@ -1235,10 +1284,12 @@ function EntryPlansPage({ report, rows, onSelect }: { report: EntryPlanStateRepo
   );
 }
 
-function ShadowPage({ data, rows }: { data: LoadState; rows: CardRow[] }) {
+function ShadowPage({ data, rows, onAccelerate }: { data: LoadState; rows: CardRow[]; onAccelerate: () => void }) {
   const equity = shadowEquitySeries(data.shadowTrades ?? []);
   const topGroups = (data.shadow?.by_candidate ?? []).slice(0, 10);
   const unique = data.shadow?.unique_plan_stats;
+  const alphaRows = data.alphaScoreboard?.rows ?? [];
+  const alphaTotals = data.alphaScoreboard?.totals;
   return (
     <div className="pageStack">
       <section className="metricGrid compactMetrics">
@@ -1247,6 +1298,17 @@ function ShadowPage({ data, rows }: { data: LoadState; rows: CardRow[] }) {
         <Metric title="唯一计划盈利因子" value={fmt(unique?.profit_factor ?? data.shadow?.profit_factor, 2)} detail={`原始 PF ${fmt(data.shadow?.profit_factor, 2)}`} tone="good" />
         <Metric title="唯一计划回撤" value={pct(unique?.max_drawdown)} detail={`已平仓 ${fmt(unique?.closed_trades ?? data.shadow?.closed_trades, 0)} · 开仓 ${fmt(unique?.open_trades ?? data.shadow?.open_trades, 0)}`} tone="warn" />
       </section>
+      <Panel title="暗流 Alpha 记分牌" subtitle="按教程剧本、币种、方向和市场状态聚合，只看隔离影子前向样本">
+        <div className="panelToolbar">
+          <div>
+            <strong>唯一计划 {fmt(alphaTotals?.unique_plan_count ?? alphaTotals?.total_trades, 0)}</strong>
+            <span>原始 {fmt(alphaTotals?.source_trade_count, 0)} · 重复 {fmt(alphaTotals?.duplicate_trade_count, 0)} · 更新时间 {timeText(data.alphaScoreboard?.generated_at)}</span>
+          </div>
+          <button onClick={onAccelerate}><RefreshCcw size={15} />排队加速巡检</button>
+        </div>
+        <AlphaScoreboardRows rows={alphaRows} />
+        {!alphaRows.length && <StateBox type="empty" title="Alpha 记分牌暂无可读样本" text="还没有足够的暗流 v2 影子前向闭合样本。点击排队加速巡检，让后台标记旧样本并尝试打开新的冻结入场影子样本。" />}
+      </Panel>
       <Panel title="影子统计口径" subtitle="默认看去重后的唯一市场暴露，原始交易记录仍完整保留">
         <p className="bodyText">唯一计划口径会把同一策略、币种、方向和相近入场计划的重复影子样本折叠后再计算胜率、盈利因子和回撤；原始口径用于审计数据库记录，不能单独作为晋级依据。</p>
       </Panel>
@@ -1273,13 +1335,54 @@ function ShadowPage({ data, rows }: { data: LoadState; rows: CardRow[] }) {
   );
 }
 
-function ExperimentLabPage({ data, rows, onNavigate }: { data: LoadState; rows: CardRow[]; onNavigate: (page: PageId) => void }) {
+function AlphaScoreboardRows({ rows }: { rows: DarkflowAlphaRow[] }) {
+  if (!rows.length) return null;
+  return (
+    <div className="alphaTable">
+      <div className="alphaHeader">
+        <span>暗流玩法</span>
+        <span>市场</span>
+        <span>样本质量</span>
+        <span>前向表现</span>
+        <span>结论</span>
+      </div>
+      {rows.slice(0, 12).map((row) => (
+        <div className="alphaRow" key={`${row.strategy_id}-${row.symbol}-${row.direction}-${row.market_state}`}>
+          <div>
+            <strong>{strategyText(row.strategy_id)}</strong>
+            <span>{row.strategy_id}</span>
+          </div>
+          <div>
+            <strong>{row.symbol} · {directionText(row.direction)}</strong>
+            <span>{marketStateText(row.market_state)} · {timeframeText(row.timeframe)}</span>
+          </div>
+          <div>
+            <strong>{fmt(row.closed_trades, 0)} 平仓 / {fmt(row.open_trades, 0)} 进行中</strong>
+            <span>唯一 {fmt(row.unique_plan_count ?? row.total_trades, 0)} · 重复 {fmt(row.duplicate_trade_count, 0)}</span>
+          </div>
+          <div>
+            <strong>胜率 {pct(row.win_rate)} · PF {fmt(row.profit_factor, 2)}</strong>
+            <span>回撤 {pct(row.max_drawdown)} · 均值 {pct(row.avg_pnl)}</span>
+          </div>
+          <div>
+            <StatusBadge tone={alphaTone(row.conclusion)} label={row.conclusion} />
+            <p>{row.next_action}</p>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ExperimentLabPage({ data, rows, onNavigate, onAccelerate }: { data: LoadState; rows: CardRow[]; onNavigate: (page: PageId) => void; onAccelerate: () => void }) {
   const effectRows = [...(data.experimentEffectiveness?.indicators ?? [])]
     .sort((a, b) => Number(b.sample_count ?? 0) - Number(a.sample_count ?? 0))
     .slice(0, 12);
   const labeledCount = Number(data.experimentEffectiveness?.event_count ?? 0);
   const deepUsed = indicatorMapRows(data, rows).filter((item) => item.stage === "候选/影子" || item.stage === "已进评分" || item.stage === "回测覆盖").length;
   const shadowClosed = Number(data.shadow?.unique_plan_stats?.closed_trades ?? data.shadow?.closed_trades ?? 0);
+  const alphaClosed = Number(data.alphaScoreboard?.totals?.closed_trades ?? 0);
+  const alphaReady = (data.alphaScoreboard?.rows ?? []).filter((item) => item.conclusion === "可进入人工复核").length;
   return (
     <div className="pageStack">
       <Panel title="信号闭环说明" subtitle="指标不能只看一次回测，必须经过实验、回测、影子/纸上前向验证">
@@ -1293,9 +1396,15 @@ function ExperimentLabPage({ data, rows, onNavigate }: { data: LoadState; rows: 
       <section className="metricGrid compactMetrics">
         <Metric title="暗流实验样本" value={fmt(labeledCount, 0)} detail="4h 指标有效性样本" tone="info" />
         <Metric title="深度使用指标" value={fmt(deepUsed, 0)} detail="进入评分、回测、候选或影子" tone={deepUsed > 0 ? "good" : "warn"} />
-        <Metric title="影子前向平仓" value={fmt(shadowClosed, 0)} detail="唯一计划口径优先" tone={shadowClosed > 0 ? "good" : "warn"} />
+        <Metric title="Alpha 前向平仓" value={fmt(alphaClosed || shadowClosed, 0)} detail={`${fmt(alphaReady, 0)} 类可进入人工复核`} tone={(alphaClosed || shadowClosed) > 0 ? "good" : "warn"} />
         <Metric title="纸上样本进度" value={pct(data.paperStats?.sample_progress)} detail={`${fmt(data.paperStats?.closed_trades, 0)} / ${fmt(data.paperStats?.minimum_sample, 0)}`} tone={data.paperStats?.sample_ready ? "good" : "warn"} />
       </section>
+      <Panel title="暗流 Alpha 加速" subtitle="让后台标记影子样本、刷新候选闸门、尝试打开新的冻结入场影子样本">
+        <div className="actionList compactActions">
+          <ActionItem icon={RefreshCcw} title="排队加速巡检" text="只运行隔离影子前向路径，不打开真实纸上交易，也不会触发实盘订单。" action="排队执行" onClick={onAccelerate} />
+          <ActionItem icon={LineChart} title="查看 Alpha 记分牌" text="按暗流玩法、币种、方向和市场状态查看哪类信号前向表现最好。" action="打开影子" onClick={() => onNavigate("shadow")} />
+        </div>
+      </Panel>
       <section className="twoColumn">
         <Panel title="主路径晋级判断" subtitle="只看暗流 v2 交易卡、教程剧本、影子前向和真实纸上">
           <div className="auditGrid labAudit">
@@ -1988,10 +2097,10 @@ function relevantLoadErrors(page: PageId, errors: LoadErrors): LoadErrors {
     tradeCards: ["cards", "candidates", "promotionGate", "entryStates"],
     candidates: ["candidates", "promotionGate"],
     entryPlans: ["entryStates"],
-    experimentLab: ["indicatorCoverage", "experimentEffectiveness", "featurePaperAb", "featureSegmentPaperAb"],
+    experimentLab: ["indicatorCoverage", "experimentEffectiveness", "alphaScoreboard", "featurePaperAb", "featureSegmentPaperAb"],
     backtest: ["darkflow", "backtestsLatest", "playbookBacktest"],
     paperTrading: ["paperStats", "paperTrades"],
-    shadow: ["shadow", "shadowTrades"],
+    shadow: ["shadow", "shadowTrades", "alphaScoreboard"],
     indicatorMap: ["rulebook", "playbooks", "indicatorCoverage"],
     legacyLab: ["featurePaperAb", "featureSegmentPaperAb"],
     dataFreshness: ["entryStates"],
@@ -2135,6 +2244,8 @@ function qualityText(value?: string) { return value === "ok" ? "正常" : value 
 function directionText(value: string) { return value === "long" ? "做多" : value === "short" ? "做空" : value; }
 function timeframeText(value: string) { return value === "30m" ? "30分钟" : value === "1h" ? "1小时" : value === "4h" ? "4小时" : value; }
 function strategyText(value: string) { return ({ pullback_to_cost: "成本带回踩", liquidity_sweep_reversal: "扫损反转", breakout_confirmation: "突破确认", trend_ride_extension: "趋势延展", darkflow_entry_plan: "冻结入场计划" } as Record<string, string>)[value] ?? value.replace(/_/g, " "); }
+function marketStateText(value: string) { return ({ trend_pullback: "趋势回踩", cost_pullback: "成本回踩", sweep_reversal: "扫损反转", liquidity_hunt_reversal: "扫损反转", structure_breakout: "结构突破", trend_extension: "趋势延展", darkflow_zone_reaction: "暗流区域反应", invalidation_or_breakdown: "结构破坏" } as Record<string, string>)[value] ?? readableCode(value || "未知市场"); }
+function alphaTone(value: string) { return ({ 可进入人工复核: "good", 样本收集中: "info", 观察名单: "warn", 暂停观察: "bad" } as Record<string, string>)[value] ?? "info"; }
 function signalText(value: string) { return signalDetail(value).title; }
 function signalDetail(value: string): ReasonItem {
   return ({
@@ -2181,7 +2292,7 @@ function auditText(value: string) { return ({ missing: "缺失", passed: "通过
 function shadowText(value: string) { return ({ not_started: "未开始", collecting: "采集中", retired: "已退休", failed: "未达标", passed: "已达标", closed: "已结束" } as Record<string, string>)[value] ?? value; }
 function entryStateText(value: string) { return ({ triggered: "已触发", waiting: "等待入场", missed: "已错过", expired: "时间过期", invalidated: "条件作废", missing_price: "缺少价格", invalid_shape: "形态异常", entry_plan_retired: "入场计划已退休", blocked: "研究阻断", shadow_candidate: "影子候选" } as Record<string, string>)[value] ?? value.replace(/_/g, " "); }
 function stateReasonText(value: string) { return ({ mark_price_inside_frozen_entry_range: "价格进入冻结入场区间", awaiting_frozen_entry_range: "尚未进入冻结入场区间", entry_range_missed: "价格已越过入场区间", valid_until_passed: "超过有效期", price_crosses_invalidation: "触发失效价", missing_latest_price: "缺少最新价格", invalid_long_frozen_entry_range: "多头入场区间异常", invalid_short_frozen_entry_range: "空头入场区间异常" } as Record<string, string>)[value] ?? blockerText(value); }
-function sectionLabel(key: SectionKey) { return ({ summary: "系统摘要", quality: "数据质量", cards: "交易卡片", candidates: "候选池", promotionGate: "晋级闸门", entryStates: "入场计划", darkflow: "暗流交互回测", backtestsLatest: "批量回测", playbookBacktest: "剧本回测", paperStats: "纸上统计", paperTrades: "纸上交易明细", shadow: "影子纸上", shadowTrades: "影子交易明细", rulebook: "教程规则", playbooks: "策略剧本", indicatorCoverage: "指标覆盖", experimentEffectiveness: "实验有效性", featurePaperAb: "特征纸上 A/B", featureSegmentPaperAb: "分段纸上 A/B", safety: "安全开关" } as Record<SectionKey, string>)[key]; }
+function sectionLabel(key: SectionKey) { return ({ summary: "系统摘要", quality: "数据质量", cards: "交易卡片", candidates: "候选池", promotionGate: "晋级闸门", entryStates: "入场计划", darkflow: "暗流交互回测", backtestsLatest: "批量回测", playbookBacktest: "剧本回测", paperStats: "纸上统计", paperTrades: "纸上交易明细", shadow: "影子纸上", shadowTrades: "影子交易明细", alphaScoreboard: "暗流 Alpha 记分牌", rulebook: "教程规则", playbooks: "策略剧本", indicatorCoverage: "指标覆盖", experimentEffectiveness: "实验有效性", featurePaperAb: "特征纸上 A/B", featureSegmentPaperAb: "分段纸上 A/B", safety: "安全开关" } as Record<SectionKey, string>)[key]; }
 function pageLabel(page: PageId) { return NAV_GROUPS.flatMap((group) => group.items).find((item) => item.id === page)?.label ?? page; }
 function pageTitleFromHash() { return pageLabel(pageFromHash()); }
 function pageFromHash(): PageId { const raw = window.location.hash.replace("#", ""); return NAV_GROUPS.flatMap((group) => group.items).some((item) => item.id === raw) ? raw as PageId : "overview"; }

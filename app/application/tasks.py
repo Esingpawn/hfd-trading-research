@@ -38,6 +38,7 @@ from app.services.darkflow_candidate_promotion import (
     open_darkflow_shadow_forward_samples,
     refresh_darkflow_candidate_promotion,
 )
+from app.services.darkflow_alpha import accelerate_darkflow_alpha, darkflow_alpha_scoreboard
 from app.services.paper import mark_open_trades, paper_scan
 from app.services.shadow_paper import (
     mark_shadow_paper_trades,
@@ -464,6 +465,23 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
         return await darkflow_candidate_promotion_report(
             session,
             limit=_payload_int(payload, "limit", 500),
+        )
+    if task_name in {"darkflow.alpha_scoreboard", "darkflow-alpha-scoreboard"}:
+        return await darkflow_alpha_scoreboard(
+            session,
+            limit=_payload_int(payload, "limit", 50),
+            min_closed_trades=_payload_int(payload, "min_closed_trades", 5),
+        )
+    if task_name in {"darkflow.alpha_accelerate", "darkflow-alpha-accelerate"}:
+        return await accelerate_darkflow_alpha(
+            session,
+            candidate_limit=_payload_int(payload, "candidate_limit", _payload_int(payload, "limit", 500)),
+            shadow_limit=_payload_int(payload, "shadow_limit", 100),
+            max_candidate_age_hours=_payload_float(payload, "max_candidate_age_hours", 72.0),
+            entry_tolerance_pct=_payload_float(payload, "entry_tolerance_pct", 0.025),
+            materialize=_payload_bool(payload, "materialize", True),
+            mark_first=_payload_bool(payload, "mark_first", True),
+            scoreboard_limit=_payload_int(payload, "scoreboard_limit", 50),
         )
     if task_name in {"darkflow.shadow_replay", "darkflow-shadow-replay"}:
         return await darkflow_shadow_replay(

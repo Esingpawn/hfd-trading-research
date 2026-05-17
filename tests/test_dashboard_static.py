@@ -99,3 +99,14 @@ def test_react_candidate_pool_summarizes_promotion_gate_counts() -> None:
     assert "晋级阻断" in source
     assert "观察入场区间" in source
     assert "候选已退休" in source
+
+
+def test_react_dashboard_exposes_darkflow_alpha_scoreboard() -> None:
+    source = Path("web/src/main.tsx").read_text(encoding="utf-8")
+
+    assert "/darkflow/alpha-scoreboard?limit=50&min_closed_trades=1" in source
+    assert "darkflow.alpha_accelerate" in source
+    assert "暗流 Alpha 记分牌" in source
+    assert "排队加速巡检" in source
+    assert "只运行隔离影子前向路径" in source
+    assert "可进入人工复核" in source

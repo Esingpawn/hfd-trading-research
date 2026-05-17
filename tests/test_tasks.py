@@ -82,6 +82,29 @@ def test_task_enqueue_payload_keeps_research_acceleration_limits() -> None:
     assert payload["candidate_limit"] == 5
 
 
+def test_task_enqueue_payload_keeps_darkflow_alpha_limits_and_false_flags() -> None:
+    payload = _task_enqueue_payload(
+        task_name="darkflow.alpha_accelerate",
+        candidate_limit=200,
+        shadow_limit=40,
+        scoreboard_limit=25,
+        min_closed_trades=3,
+        max_candidate_age_hours=24.0,
+        entry_tolerance_pct=0.02,
+        materialize=False,
+        mark_first=False,
+    )
+
+    assert payload["candidate_limit"] == 200
+    assert payload["shadow_limit"] == 40
+    assert payload["scoreboard_limit"] == 25
+    assert payload["min_closed_trades"] == 3
+    assert payload["max_candidate_age_hours"] == 24.0
+    assert payload["entry_tolerance_pct"] == 0.02
+    assert payload["materialize"] is False
+    assert payload["mark_first"] is False
+
+
 def test_task_enqueue_payload_keeps_stale_reaper_limits() -> None:
     payload = _task_enqueue_payload(
         task_name="tasks.reap_stale",
@@ -468,6 +491,49 @@ async def test_run_task_by_id_executes_darkflow_interaction_pipeline(session) ->
     assert len(interactions.scalars().all()) == 1
     assert len(shadow_rows.scalars().all()) == 1
     assert paper_rows.scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_run_task_by_id_executes_darkflow_alpha_scoreboard(session) -> None:
+    opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add(
+        ShadowPaperTrade(
+            strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+            candidate_type="trade_candidate",
+            candidate_key="alpha-candidate",
+            signal_key="alpha-signal",
+            symbol="BTCUSDT",
+            timeframe="short",
+            direction="long",
+            entry_price=100.0,
+            stop_loss=99.0,
+            take_profit=103.0,
+            position_size=1.0,
+            status="closed",
+            pnl=0.03,
+            opened_at=opened_at,
+            closed_at=opened_at + timedelta(minutes=30),
+            context={
+                "shadow_plan_fingerprint": "alpha-plan",
+                "candidate_snapshot": {
+                    "strategy_id": "pullback_to_cost",
+                    "strategy_name": "Pullback To Cost",
+                    "market_state": "trend_pullback",
+                },
+            },
+        )
+    )
+    item = TaskRun(task_name="darkflow.alpha_scoreboard", payload={"min_closed_trades": 1}, result={})
+    session.add(item)
+    await session.commit()
+
+    result = await run_task_by_id(session, item.id)
+
+    execution = result["result"]["execution"]
+    assert result["status"] == "completed"
+    assert execution["policy"]["opens_paper_trades"] is False
+    assert execution["policy"]["opens_live_orders"] is False
+    assert execution["rows"][0]["strategy_id"] == "pullback_to_cost"
 
 
 @pytest.mark.asyncio

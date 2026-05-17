@@ -52,6 +52,8 @@ TASK_SPECS: tuple[TaskSpec, ...] = (
     TaskSpec("darkflow.trade_candidate_shadow_forward", ("darkflow-trade-candidate-shadow-forward",), CORE_DARKFLOW_V2, True),
     TaskSpec("darkflow.trade_candidate_promotion", ("darkflow-trade-candidate-promotion",), CORE_DARKFLOW_V2, True),
     TaskSpec("darkflow.trade_candidate_promotion_report", ("darkflow-trade-candidate-promotion-report",), CORE_DARKFLOW_V2, True),
+    TaskSpec("darkflow.alpha_scoreboard", ("darkflow-alpha-scoreboard",), CORE_DARKFLOW_V2, True),
+    TaskSpec("darkflow.alpha_accelerate", ("darkflow-alpha-accelerate",), CORE_DARKFLOW_V2, True),
     TaskSpec("darkflow.shadow_replay", ("darkflow-shadow-replay",), CORE_DARKFLOW_V2, False, heavy=True),
     TaskSpec("data_quality.report", ("data-quality-report",), INFRASTRUCTURE_ONLY, True),
     TaskSpec("storage.maintain", ("storage-maintain",), INFRASTRUCTURE_ONLY, True, heavy=True),

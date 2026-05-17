@@ -33,11 +33,14 @@ async def enqueue_task_api(
     signal_limit: int | None = Query(default=None, ge=1),
     report_limit: int | None = Query(default=None, ge=1),
     replay_limit: int | None = Query(default=None, ge=1),
+    shadow_limit: int | None = Query(default=None, ge=1),
+    scoreboard_limit: int | None = Query(default=None, ge=1),
     queued_after_seconds: int | None = Query(default=None, ge=1),
     running_after_seconds: int | None = Query(default=None, ge=1),
     horizons: list[str] | None = Query(default=None),
     horizon: str | None = Query(default=None, pattern="^(30m|1h|4h|24h)$"),
     min_samples: int | None = Query(default=None, ge=1),
+    min_closed_trades: int | None = Query(default=None, ge=0),
     min_win_rate: float | None = Query(default=None, ge=0.0, le=1.0),
     min_profit_factor: float | None = Query(default=None, ge=0.0),
     min_avg_return: float | None = Query(default=None, ge=-1.0, le=1.0),
@@ -55,6 +58,10 @@ async def enqueue_task_api(
     max_same_return_samples: int | None = Query(default=None, ge=1),
     max_return_cluster_ratio: float | None = Query(default=None, ge=0.0, le=1.0),
     confirmation_window_minutes: int | None = Query(default=None, ge=1, le=1440),
+    max_candidate_age_hours: float | None = Query(default=None, ge=0.0),
+    entry_tolerance_pct: float | None = Query(default=None, ge=0.0, le=0.2),
+    materialize: bool | None = Query(default=None),
+    mark_first: bool | None = Query(default=None),
     persist: bool | None = Query(default=None),
     refresh_labeled: bool = Query(default=False),
     force: bool | None = Query(default=None),
@@ -71,11 +78,14 @@ async def enqueue_task_api(
         signal_limit=signal_limit,
         report_limit=report_limit,
         replay_limit=replay_limit,
+        shadow_limit=shadow_limit,
+        scoreboard_limit=scoreboard_limit,
         queued_after_seconds=queued_after_seconds,
         running_after_seconds=running_after_seconds,
         horizons=horizons,
         horizon=horizon,
         min_samples=min_samples,
+        min_closed_trades=min_closed_trades,
         min_win_rate=min_win_rate,
         min_profit_factor=min_profit_factor,
         min_avg_return=min_avg_return,
@@ -93,6 +103,10 @@ async def enqueue_task_api(
         max_same_return_samples=max_same_return_samples,
         max_return_cluster_ratio=max_return_cluster_ratio,
         confirmation_window_minutes=confirmation_window_minutes,
+        max_candidate_age_hours=max_candidate_age_hours,
+        entry_tolerance_pct=entry_tolerance_pct,
+        materialize=materialize,
+        mark_first=mark_first,
         persist=persist,
         refresh_labeled=refresh_labeled,
         force=force,
@@ -101,7 +115,7 @@ async def enqueue_task_api(
 
 
 def _task_enqueue_payload(**values: Any) -> dict[str, Any]:
-    keep_false = {"persist", "dedupe_research_samples", "force"}
+    keep_false = {"persist", "dedupe_research_samples", "force", "materialize", "mark_first"}
     return {
         key: value
         for key, value in values.items()
