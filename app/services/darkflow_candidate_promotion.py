@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from statistics import mean
 from typing import Any
 
-from sqlalchemy import case, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import DarkflowInteraction, ExperimentRun, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TradeCandidate, utc_now
@@ -110,6 +110,10 @@ async def open_darkflow_shadow_forward_samples(
     requested_limit = max(1, int(limit))
     scan_limit = _shadow_candidate_scan_limit(requested_limit)
     rows = await _shadow_ready_candidate_rows(session, limit=scan_limit)
+    market_stats = await _shadow_market_performance_stats(session)
+    stats_by_candidate = await _shadow_stats_by_candidate(session, [candidate.candidate_key for candidate in rows])
+    latest_prices = await _latest_prices(session, sorted({candidate.symbol for candidate in rows}))
+    open_plan_index = await _open_shadow_plan_index(session, rows)
     opened: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     updated: list[dict[str, Any]] = []
@@ -117,10 +121,10 @@ async def open_darkflow_shadow_forward_samples(
     scanned = 0
     for candidate in rows:
         scanned += 1
-        market_gate = await _shadow_market_performance_gate(session, candidate)
+        market_gate = _shadow_market_gate_from_stats(candidate, market_stats)
         if market_gate["decision"] == "paused":
             if _pause_shadow_candidate_for_market(candidate, gate=market_gate, now=now):
-                updated.append(_candidate_update_row(candidate, await _shadow_stats(session, candidate.candidate_key), reason="shadow_market_performance_paused"))
+                updated.append(_candidate_update_row(candidate, _candidate_stats(stats_by_candidate, candidate), reason="shadow_market_performance_paused"))
             skipped.append(
                 {
                     "candidate_key": candidate.candidate_key,
@@ -131,7 +135,7 @@ async def open_darkflow_shadow_forward_samples(
                 }
             )
             continue
-        stats = await _shadow_stats(session, candidate.candidate_key)
+        stats = _candidate_stats(stats_by_candidate, candidate)
         if _update_shadow_lifecycle(candidate, stats, now=now):
             updated.append(
                 {
@@ -148,7 +152,7 @@ async def open_darkflow_shadow_forward_samples(
         if stats["open_trades"]:
             skipped.append({"candidate_key": candidate.candidate_key, "reason": "open_shadow_forward_exists"})
             continue
-        duplicate_plan = await _open_duplicate_shadow_plan(session, candidate)
+        duplicate_plan = _open_duplicate_shadow_plan_from_index(open_plan_index, candidate)
         if duplicate_plan is not None:
             if _retire_shadow_candidate(
                 candidate,
@@ -179,7 +183,7 @@ async def open_darkflow_shadow_forward_samples(
                     updated.append(_candidate_update_row(candidate, stats, reason=plan_check))
             skipped.append({"candidate_key": candidate.candidate_key, "reason": plan_check})
             continue
-        price = await _latest_price(session, candidate.symbol)
+        price = latest_prices.get(candidate.symbol)
         if price is None or price <= 0:
             skipped.append({"candidate_key": candidate.candidate_key, "symbol": candidate.symbol, "reason": "missing_latest_price"})
             continue
@@ -216,6 +220,7 @@ async def open_darkflow_shadow_forward_samples(
             skipped.append({"candidate_key": candidate.candidate_key, "reason": "invalid_shadow_trade_shape"})
             continue
         session.add(trade)
+        _index_open_shadow_trade(open_plan_index, trade)
         candidate.shadow_status = "collecting"
         candidate.updated_at = now
         _apply_lifecycle(candidate)
@@ -508,7 +513,32 @@ async def _shadow_ready_candidate_rows(session: AsyncSession, *, limit: int) -> 
             candidate.id,
         )
 
-    return sorted(candidates, key=sort_key, reverse=True)
+    ranked = sorted(candidates, key=sort_key, reverse=True)
+    return _round_robin_candidates_by_market(ranked)
+
+
+def _round_robin_candidates_by_market(candidates: list[TradeCandidate]) -> list[TradeCandidate]:
+    buckets: dict[tuple[str, str], list[TradeCandidate]] = {}
+    market_order: list[tuple[str, str]] = []
+    for candidate in candidates:
+        key = (candidate.symbol, candidate.direction)
+        if key not in buckets:
+            buckets[key] = []
+            market_order.append(key)
+        buckets[key].append(candidate)
+    result: list[TradeCandidate] = []
+    while buckets:
+        for key in list(market_order):
+            bucket = buckets.get(key)
+            if not bucket:
+                buckets.pop(key, None)
+                market_order.remove(key)
+                continue
+            result.append(bucket.pop(0))
+            if not bucket:
+                buckets.pop(key, None)
+                market_order.remove(key)
+    return result
 
 
 async def _source_interaction(session: AsyncSession, candidate: TradeCandidate) -> DarkflowInteraction | None:
@@ -559,12 +589,24 @@ async def _latest_price(session: AsyncSession, symbol: str) -> float | None:
 
 
 async def _latest_prices(session: AsyncSession, symbols: list[str]) -> dict[str, float]:
-    prices: dict[str, float] = {}
-    for symbol in symbols:
-        price = await _latest_price(session, symbol)
-        if price is not None and price > 0:
-            prices[symbol] = price
-    return prices
+    if not symbols:
+        return {}
+    ranked = (
+        select(
+            PriceSnapshot.id.label("id"),
+            func.row_number()
+            .over(partition_by=PriceSnapshot.symbol, order_by=PriceSnapshot.created_at.desc())
+            .label("rn"),
+        )
+        .where(PriceSnapshot.symbol.in_(symbols))
+        .subquery()
+    )
+    rows = await session.execute(
+        select(PriceSnapshot.symbol, PriceSnapshot.price)
+        .join(ranked, PriceSnapshot.id == ranked.c.id)
+        .where(ranked.c.rn == 1)
+    )
+    return {symbol: float(price) for symbol, price in rows.all() if isinstance(price, (int, float)) and float(price) > 0}
 
 
 async def _shadow_stats(session: AsyncSession, candidate_key: str) -> dict[str, Any]:
@@ -591,6 +633,58 @@ async def _shadow_stats(session: AsyncSession, candidate_key: str) -> dict[str, 
         "avg_pnl": mean(returns) if returns else None,
         "profit_factor": gross_win / gross_loss if gross_loss else (999.0 if gross_win else None),
         "max_drawdown": _max_drawdown(returns),
+    }
+
+
+async def _shadow_stats_by_candidate(session: AsyncSession, candidate_keys: list[str]) -> dict[str, dict[str, Any]]:
+    keys = [key for key in dict.fromkeys(candidate_keys) if key]
+    if not keys:
+        return {}
+    rows = await session.scalars(
+        select(ShadowPaperTrade)
+        .where(
+            ShadowPaperTrade.strategy_name == DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+            ShadowPaperTrade.candidate_key.in_(keys),
+        )
+        .order_by(ShadowPaperTrade.opened_at)
+    )
+    buckets: dict[str, list[ShadowPaperTrade]] = {key: [] for key in keys}
+    for trade in rows.all():
+        buckets.setdefault(trade.candidate_key, []).append(trade)
+    return {key: _candidate_trade_stats(items) for key, items in buckets.items()}
+
+
+def _candidate_stats(stats_by_candidate: dict[str, dict[str, Any]], candidate: TradeCandidate) -> dict[str, Any]:
+    return stats_by_candidate.get(candidate.candidate_key) or _empty_candidate_stats()
+
+
+def _candidate_trade_stats(trades: list[ShadowPaperTrade]) -> dict[str, Any]:
+    closed = [item for item in trades if item.status == "closed" and isinstance(item.pnl, (int, float))]
+    wins = [float(item.pnl) for item in closed if float(item.pnl or 0.0) > 0]
+    losses = [float(item.pnl) for item in closed if float(item.pnl or 0.0) < 0]
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    returns = [float(item.pnl or 0.0) for item in closed]
+    return {
+        "open_trades": sum(1 for item in trades if item.status == "open"),
+        "closed_trades": len(closed),
+        "total_trades": len(trades),
+        "win_rate": len(wins) / len(closed) if closed else None,
+        "avg_pnl": mean(returns) if returns else None,
+        "profit_factor": gross_win / gross_loss if gross_loss else (999.0 if gross_win else None),
+        "max_drawdown": _max_drawdown(returns),
+    }
+
+
+def _empty_candidate_stats() -> dict[str, Any]:
+    return {
+        "open_trades": 0,
+        "closed_trades": 0,
+        "total_trades": 0,
+        "win_rate": None,
+        "avg_pnl": None,
+        "profit_factor": None,
+        "max_drawdown": 0.0,
     }
 
 
@@ -770,6 +864,86 @@ async def _open_duplicate_shadow_plan(session: AsyncSession, candidate: TradeCan
         if _candidate_snapshot_matches_plan(candidate, snapshot):
             return trade
     return None
+
+
+async def _open_shadow_plan_index(
+    session: AsyncSession,
+    candidates: list[TradeCandidate],
+) -> dict[tuple[str, str], dict[str, ShadowPaperTrade]]:
+    markets = sorted({(candidate.symbol, candidate.direction) for candidate in candidates})
+    if not markets:
+        return {}
+    symbols = sorted({symbol for symbol, _direction in markets})
+    directions = sorted({direction for _symbol, direction in markets})
+    rows = await session.scalars(
+        select(ShadowPaperTrade)
+        .where(
+            ShadowPaperTrade.strategy_name == DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+            ShadowPaperTrade.status == "open",
+            ShadowPaperTrade.symbol.in_(symbols),
+            ShadowPaperTrade.direction.in_(directions),
+        )
+        .order_by(ShadowPaperTrade.opened_at.desc(), ShadowPaperTrade.id.desc())
+    )
+    index: dict[tuple[str, str], dict[str, ShadowPaperTrade]] = {}
+    for trade in rows.all():
+        market = (trade.symbol, trade.direction)
+        if market not in markets:
+            continue
+        bucket = index.setdefault(market, {})
+        for key in _trade_open_plan_index_keys(trade):
+            bucket.setdefault(key, trade)
+    return index
+
+
+def _open_duplicate_shadow_plan_from_index(
+    index: dict[tuple[str, str], dict[str, ShadowPaperTrade]],
+    candidate: TradeCandidate,
+) -> ShadowPaperTrade | None:
+    fingerprint = _candidate_plan_fingerprint(candidate)
+    if fingerprint is None:
+        return None
+    return index.get((candidate.symbol, candidate.direction), {}).get(f"candidate:{fingerprint}")
+
+
+def _index_open_shadow_trade(
+    index: dict[tuple[str, str], dict[str, ShadowPaperTrade]],
+    trade: ShadowPaperTrade,
+) -> None:
+    bucket = index.setdefault((trade.symbol, trade.direction), {})
+    for key in _trade_open_plan_index_keys(trade):
+        bucket[key] = trade
+
+
+def _trade_open_plan_index_keys(trade: ShadowPaperTrade) -> list[str]:
+    keys = {_trade_market_plan_fingerprint(trade)}
+    candidate_key = _candidate_plan_fingerprint_from_trade(trade)
+    if candidate_key:
+        keys.add(f"candidate:{candidate_key}")
+    return list(keys)
+
+
+def _candidate_plan_fingerprint_from_trade(trade: ShadowPaperTrade) -> str | None:
+    context = trade.context if isinstance(trade.context, dict) else {}
+    snapshot = context.get("candidate_snapshot") if isinstance(context.get("candidate_snapshot"), dict) else {}
+    strategy_id = str(snapshot.get("strategy_id") or "")
+    timeframe = str(snapshot.get("timeframe") or trade.timeframe or "")
+    entry = _float(snapshot.get("entry_price")) or float(trade.entry_price or 0.0)
+    stop = _float(snapshot.get("stop_price")) or float(trade.stop_loss or 0.0)
+    target = _float(snapshot.get("target_price")) or float(trade.take_profit or 0.0)
+    if not strategy_id or entry <= 0 or stop <= 0 or target <= 0:
+        return None
+    return ":".join(
+        [
+            strategy_id,
+            trade.symbol,
+            timeframe,
+            trade.direction,
+            _rounded_price_bucket(entry),
+            _rounded_price_bucket(stop),
+            _rounded_price_bucket(target),
+        ]
+    )
 
 
 def _candidate_plan_fingerprint(candidate: TradeCandidate) -> str | None:

@@ -16,6 +16,7 @@ DEFAULT_DECISION_CARD_LIMIT = 20
 DEFAULT_MIN_DECISION_CARD_QUALITY = 55.0
 DEFAULT_MIN_RR_RATIO = 1.5
 DEFAULT_TRADE_CANDIDATE_LIMIT = 100
+DEFAULT_TRADE_CANDIDATE_FETCH_MULTIPLIER = 3
 FROZEN_ENTRY_PLAN_TYPE = "frozen_darkflow_v2_entry_plan"
 DEFAULT_ENTRY_PLAN_VALID_BARS = 12
 DEFAULT_ENTRY_PLAN_TOLERANCE_PCT = 0.006
@@ -91,9 +92,11 @@ async def materialize_darkflow_trade_candidates(
     min_quality_score: float = DEFAULT_MIN_DECISION_CARD_QUALITY,
     min_rr_ratio: float = DEFAULT_MIN_RR_RATIO,
 ) -> dict[str, Any]:
+    requested_limit = max(1, int(limit))
+    card_fetch_limit = _materialize_card_fetch_limit(requested_limit)
     report = await latest_darkflow_decision_cards(
         session,
-        limit=limit,
+        limit=card_fetch_limit,
         min_quality_score=min_quality_score,
         min_rr_ratio=min_rr_ratio,
     )
@@ -158,7 +161,8 @@ async def materialize_darkflow_trade_candidates(
         await session.commit()
     return {
         "strategy_family": "darkflow_trade_candidates_v1",
-        "requested_limit": report["requested_limit"],
+        "requested_limit": requested_limit,
+        "card_fetch_limit": card_fetch_limit,
         "scanned_interactions": report["scanned_interactions"],
         "card_count": report["card_count"],
         "inserted": inserted,
@@ -168,7 +172,12 @@ async def materialize_darkflow_trade_candidates(
         "rows": rows,
         "thresholds": report["thresholds"],
         "policy": _policy(),
-    }
+}
+
+
+def _materialize_card_fetch_limit(limit: int) -> int:
+    requested = max(1, int(limit))
+    return min(max(requested * DEFAULT_TRADE_CANDIDATE_FETCH_MULTIPLIER, requested), 1000)
 
 
 async def latest_materialized_trade_candidates(

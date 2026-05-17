@@ -356,6 +356,52 @@ async def test_trade_candidates_retire_duplicate_exposure_plans_during_materiali
 
 
 @pytest.mark.asyncio
+async def test_trade_candidate_materialize_fetches_deeper_card_pool_for_coverage(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index, symbol in enumerate(["BTCUSDT", "ETHUSDT", "SOLUSDT"]):
+        session.add(
+            DarkflowInteraction(
+                interaction_key=f"candidate-deeper-pool-{index}",
+                zone_key=f"zone-candidate-deeper-pool-{index}",
+                source_snapshot_id=f"snapshot-candidate-deeper-pool-{index}",
+                symbol=symbol,
+                timeframe="short",
+                interval="30m",
+                indicator="trend_price",
+                playbook="pullback_to_cost",
+                direction="long",
+                interaction_type="wick_pierce_reclaim",
+                event_ts=base + timedelta(minutes=index),
+                entry_price=100.0 + index,
+                stop_price=99.0 + index,
+                target_price=102.0 + index,
+                invalidation_price=99.0 + index,
+                exit_price=102.0 + index,
+                exit_ts=base + timedelta(minutes=30 + index),
+                exit_reason="target_hit",
+                pnl_pct=0.02,
+                r_multiple=2.0,
+                mfe=0.025,
+                mae=-0.004,
+                status="backtested",
+                context={
+                    "interaction_schema": "v2",
+                    "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+                },
+            )
+        )
+    await session.commit()
+
+    result = await materialize_darkflow_trade_candidates(session, limit=1)
+    candidates = (await session.execute(select(TradeCandidate))).scalars().all()
+
+    assert result["requested_limit"] == 1
+    assert result["card_fetch_limit"] > result["requested_limit"]
+    assert result["inserted"] == 3
+    assert {candidate.symbol for candidate in candidates} == {"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+
+
+@pytest.mark.asyncio
 async def test_trade_candidate_refresh_preserves_lifecycle_when_plan_unchanged(session) -> None:
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
     session.add(
@@ -778,6 +824,64 @@ async def test_shadow_forward_scans_past_expired_front_rows_to_open_later_candid
     assert [item["symbol"] for item in result["opened"]] == ["BTCUSDT"]
     assert len(trades) == 1
     assert trades[0].symbol == "BTCUSDT"
+
+
+@pytest.mark.asyncio
+async def test_shadow_forward_round_robins_markets_for_sample_coverage(session) -> None:
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    rows = [
+        ("BTCUSDT", "long", 100.0, 99.0, 102.0),
+        ("BTCUSDT", "long", 100.2, 99.2, 102.2),
+        ("BTCUSDT", "long", 100.4, 99.4, 102.4),
+        ("ETHUSDT", "long", 100.0, 99.0, 102.0),
+    ]
+    for index, (symbol, direction, entry, stop, target) in enumerate(rows):
+        session.add(
+            DarkflowInteraction(
+                interaction_key=f"candidate-round-robin-{index}",
+                zone_key=f"zone-round-robin-{index}",
+                source_snapshot_id=f"snapshot-round-robin-{index}",
+                symbol=symbol,
+                timeframe="short",
+                interval="30m",
+                indicator="trend_price",
+                playbook="pullback_to_cost",
+                direction=direction,
+                interaction_type="wick_pierce_reclaim",
+                event_ts=base + timedelta(seconds=index),
+                entry_price=entry,
+                stop_price=stop,
+                target_price=target,
+                invalidation_price=stop,
+                exit_price=target,
+                exit_ts=base + timedelta(minutes=30 + index),
+                exit_reason="target_hit",
+                pnl_pct=0.02,
+                r_multiple=2.0,
+                mfe=0.025,
+                mae=-0.004,
+                status="backtested",
+                context={
+                    "interaction_schema": "v2",
+                    "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+                },
+            )
+        )
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=base, created_at=base))
+    session.add(PriceSnapshot(symbol="ETHUSDT", price=100.0, raw_payload={}, collected_at=base, created_at=base))
+    await session.commit()
+    await materialize_darkflow_trade_candidates(session, limit=10)
+    await audit_darkflow_trade_candidates(session, limit=10)
+
+    result = await open_darkflow_shadow_forward_samples(
+        session,
+        limit=2,
+        max_candidate_age_hours=0,
+        entry_tolerance_pct=0.05,
+    )
+
+    assert len(result["opened"]) == 2
+    assert {item["symbol"] for item in result["opened"]} == {"BTCUSDT", "ETHUSDT"}
 
 
 @pytest.mark.asyncio
