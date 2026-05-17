@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from statistics import mean
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import DarkflowInteraction, ExperimentRun, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TradeCandidate, utc_now
@@ -20,6 +20,7 @@ from app.services.darkflow_decision_cards import (
 DARKFLOW_V2_SHADOW_STRATEGY_NAME = "darkflow_v2_trade_candidate_shadow_forward_v1"
 DEFAULT_PROMOTION_LIMIT = 500
 DEFAULT_SHADOW_FORWARD_LIMIT = 100
+DEFAULT_SHADOW_FORWARD_SCAN_MULTIPLIER = 5
 DEFAULT_MAX_CANDIDATE_AGE_HOURS = 72.0
 DEFAULT_ENTRY_TOLERANCE_PCT = 0.025
 SHADOW_FEE_RATE = 0.0004
@@ -89,12 +90,16 @@ async def open_darkflow_shadow_forward_samples(
     max_candidate_age_hours: float = DEFAULT_MAX_CANDIDATE_AGE_HOURS,
     entry_tolerance_pct: float = DEFAULT_ENTRY_TOLERANCE_PCT,
 ) -> dict[str, Any]:
-    rows = await _shadow_ready_candidate_rows(session, limit=limit)
+    requested_limit = max(1, int(limit))
+    scan_limit = _shadow_candidate_scan_limit(requested_limit)
+    rows = await _shadow_ready_candidate_rows(session, limit=scan_limit)
     opened: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     updated: list[dict[str, Any]] = []
     now = utc_now()
+    scanned = 0
     for candidate in rows:
+        scanned += 1
         stats = await _shadow_stats(session, candidate.candidate_key)
         if _update_shadow_lifecycle(candidate, stats, now=now):
             updated.append(
@@ -167,11 +172,15 @@ async def open_darkflow_shadow_forward_samples(
                 "entry_plan_state": entry_plan_state,
             }
         )
+        if len(opened) >= requested_limit:
+            break
     if opened or updated:
         await session.commit()
     return {
         "strategy_name": DARKFLOW_V2_SHADOW_STRATEGY_NAME,
-        "requested_limit": max(1, int(limit)),
+        "requested_limit": requested_limit,
+        "scan_limit": scan_limit,
+        "scanned": scanned,
         "opened": opened,
         "updated": updated[:100],
         "skipped": skipped[:100],
@@ -191,7 +200,7 @@ async def refresh_darkflow_candidate_promotion(
     max_candidate_age_hours: float = DEFAULT_MAX_CANDIDATE_AGE_HOURS,
     entry_tolerance_pct: float = DEFAULT_ENTRY_TOLERANCE_PCT,
 ) -> dict[str, Any]:
-    audit = await audit_darkflow_trade_candidates(session, limit=limit)
+    audit = await audit_darkflow_trade_candidates(session, limit=limit, include_blocked=True)
     shadow = await open_darkflow_shadow_forward_samples(
         session,
         limit=shadow_limit,
@@ -395,6 +404,11 @@ async def _candidate_rows(session: AsyncSession, *, limit: int, include_blocked:
     return list(rows.all())
 
 
+def _shadow_candidate_scan_limit(limit: int) -> int:
+    requested = max(1, int(limit))
+    return min(max(requested * DEFAULT_SHADOW_FORWARD_SCAN_MULTIPLIER, requested + 100), 1000)
+
+
 async def _shadow_ready_candidate_rows(session: AsyncSession, *, limit: int) -> list[TradeCandidate]:
     rows = await session.scalars(
         select(TradeCandidate)
@@ -404,7 +418,12 @@ async def _shadow_ready_candidate_rows(session: AsyncSession, *, limit: int) -> 
             TradeCandidate.anti_repaint_status == "passed",
             TradeCandidate.shadow_status.in_(["not_started", "collecting"]),
         )
-        .order_by(TradeCandidate.setup_time.desc(), TradeCandidate.updated_at.desc(), TradeCandidate.id.desc())
+        .order_by(
+            case((TradeCandidate.shadow_status == "not_started", 0), else_=1),
+            TradeCandidate.setup_time.desc(),
+            TradeCandidate.updated_at.desc(),
+            TradeCandidate.id.desc(),
+        )
         .limit(max(1, int(limit)))
     )
     return list(rows.all())
