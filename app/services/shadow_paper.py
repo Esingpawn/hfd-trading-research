@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from statistics import mean
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import FeatureEvent, FeatureLabel, PriceSnapshot, ShadowPaperTrade
@@ -324,10 +324,18 @@ async def shadow_paper_stats(session: AsyncSession, *, strategy_name: str | None
     rows = await session.execute(query)
     trades = rows.scalars().all()
     totals = _trade_stats(trades)
+    unique_plan_trades = _unique_plan_trades(trades)
+    unique_plan_stats = _trade_stats(unique_plan_trades)
     by_candidate = _grouped_trade_stats(trades, key_func=_candidate_group_key)[:20]
     return {
         "strategy_name": strategy_name or "all_shadow_strategies",
         **totals,
+        "unique_plan_stats": {
+            **unique_plan_stats,
+            "source_trade_count": len(trades),
+            "duplicate_trade_count": max(0, len(trades) - len(unique_plan_trades)),
+            "dedupe_method": "shadow_plan_fingerprint_or_price_bucket",
+        },
         "by_candidate": by_candidate,
         "by_horizon": _grouped_trade_stats(trades, key_func=_horizon_group_key)[:20],
         "by_symbol": _grouped_trade_stats(trades, key_func=_symbol_group_key)[:20],
@@ -371,6 +379,64 @@ def _trade_stats(trades: list[ShadowPaperTrade]) -> dict[str, Any]:
         "latest_opened_at": max(opened_times) if opened_times else None,
         "latest_closed_at": max(closed_times) if closed_times else None,
     }
+
+
+def _unique_plan_trades(trades: list[ShadowPaperTrade]) -> list[ShadowPaperTrade]:
+    best_by_plan: dict[str, ShadowPaperTrade] = {}
+    for trade in trades:
+        key = _trade_plan_fingerprint(trade)
+        current = best_by_plan.get(key)
+        if current is None or _trade_plan_rank(trade) > _trade_plan_rank(current):
+            best_by_plan[key] = trade
+    return list(best_by_plan.values())
+
+
+def _trade_plan_rank(trade: ShadowPaperTrade) -> tuple[int, datetime, str]:
+    closed_rank = 1 if trade.status == "closed" and isinstance(trade.pnl, (int, float)) else 0
+    observed_at = trade.closed_at or trade.opened_at or datetime.min.replace(tzinfo=timezone.utc)
+    return (closed_rank, _aware(observed_at), trade.id)
+
+
+def _trade_plan_fingerprint(trade: ShadowPaperTrade) -> str:
+    context = trade.context if isinstance(trade.context, dict) else {}
+    explicit = context.get("shadow_plan_fingerprint")
+    if explicit:
+        return f"explicit:{explicit}"
+    snapshot = context.get("candidate_snapshot") if isinstance(context.get("candidate_snapshot"), dict) else {}
+    strategy_id = str(snapshot.get("strategy_id") or trade.strategy_name)
+    entry = _number(snapshot.get("entry_price")) or float(trade.entry_price)
+    stop = _number(snapshot.get("stop_price")) or float(trade.stop_loss)
+    target = _number(snapshot.get("target_price")) or float(trade.take_profit)
+    opened_slot = _aware(trade.opened_at).replace(minute=0, second=0, microsecond=0).isoformat() if trade.opened_at else "unknown"
+    return ":".join(
+        [
+            "bucket",
+            trade.strategy_name,
+            strategy_id,
+            trade.symbol,
+            trade.timeframe,
+            trade.direction,
+            _trade_horizon(trade),
+            opened_slot,
+            _rounded_price_bucket(entry),
+            _rounded_price_bucket(stop),
+            _rounded_price_bucket(target),
+        ]
+    )
+
+
+def _rounded_price_bucket(price: float) -> str:
+    if price >= 1000:
+        digits = 0
+    elif price >= 100:
+        digits = 1
+    elif price >= 10:
+        digits = 2
+    elif price >= 1:
+        digits = 4
+    else:
+        digits = 6
+    return f"{round(float(price), digits):.{digits}f}"
 
 
 def _grouped_trade_stats(

@@ -311,6 +311,85 @@ async def test_shadow_paper_stats_groups_by_candidate(session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_shadow_paper_stats_reports_unique_plan_deduped_metrics(session) -> None:
+    opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    common_context = {
+        "horizon": "live",
+        "shadow_plan_fingerprint": "pullback:BTCUSDT:short:long:100.0:99.0:102.0",
+    }
+    session.add_all(
+        [
+            ShadowPaperTrade(
+                strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+                candidate_type="trade_candidate",
+                candidate_key="candidate-a",
+                signal_key="signal-duplicate-win",
+                symbol="BTCUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=100.0,
+                stop_loss=99.0,
+                take_profit=102.0,
+                position_size=1.0,
+                status="closed",
+                pnl=0.02,
+                opened_at=opened_at,
+                closed_at=opened_at + timedelta(minutes=30),
+                context=common_context,
+            ),
+            ShadowPaperTrade(
+                strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+                candidate_type="trade_candidate",
+                candidate_key="candidate-b",
+                signal_key="signal-duplicate-loss",
+                symbol="BTCUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=100.0,
+                stop_loss=99.0,
+                take_profit=102.0,
+                position_size=1.0,
+                status="closed",
+                pnl=-0.01,
+                opened_at=opened_at,
+                closed_at=opened_at + timedelta(minutes=10),
+                context=common_context,
+            ),
+            ShadowPaperTrade(
+                strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+                candidate_type="trade_candidate",
+                candidate_key="candidate-c",
+                signal_key="signal-unique-loss",
+                symbol="ETHUSDT",
+                timeframe="short",
+                direction="short",
+                entry_price=100.0,
+                stop_loss=101.0,
+                take_profit=98.0,
+                position_size=1.0,
+                status="closed",
+                pnl=-0.01,
+                opened_at=opened_at,
+                closed_at=opened_at + timedelta(minutes=20),
+                context={"horizon": "live", "shadow_plan_fingerprint": "pullback:ETHUSDT:short:short:100.0:101.0:98.0"},
+            ),
+        ]
+    )
+    await session.commit()
+
+    stats = await shadow_paper_stats(session, strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1")
+    unique = stats["unique_plan_stats"]
+
+    assert stats["closed_trades"] == 3
+    assert stats["profit_factor"] == pytest.approx(1.0)
+    assert unique["source_trade_count"] == 3
+    assert unique["duplicate_trade_count"] == 1
+    assert unique["closed_trades"] == 2
+    assert unique["win_rate"] == 0.5
+    assert unique["profit_factor"] == pytest.approx(2.0)
+
+
+@pytest.mark.asyncio
 async def test_shadow_paper_stats_can_filter_by_strategy(session) -> None:
     opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     session.add_all(
