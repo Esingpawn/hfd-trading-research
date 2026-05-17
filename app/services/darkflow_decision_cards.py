@@ -102,15 +102,34 @@ async def materialize_darkflow_trade_candidates(
     unchanged = 0
     rows: list[dict[str, Any]] = []
     now = utc_now()
+    representatives = _representative_exposure_candidates(report["cards"])
     for card in report["cards"]:
         existing = await session.scalar(
             select(TradeCandidate).where(TradeCandidate.candidate_key == card["card_id"])
         )
-        payload = _candidate_payload(card, now=now)
+        exposure_fingerprint = _exposure_plan_fingerprint(card)
+        duplicate_of = None
+        if exposure_fingerprint is not None:
+            representative = representatives.get(exposure_fingerprint)
+            representative_key = str(representative.get("card_id")) if representative else None
+            if representative_key and representative_key != str(card["card_id"]):
+                duplicate_of = representative_key
+        payload = _candidate_payload(
+            card,
+            now=now,
+            duplicate_of=duplicate_of,
+            exposure_fingerprint=exposure_fingerprint,
+        )
         if existing is None:
             session.add(TradeCandidate(**payload))
             inserted += 1
-            rows.append({"candidate_key": card["card_id"], "action": "inserted", "status": payload["status"]})
+            rows.append({
+                "candidate_key": card["card_id"],
+                "action": "inserted",
+                "status": payload["status"],
+                "promotion_status": payload["promotion_status"],
+                "duplicate_of": duplicate_of,
+            })
             continue
         payload = _preserve_candidate_lifecycle(existing, payload)
         if _candidate_needs_update(existing, payload):
@@ -119,10 +138,22 @@ async def materialize_darkflow_trade_candidates(
                     continue
                 setattr(existing, key, value)
             updated += 1
-            rows.append({"candidate_key": card["card_id"], "action": "updated", "status": payload["status"]})
+            rows.append({
+                "candidate_key": card["card_id"],
+                "action": "updated",
+                "status": payload["status"],
+                "promotion_status": payload["promotion_status"],
+                "duplicate_of": duplicate_of,
+            })
         else:
             unchanged += 1
-            rows.append({"candidate_key": card["card_id"], "action": "unchanged", "status": existing.status})
+            rows.append({
+                "candidate_key": card["card_id"],
+                "action": "unchanged",
+                "status": existing.status,
+                "promotion_status": existing.promotion_status,
+                "duplicate_of": duplicate_of,
+            })
     if inserted or updated:
         await session.commit()
     return {
@@ -133,6 +164,7 @@ async def materialize_darkflow_trade_candidates(
         "inserted": inserted,
         "updated": updated,
         "unchanged": unchanged,
+        "duplicate_exposure_count": sum(1 for row in rows if row.get("duplicate_of")),
         "rows": rows,
         "thresholds": report["thresholds"],
         "policy": _policy(),
@@ -455,12 +487,29 @@ def _policy() -> dict[str, Any]:
     }
 
 
-def _candidate_payload(card: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+def _candidate_payload(
+    card: dict[str, Any],
+    *,
+    now: datetime,
+    duplicate_of: str | None = None,
+    exposure_fingerprint: str | None = None,
+) -> dict[str, Any]:
     risk_gate = card["risk_gate"]
     entry_plan = card["entry_plan"]
     target = entry_plan["take_profit_levels"][0]
     status = str(risk_gate["status"])
     promotion_blockers = _normalized_promotion_blockers(risk_gate.get("promotion_blockers") or [])
+    decision_payload = dict(card)
+    if exposure_fingerprint:
+        decision_payload["exposure_plan_fingerprint"] = exposure_fingerprint
+    if duplicate_of:
+        status = "entry_plan_retired"
+        promotion_blockers = _normalized_promotion_blockers([PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN])
+        decision_payload["duplicate_shadow_plan"] = {
+            "duplicate_of": duplicate_of,
+            "reason": "same_frozen_entry_exposure",
+            "retired_at": _iso(now),
+        }
     return {
         "candidate_key": str(card["card_id"]),
         "source_type": "darkflow_interaction",
@@ -487,18 +536,18 @@ def _candidate_payload(card: dict[str, Any], *, now: datetime) -> dict[str, Any]
         "status": status,
         "promotion_status": _promotion_status(
             status=status,
-            anti_repaint_status="missing",
-            shadow_status="not_started",
+            anti_repaint_status="passed" if duplicate_of else "missing",
+            shadow_status="retired" if duplicate_of else "not_started",
             promotion_blockers=promotion_blockers,
         ),
-        "anti_repaint_status": "missing",
-        "shadow_status": "not_started",
+        "anti_repaint_status": "passed" if duplicate_of else "missing",
+        "shadow_status": "retired" if duplicate_of else "not_started",
         "paper_eligible": False,
         "live_eligible": False,
         "blockers": list(risk_gate.get("blockers") or []),
         "promotion_blockers": promotion_blockers,
         "supporting_signals": list(card.get("supporting_signals") or []),
-        "decision_payload": card,
+        "decision_payload": decision_payload,
         "materialized_at": now,
         "updated_at": now,
     }
@@ -525,6 +574,62 @@ def _candidate_needs_update(existing: TradeCandidate, payload: dict[str, Any]) -
     return any(getattr(existing, field) != payload[field] for field in fields)
 
 
+def _representative_exposure_candidates(cards: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    representatives: dict[str, dict[str, Any]] = {}
+    for card in cards:
+        fingerprint = _exposure_plan_fingerprint(card)
+        if fingerprint is None:
+            continue
+        current = representatives.get(fingerprint)
+        if current is None or _representative_rank(card) > _representative_rank(current):
+            representatives[fingerprint] = card
+    return representatives
+
+
+def _representative_rank(card: dict[str, Any]) -> tuple[float, float, str]:
+    scores = card.get("scores") if isinstance(card.get("scores"), dict) else {}
+    risk = card.get("risk") if isinstance(card.get("risk"), dict) else {}
+    return (
+        _float(scores.get("quality_score")) or 0.0,
+        _float(risk.get("rr_ratio")) or 0.0,
+        str(card.get("card_id") or ""),
+    )
+
+
+def _exposure_plan_fingerprint(card: dict[str, Any]) -> str | None:
+    entry_plan = card.get("entry_plan") if isinstance(card.get("entry_plan"), dict) else {}
+    entry = _float(entry_plan.get("planned_entry"))
+    stop = _float(entry_plan.get("planned_stop"))
+    if entry is None or stop is None or entry <= 0 or stop <= 0:
+        return None
+    return ":".join(
+        [
+            str(card.get("strategy_id") or ""),
+            str(card.get("symbol") or ""),
+            str(card.get("timeframe") or ""),
+            str(card.get("interval") or ""),
+            str(card.get("direction") or ""),
+            str(card.get("setup_time") or ""),
+            _rounded_price_bucket(entry),
+            _rounded_price_bucket(stop),
+        ]
+    )
+
+
+def _rounded_price_bucket(price: float) -> str:
+    if price >= 1000:
+        digits = 0
+    elif price >= 100:
+        digits = 1
+    elif price >= 10:
+        digits = 2
+    elif price >= 1:
+        digits = 4
+    else:
+        digits = 6
+    return f"{round(float(price), digits):.{digits}f}"
+
+
 def _preserve_candidate_lifecycle(existing: TradeCandidate, payload: dict[str, Any]) -> dict[str, Any]:
     plan_changed = any(
         getattr(existing, field) != payload[field]
@@ -532,6 +637,9 @@ def _preserve_candidate_lifecycle(existing: TradeCandidate, payload: dict[str, A
     )
     if plan_changed:
         return payload
+    duplicate_payload = payload.get("shadow_status") == "retired" and PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN in set(
+        payload.get("promotion_blockers") or []
+    )
     preserved = dict(payload)
     for field in (
         "anti_repaint_status",
@@ -541,15 +649,32 @@ def _preserve_candidate_lifecycle(existing: TradeCandidate, payload: dict[str, A
         "promotion_status",
     ):
         preserved[field] = getattr(existing, field)
-    if existing.shadow_status == "retired" or existing.status == "entry_plan_retired":
+    lifecycle_anti_repaint = existing.anti_repaint_status
+    lifecycle_shadow = existing.shadow_status
+    if duplicate_payload:
+        preserved["status"] = payload["status"]
+        preserved["shadow_status"] = payload["shadow_status"]
+        preserved["promotion_status"] = payload["promotion_status"]
+        preserved["anti_repaint_status"] = payload["anti_repaint_status"]
+        preserved["decision_payload"] = payload["decision_payload"]
+        lifecycle_anti_repaint = payload["anti_repaint_status"]
+        lifecycle_shadow = payload["shadow_status"]
+    elif existing.shadow_status == "retired" or existing.status == "entry_plan_retired":
         preserved["status"] = existing.status
         preserved["decision_payload"] = existing.decision_payload
     preserved["promotion_blockers"] = _merge_lifecycle_blockers(
         payload["promotion_blockers"],
         existing.promotion_blockers,
-        anti_repaint_status=existing.anti_repaint_status,
-        shadow_status=existing.shadow_status,
+        anti_repaint_status=lifecycle_anti_repaint,
+        shadow_status=lifecycle_shadow,
     )
+    if duplicate_payload:
+        preserved["promotion_status"] = _promotion_status(
+            status=preserved["status"],
+            anti_repaint_status=preserved["anti_repaint_status"],
+            shadow_status=preserved["shadow_status"],
+            promotion_blockers=preserved["promotion_blockers"],
+        )
     preserved["materialized_at"] = existing.materialized_at
     return preserved
 
@@ -622,6 +747,10 @@ def _promotion_status(
     promotion_blockers: list[str],
 ) -> str:
     blockers = set(promotion_blockers)
+    if PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN in blockers:
+        return "duplicate_shadow_plan"
+    if shadow_status == "retired" or PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED in blockers:
+        return "entry_plan_retired"
     if status != "shadow_candidate":
         return "blocked"
     if anti_repaint_status == "failed" or PROMOTION_BLOCKER_ANTI_REPAINT_FAILED in blockers:

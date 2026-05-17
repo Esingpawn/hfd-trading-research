@@ -291,6 +291,71 @@ async def test_trade_candidates_materialize_core_decision_cards_idempotently(ses
 
 
 @pytest.mark.asyncio
+async def test_trade_candidates_retire_duplicate_exposure_plans_during_materialize(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    targets = [102.0, 103.0]
+    for index, target in enumerate(targets):
+        session.add(
+            DarkflowInteraction(
+                interaction_key=f"candidate-materialize-duplicate-{index}",
+                zone_key=f"zone-candidate-materialize-duplicate-{index}",
+                source_snapshot_id=f"snapshot-candidate-materialize-duplicate-{index}",
+                symbol="BTCUSDT",
+                timeframe="short",
+                interval="30m",
+                indicator="trend_price",
+                playbook="pullback_to_cost",
+                direction="long",
+                interaction_type="wick_pierce_reclaim",
+                event_ts=base,
+                entry_price=100.0,
+                stop_price=99.0,
+                target_price=target,
+                invalidation_price=99.0,
+                exit_price=target,
+                exit_ts=base + timedelta(minutes=30),
+                exit_reason="target_hit",
+                pnl_pct=0.02,
+                r_multiple=2.0,
+                mfe=0.025,
+                mae=-0.004,
+                status="backtested",
+                context={
+                    "interaction_schema": "v2",
+                    "quality": {
+                        "score": 82.0,
+                        "confirmations": ["official_rule_mapped", "dynamic_darkflow_target"],
+                        "blockers": [],
+                    },
+                },
+            )
+        )
+    await session.commit()
+
+    result = await materialize_darkflow_trade_candidates(session, limit=10)
+    candidates = (await session.execute(select(TradeCandidate).order_by(TradeCandidate.target_price))).scalars().all()
+    representative = next(candidate for candidate in candidates if candidate.status == "shadow_candidate")
+    duplicate = next(candidate for candidate in candidates if candidate.status == "entry_plan_retired")
+
+    assert result["inserted"] == 2
+    assert result["duplicate_exposure_count"] == 1
+    assert representative.target_price == 103.0
+    assert representative.promotion_status == "anti_repaint_pending"
+    assert duplicate.shadow_status == "retired"
+    assert duplicate.anti_repaint_status == "passed"
+    assert duplicate.promotion_status == "duplicate_shadow_plan"
+    assert duplicate.promotion_blockers == ["duplicate_shadow_forward_plan"]
+    assert duplicate.decision_payload["duplicate_shadow_plan"]["duplicate_of"] == representative.candidate_key
+
+    refreshed = await materialize_darkflow_trade_candidates(session, limit=10)
+    await session.refresh(duplicate)
+
+    assert refreshed["inserted"] == 0
+    assert duplicate.status == "entry_plan_retired"
+    assert duplicate.promotion_status == "duplicate_shadow_plan"
+
+
+@pytest.mark.asyncio
 async def test_trade_candidate_refresh_preserves_lifecycle_when_plan_unchanged(session) -> None:
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
     session.add(
