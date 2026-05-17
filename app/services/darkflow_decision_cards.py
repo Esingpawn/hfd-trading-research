@@ -40,6 +40,7 @@ _HARD_QUALITY_BLOCKERS = {
     "exit_filter_not_opening_playbook",
     "parent_trend_conflict",
 }
+_SHADOW_RESEARCH_ONLY_BLOCKERS = {"rr_ratio_below_threshold"}
 
 
 async def latest_darkflow_decision_cards(
@@ -265,7 +266,7 @@ def _decision_card(
         "supporting_signals": confirmations,
         "blocking_risks": quality_blockers,
         "risk_gate": {
-            "status": "shadow_candidate" if not gate_blockers else "research_blocked",
+            "status": "shadow_candidate" if not _shadow_sampling_blockers(gate_blockers) else "research_blocked",
             "blockers": gate_blockers,
             "paper_eligible": False,
             "live_eligible": False,
@@ -321,6 +322,10 @@ def _gate_blockers(
         blockers.append("rr_ratio_below_threshold")
     blockers.extend(sorted(set(quality_blockers) & _HARD_QUALITY_BLOCKERS))
     return blockers
+
+
+def _shadow_sampling_blockers(blockers: list[str]) -> list[str]:
+    return [blocker for blocker in blockers if blocker not in _SHADOW_RESEARCH_ONLY_BLOCKERS]
 
 
 def _take_profit_levels(item: DarkflowInteraction, target: float) -> list[dict[str, Any]]:

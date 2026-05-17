@@ -63,6 +63,25 @@ def test_gate_collects_shadow_forward_samples_without_blocking_evidence() -> Non
     assert decision.evidence_summary["shadow_closed_trades"] == 3
 
 
+def test_gate_treats_low_rr_as_review_blocker_only_after_shadow_passes() -> None:
+    collecting = _decision(
+        promotion_status="shadow_forward_collecting",
+        shadow_status="collecting",
+        blockers=("rr_ratio_below_threshold", "isolated_v2_shadow_forward_sample_collecting"),
+    )
+    review = _decision(
+        promotion_status="paper_review_ready",
+        shadow_status="passed",
+        blockers=("rr_ratio_below_threshold",),
+    )
+
+    assert collecting.gate_status == "collecting"
+    assert collecting.blocker_groups["risk_shape"][0]["severity"] == "waiting"
+    assert review.gate_status == "blocked"
+    assert review.primary_blocker == "rr_ratio_below_threshold"
+    assert review.blocker_groups["risk_shape"][0]["severity"] == "blocker"
+
+
 def test_gate_watches_frozen_entry_plan_before_review_ready() -> None:
     decision = _decision(
         promotion_status="paper_review_ready",

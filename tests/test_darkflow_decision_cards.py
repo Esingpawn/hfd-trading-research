@@ -232,6 +232,131 @@ async def test_decision_cards_block_weak_or_conflicting_quality(session) -> None
 
 
 @pytest.mark.asyncio
+async def test_decision_cards_allow_low_rr_candidates_into_shadow_research(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="decision-low-rr-shadow-research",
+            zone_key="zone-low-rr-shadow-research",
+            source_snapshot_id="snapshot-low-rr-shadow-research",
+            symbol="HYPEUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="liquidity_sweep",
+            playbook="liquidity_sweep_reversal",
+            direction="long",
+            interaction_type="first_touch",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=101.4,
+            invalidation_price=99.0,
+            exit_price=101.4,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.014,
+            r_multiple=1.4,
+            mfe=0.02,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {
+                    "score": 92.0,
+                    "confirmations": ["official_rule_mapped", "dynamic_darkflow_target"],
+                    "blockers": [],
+                },
+            },
+        )
+    )
+    await session.commit()
+
+    report = await latest_darkflow_decision_cards(session, limit=5)
+    card = report["cards"][0]
+
+    assert card["risk"]["rr_ratio"] == 1.4
+    assert card["risk_gate"]["status"] == "shadow_candidate"
+    assert card["risk_gate"]["blockers"] == ["rr_ratio_below_threshold"]
+    assert card["risk_gate"]["paper_eligible"] is False
+    assert card["risk_gate"]["live_eligible"] is False
+
+
+@pytest.mark.asyncio
+async def test_refresh_opens_low_rr_candidates_for_shadow_but_gate_blocks_review(session) -> None:
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-low-rr-shadow-forward",
+            zone_key="zone-low-rr-shadow-forward",
+            source_snapshot_id="snapshot-low-rr-shadow-forward",
+            symbol="BTCUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="liquidity_sweep",
+            playbook="liquidity_sweep_reversal",
+            direction="long",
+            interaction_type="first_touch",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=101.4,
+            invalidation_price=99.0,
+            exit_price=101.4,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.014,
+            r_multiple=1.4,
+            mfe=0.02,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "evidence": {"trend_alignment": {"aligned": True}},
+                "target_plan": {"model": "tutorial_dynamic_zone_target_v1"},
+                "quality": {
+                    "score": 92.0,
+                    "confirmations": ["official_rule_mapped", "dynamic_darkflow_target"],
+                    "blockers": [],
+                },
+            },
+        )
+    )
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=base, created_at=base))
+    await session.commit()
+
+    result = await refresh_darkflow_candidate_promotion(
+        session,
+        limit=10,
+        shadow_limit=10,
+        max_candidate_age_hours=0,
+        entry_tolerance_pct=0.05,
+    )
+    candidate = await session.scalar(select(TradeCandidate))
+    trades = (await session.execute(select(ShadowPaperTrade))).scalars().all()
+
+    assert len(result["shadow_forward"]["opened"]) == 1
+    assert candidate is not None
+    assert candidate.status == "shadow_candidate"
+    assert candidate.blockers == ["rr_ratio_below_threshold"]
+    assert candidate.shadow_status == "collecting"
+    assert candidate.paper_eligible is False
+    assert candidate.live_eligible is False
+    assert len(trades) == 1
+    assert trades[0].context["opens_paper_trades"] is False
+    assert trades[0].context["opens_live_orders"] is False
+
+    candidate.shadow_status = "passed"
+    candidate.promotion_blockers = []
+    await session.commit()
+
+    report = await darkflow_candidate_promotion_report(session, limit=10)
+    gate = report["gate_samples"][0]
+
+    assert gate["gate_status"] == "blocked"
+    assert gate["primary_blocker"] == "rr_ratio_below_threshold"
+
+
+@pytest.mark.asyncio
 async def test_trade_candidates_materialize_core_decision_cards_idempotently(session) -> None:
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
     session.add(

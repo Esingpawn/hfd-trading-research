@@ -21,6 +21,7 @@ GATE_STATUS_COLLECTING = "collecting"
 GATE_STATUS_WATCHING_ENTRY = "watching_entry"
 GATE_STATUS_REVIEW_READY = "review_ready"
 GATE_STATUS_RETIRED = "retired"
+PROMOTION_BLOCKER_RR_RATIO_BELOW_THRESHOLD = "rr_ratio_below_threshold"
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,7 @@ def grouped_blockers(evidence: PromotionGateEvidence, raw_blockers: Iterable[str
     if evidence.lineage != "core_darkflow_v2":
         add_blocker(groups, "lineage", "non_core_darkflow_v2", "blocker", "该候选不属于 Core Darkflow v2，不能进入晋级闸门。")
     for blocker in blockers:
-        category, severity, message = blocker_detail(blocker)
+        category, severity, message = blocker_detail(blocker, evidence=evidence)
         add_blocker(groups, category, blocker, severity, message)
 
     entry_state = str((evidence.entry_plan_state or {}).get("state") or "")
@@ -101,7 +102,8 @@ def gate_status_for(evidence: PromotionGateEvidence, groups: dict[str, list[dict
     return GATE_STATUS_BLOCKED
 
 
-def blocker_detail(code: str) -> tuple[str, str, str]:
+def blocker_detail(code: str, *, evidence: PromotionGateEvidence | None = None) -> tuple[str, str, str]:
+    rr_severity = "blocker" if evidence is not None and evidence.shadow_status == "passed" else "waiting"
     details = {
         PROMOTION_BLOCKER_ANTI_REPAINT_MISSING: ("anti_repaint", "blocker", "防重绘证据缺失，不能证明信号在决策当时可见。"),
         PROMOTION_BLOCKER_ANTI_REPAINT_FAILED: ("anti_repaint", "blocker", "防重绘审计失败，历史证据存在重绘风险。"),
@@ -111,6 +113,7 @@ def blocker_detail(code: str) -> tuple[str, str, str]:
         PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED: ("entry_plan", "blocker", "冻结入场计划已退休，不能继续推进。"),
         PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN: ("dedupe", "blocker", "存在重复的影子前向计划，避免重复统计同一机会。"),
         PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED: ("market_quality", "blocker", "该币种/方向的影子前向表现较弱，已暂停继续开新样本。"),
+        PROMOTION_BLOCKER_RR_RATIO_BELOW_THRESHOLD: ("risk_shape", rr_severity, "盈亏比低于晋级阈值，可以继续积累影子样本，但不能进入纸上复核。"),
     }
     return details.get(code, ("risk_shape", "blocker", f"存在未分类阻塞项：{code}"))
 

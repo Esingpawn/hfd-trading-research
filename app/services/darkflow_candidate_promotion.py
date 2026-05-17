@@ -424,7 +424,7 @@ def _promotion_gate_report_row(
             promotion_status=candidate.promotion_status,
             anti_repaint_status=candidate.anti_repaint_status,
             shadow_status=candidate.shadow_status,
-            promotion_blockers=tuple(str(item) for item in (candidate.promotion_blockers or [])),
+            promotion_blockers=tuple(_candidate_gate_blockers(candidate)),
             entry_plan_state=entry_plan_state,
             shadow_stats=shadow_stats,
         )
@@ -444,6 +444,12 @@ def _promotion_gate_report_row(
         "raw_blockers": decision.raw_blockers,
         "evidence_summary": decision.evidence_summary,
     }
+
+
+def _candidate_gate_blockers(candidate: TradeCandidate) -> list[str]:
+    blockers = [str(item) for item in (candidate.promotion_blockers or [])]
+    blockers.extend(str(item) for item in (candidate.blockers or []))
+    return list(dict.fromkeys(blockers))
 
 
 async def darkflow_entry_plan_state_report(
