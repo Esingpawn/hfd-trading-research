@@ -40,6 +40,15 @@ def test_experiment_worker_uses_guarded_research_report_interval() -> None:
     assert '      - "5000"' in block
 
 
+def test_experiment_worker_does_not_maintain_legacy_feature_research() -> None:
+    compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
+    block = _service_block(compose_text, "experiment-worker")
+
+    assert "--no-feature-research" in block
+    assert "--no-research-reports" in block
+    assert "--no-shadow-paper" in block
+
+
 def test_experiment_worker_maintains_core_darkflow_pipeline() -> None:
     compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
     block = _service_block(compose_text, "experiment-worker")

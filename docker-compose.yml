@@ -161,6 +161,9 @@ services:
       - "3600"
       - --research-report-limit
       - "5000"
+      - --no-feature-research
+      - --no-research-reports
+      - --no-shadow-paper
       - --darkflow-interval-seconds
       - "900"
       - --darkflow-limit
