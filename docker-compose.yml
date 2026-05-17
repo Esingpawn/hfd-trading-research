@@ -212,9 +212,9 @@ services:
       - --backtest-every-runs
       - "5"
       - --candidate-limit
-      - "250"
+      - "500"
       - --shadow-limit
-      - "150"
+      - "200"
       - --max-hold-bars
       - "12"
     depends_on:

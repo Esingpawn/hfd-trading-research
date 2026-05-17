@@ -67,9 +67,9 @@ def test_darkflow_worker_runs_lightweight_core_pipeline() -> None:
     assert "--backtest-every-runs" in block
     assert '      - "5"' in block
     assert "--candidate-limit" in block
-    assert '      - "250"' in block
+    assert '      - "500"' in block
     assert "--shadow-limit" in block
-    assert '      - "150"' in block
+    assert '      - "200"' in block
     assert "--persist-zones" not in block
 
 
