@@ -29,17 +29,24 @@ async def session():
     await engine.dispose()
 
 
-def snapshot(payload: dict, *, indicator: str = "trend_price") -> SignalSnapshot:
+def snapshot(
+    payload: dict,
+    *,
+    indicator: str = "trend_price",
+    symbol: str = "BTCUSDT",
+    timeframe: str = "short",
+    collected_at: datetime | None = None,
+) -> SignalSnapshot:
     return SignalSnapshot(
-        symbol="BTCUSDT",
+        symbol=symbol,
         asset_tier="core",
-        timeframe="short",
+        timeframe=timeframe,
         interval="30m",
         indicator=indicator,
         endpoint="/api/pro/pro_data",
         raw_payload=payload,
         summary_payload={},
-        collected_at=datetime(2026, 1, 1, 0, 30, tzinfo=timezone.utc),
+        collected_at=collected_at or datetime(2026, 1, 1, 0, 30, tzinfo=timezone.utc),
     )
 
 
@@ -178,6 +185,80 @@ async def test_backfill_interactions_persists_zones_and_is_idempotent(session) -
     assert second.interactions_inserted == 0
     assert zones == 1
     assert interactions == 1
+
+
+@pytest.mark.asyncio
+async def test_backfill_interactions_balances_snapshot_groups(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    trend_payload = {
+        "klines": klines(),
+        "trend_price": [{"timestamp": klines()[0][0], "lower_price": 100.0, "upper_price": 100.8, "type": "support", "score": 0.9}],
+    }
+    sweep_payload = {
+        "klines": klines(),
+        "liquidity_sweep": [
+            {"timestamp": klines()[0][0], "lower_price": 100.0, "upper_price": 100.8, "type": "bottom_sweep", "score": 1.0}
+        ],
+    }
+    for index in range(5):
+        session.add(
+            snapshot(
+                trend_payload,
+                symbol="BTCUSDT",
+                indicator="trend_price",
+                collected_at=base + timedelta(minutes=60 - index),
+            )
+        )
+    session.add(
+        snapshot(
+            sweep_payload,
+            symbol="ETHUSDT",
+            indicator="liquidity_sweep",
+            collected_at=base + timedelta(minutes=45),
+        )
+    )
+    await session.commit()
+
+    result = await backfill_darkflow_interactions(session, limit=2)
+    symbols = {row[0] for row in (await session.execute(select(DarkflowInteraction.symbol))).all()}
+
+    assert result.snapshots_scanned == 2
+    assert result.interactions_inserted == 2
+    assert symbols == {"BTCUSDT", "ETHUSDT"}
+
+
+@pytest.mark.asyncio
+async def test_backfill_interactions_applies_batched_parent_trend_context(session) -> None:
+    item = snapshot(
+        {
+            "klines": klines(),
+            "liquidity_sweep": [
+                {"timestamp": klines()[0][0], "lower_price": 100.0, "upper_price": 100.8, "type": "bottom_sweep", "score": 1.0}
+            ],
+        },
+        symbol="SOLUSDT",
+        indicator="liquidity_sweep",
+    )
+    parent = snapshot(
+        {
+            "smart_money_cost": [
+                {"timestamp": klines()[0][0], "lower_price": 104.0, "upper_price": 105.0, "type": "resistance", "score": 0.9}
+            ]
+        },
+        symbol="SOLUSDT",
+        timeframe="long",
+        indicator="smart_money_cost",
+        collected_at=datetime(2026, 1, 1, 0, 35, tzinfo=timezone.utc),
+    )
+    session.add_all([item, parent])
+    await session.commit()
+
+    result = await backfill_darkflow_interactions(session, limit=5)
+    interaction = await session.scalar(select(DarkflowInteraction).where(DarkflowInteraction.symbol == "SOLUSDT"))
+
+    assert result.interactions_inserted == 1
+    assert interaction is not None
+    assert "parent_trend_conflict" in interaction.context["quality"]["blockers"]
 
 
 @pytest.mark.asyncio

@@ -121,6 +121,16 @@ class DarkflowInteractionBackfillResult:
     skipped_without_klines: int
 
 
+@dataclass(frozen=True)
+class _SnapshotCandidate:
+    id: str
+    symbol: str
+    timeframe: str
+    indicator: str
+    collected_at: datetime
+    existing_interactions: int
+
+
 def extract_darkflow_zones(
     snapshot: SignalSnapshot,
     payload: dict[str, Any] | None = None,
@@ -317,11 +327,8 @@ async def backfill_darkflow_interactions(
     persist_zones: bool = True,
     commit: bool = True,
 ) -> DarkflowInteractionBackfillResult:
-    query = select(SignalSnapshot).order_by(SignalSnapshot.collected_at.desc()).limit(max(1, int(limit)))
-    if indicators:
-        query = query.where(SignalSnapshot.indicator.in_(indicators))
-    rows = await session.execute(query)
-    snapshots = rows.scalars().all()
+    snapshots = await _balanced_darkflow_snapshots(session, limit=max(1, int(limit)), indicators=indicators)
+    trend_contexts = await _trend_contexts_for_snapshots(session, snapshots)
     zones_extracted = 0
     interactions_detected = 0
     interactions_inserted = 0
@@ -338,7 +345,7 @@ async def backfill_darkflow_interactions(
             continue
         zones = extract_darkflow_zones(snapshot, payload, max_zones_per_snapshot=max_zones_per_snapshot)
         zones_extracted += len(zones)
-        trend_context = await _trend_context_for_snapshot(session, snapshot)
+        trend_context = trend_contexts.get(snapshot.symbol, {"states": []})
         if persist_zones and zones:
             await _insert_zone_rows(session, [_zone_insert_row(zone) for zone in zones])
         interaction_rows = []
@@ -374,6 +381,140 @@ async def backfill_darkflow_interactions(
         duplicates=duplicates,
         skipped_without_klines=skipped_without_klines,
     )
+
+
+async def _balanced_darkflow_snapshots(
+    session: AsyncSession,
+    *,
+    limit: int,
+    indicators: list[str] | None = None,
+) -> list[SignalSnapshot]:
+    requested_limit = max(1, int(limit))
+    metadata_fetch_limit = min(max(requested_limit * 8, requested_limit), 5000, research_query_max_limit())
+    query = (
+        select(
+            SignalSnapshot.id,
+            SignalSnapshot.symbol,
+            SignalSnapshot.timeframe,
+            SignalSnapshot.indicator,
+            SignalSnapshot.collected_at,
+        )
+        .order_by(SignalSnapshot.collected_at.desc(), SignalSnapshot.id.desc())
+        .limit(metadata_fetch_limit)
+    )
+    if indicators:
+        query = query.where(SignalSnapshot.indicator.in_(indicators))
+    rows = await session.execute(query)
+    metadata_rows = rows.all()
+    if not metadata_rows:
+        return []
+
+    snapshot_ids = [str(row.id) for row in metadata_rows]
+    existing_rows = await session.execute(
+        select(DarkflowInteraction.source_snapshot_id, func.count(DarkflowInteraction.id))
+        .where(DarkflowInteraction.source_snapshot_id.in_(snapshot_ids))
+        .group_by(DarkflowInteraction.source_snapshot_id)
+    )
+    existing_by_snapshot = {str(snapshot_id): int(count) for snapshot_id, count in existing_rows.all()}
+    candidates = [
+        _SnapshotCandidate(
+            id=str(row.id),
+            symbol=str(row.symbol),
+            timeframe=str(row.timeframe),
+            indicator=str(row.indicator),
+            collected_at=_aware(row.collected_at),
+            existing_interactions=existing_by_snapshot.get(str(row.id), 0),
+        )
+        for row in metadata_rows
+    ]
+    selected_ids = _round_robin_snapshot_ids(candidates, requested_limit)
+    snapshot_rows = await session.execute(select(SignalSnapshot).where(SignalSnapshot.id.in_(selected_ids)))
+    snapshots_by_id = {snapshot.id: snapshot for snapshot in snapshot_rows.scalars().all()}
+    return [snapshots_by_id[snapshot_id] for snapshot_id in selected_ids if snapshot_id in snapshots_by_id]
+
+
+def _round_robin_snapshot_ids(candidates: list[_SnapshotCandidate], limit: int) -> list[str]:
+    groups: dict[tuple[str, str, str], list[_SnapshotCandidate]] = {}
+    for candidate in candidates:
+        groups.setdefault((candidate.symbol, candidate.timeframe, candidate.indicator), []).append(candidate)
+    for group in groups.values():
+        group.sort(key=lambda item: (item.existing_interactions, -item.collected_at.timestamp(), item.id))
+
+    selected: list[str] = []
+    while groups and len(selected) < max(1, int(limit)):
+        ordered_keys = sorted(
+            groups,
+            key=lambda key: (
+                groups[key][0].existing_interactions,
+                -groups[key][0].collected_at.timestamp(),
+                key,
+            ),
+        )
+        for key in ordered_keys:
+            group = groups.get(key)
+            if not group:
+                continue
+            selected.append(group.pop(0).id)
+            if not group:
+                groups.pop(key, None)
+            if len(selected) >= max(1, int(limit)):
+                break
+    return selected
+
+
+async def _trend_contexts_for_snapshots(session: AsyncSession, snapshots: list[SignalSnapshot]) -> dict[str, dict[str, Any]]:
+    symbols = sorted({snapshot.symbol for snapshot in snapshots})
+    if not symbols:
+        return {}
+    ranked = (
+        select(
+            SignalSnapshot.id.label("snapshot_id"),
+            func.row_number()
+            .over(
+                partition_by=(SignalSnapshot.symbol, SignalSnapshot.timeframe),
+                order_by=(SignalSnapshot.collected_at.desc(), SignalSnapshot.id.desc()),
+            )
+            .label("rank"),
+        )
+        .where(
+            SignalSnapshot.symbol.in_(symbols),
+            SignalSnapshot.indicator == "smart_money_cost",
+            SignalSnapshot.timeframe.in_(["mid", "long"]),
+        )
+        .subquery()
+    )
+    rows = await session.execute(
+        select(SignalSnapshot)
+        .join(ranked, SignalSnapshot.id == ranked.c.snapshot_id)
+        .where(ranked.c.rank == 1)
+        .order_by(SignalSnapshot.symbol, SignalSnapshot.timeframe, SignalSnapshot.collected_at.desc(), SignalSnapshot.id.desc())
+    )
+    latest_by_symbol_timeframe: dict[tuple[str, str], SignalSnapshot] = {}
+    for item in rows.scalars().all():
+        latest_by_symbol_timeframe.setdefault((item.symbol, item.timeframe), item)
+
+    contexts: dict[str, dict[str, Any]] = {}
+    for symbol in symbols:
+        states = []
+        for timeframe in ("long", "mid"):
+            item = latest_by_symbol_timeframe.get((symbol, timeframe))
+            if item is None:
+                continue
+            payload = payload_for_snapshot(item)
+            zones = payload.get("smart_money_cost") or payload.get("zones") or []
+            bias = "unknown"
+            if zones:
+                bias = _trend_bias_from_item(zones[-1])
+            states.append(
+                {
+                    "timeframe": timeframe,
+                    "snapshot_id": item.id,
+                    "bias": bias,
+                    "collected_at": _iso(item.collected_at),
+                }
+            )
+        contexts[symbol] = {"states": states}
+    return contexts
 
 
 async def darkflow_interaction_backtest(
