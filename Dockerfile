@@ -10,14 +10,9 @@ RUN npm run build
 
 FROM python:3.13-slim
 
-ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-ARG PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
-
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DEFAULT_TIMEOUT=120 \
-    PIP_RETRIES=5 \
     PYTHONPATH=/app
 
 WORKDIR /app
@@ -25,6 +20,12 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl libpq5 \
     && rm -rf /var/lib/apt/lists/*
+
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+
+ENV PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=5
 
 COPY pyproject.toml README.md ./
 RUN pip install \
