@@ -350,6 +350,96 @@ async def test_accelerate_darkflow_alpha_can_disable_paused_group_exploration(se
     assert paper_rows == []
 
 
+@pytest.mark.asyncio
+async def test_paused_group_exploration_budget_is_spent_only_on_opened_samples(session) -> None:
+    now = datetime.now(timezone.utc)
+    history_base = now - timedelta(hours=3)
+    session.add_all(
+        [
+            _shadow_trade(
+                f"strong-budget-history-{index}",
+                candidate_key=f"strong-budget-candidate-{index}",
+                symbol="BTCUSDT",
+                direction="long",
+                strategy_id="pullback_to_cost",
+                market_state="trend_pullback",
+                pnl=0.02,
+                opened_at=history_base + timedelta(minutes=index),
+            )
+            for index in range(3)
+        ]
+        + [
+            _shadow_trade(
+                f"weak-budget-history-{index}",
+                candidate_key=f"weak-budget-candidate-{index}",
+                symbol="BTCUSDT",
+                direction="long",
+                strategy_id="liquidity_sweep_reversal",
+                market_state="liquidity_hunt_reversal",
+                pnl=-0.02,
+                opened_at=history_base + timedelta(minutes=30 + index),
+            )
+            for index in range(3)
+        ]
+    )
+    expired_source = _source_interaction(
+        interaction_key="weak-budget-expired",
+        playbook="liquidity_sweep_reversal",
+        setup_time=now - timedelta(minutes=10),
+    )
+    openable_source = _source_interaction(
+        interaction_key="weak-budget-openable",
+        playbook="liquidity_sweep_reversal",
+        setup_time=now - timedelta(minutes=15),
+    )
+    session.add_all([expired_source, openable_source])
+    await session.flush()
+    expired_candidate = _candidate(
+        "darkflow-card:v2:weak-budget-expired",
+        setup_time=now - timedelta(minutes=10),
+        source_interaction_id=expired_source.id,
+        strategy_id="liquidity_sweep_reversal",
+        market_state="liquidity_hunt_reversal",
+    )
+    expired_payload = dict(expired_candidate.decision_payload)
+    expired_plan = dict(expired_payload["entry_plan"])
+    expired_plan["valid_until"] = (now - timedelta(minutes=1)).isoformat()
+    expired_payload["entry_plan"] = expired_plan
+    expired_candidate.decision_payload = expired_payload
+    session.add(expired_candidate)
+    session.add(
+        _candidate(
+            "darkflow-card:v2:weak-budget-openable",
+            setup_time=now - timedelta(minutes=15),
+            source_interaction_id=openable_source.id,
+            strategy_id="liquidity_sweep_reversal",
+            market_state="liquidity_hunt_reversal",
+        )
+    )
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=now, created_at=now))
+    await session.commit()
+
+    result = await accelerate_darkflow_alpha(
+        session,
+        candidate_limit=10,
+        shadow_limit=5,
+        materialize=False,
+        mark_first=False,
+        entry_tolerance_pct=0.01,
+        paused_group_exploration_limit=1,
+    )
+
+    opened_keys = {item["candidate_key"] for item in result["steps"]["promotion_refresh"]["shadow_forward"]["opened"]}
+    skipped = result["steps"]["promotion_refresh"]["shadow_forward"]["skipped"]
+    shadow_rows = (await session.scalars(select(ShadowPaperTrade).where(ShadowPaperTrade.status == "open"))).all()
+
+    assert "darkflow-card:v2:weak-budget-expired" not in opened_keys
+    assert "darkflow-card:v2:weak-budget-openable" in opened_keys
+    assert any(item["candidate_key"] == "darkflow-card:v2:weak-budget-expired" and item["reason"] == "entry_plan_expired" for item in skipped)
+    openable_trade = next(row for row in shadow_rows if row.candidate_key == "darkflow-card:v2:weak-budget-openable")
+    assert openable_trade.context["alpha_sampling_gate"]["decision"] == "exploration"
+
+
 def _shadow_trade(
     signal_key: str,
     *,

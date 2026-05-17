@@ -147,10 +147,10 @@ async def open_darkflow_shadow_forward_samples(
     for candidate in rows:
         scanned += 1
         alpha_group_key = _candidate_alpha_group_key(candidate)
+        alpha_exploration_group_key = None
         if alpha_group_key in paused_groups:
             if paused_group_exploration_budget.get(alpha_group_key, 0) > 0:
-                paused_group_exploration_budget[alpha_group_key] -= 1
-                _mark_paused_alpha_group_exploration(candidate, group_key=alpha_group_key, now=now)
+                alpha_exploration_group_key = alpha_group_key
             else:
                 if _pause_shadow_candidate_for_alpha_group(candidate, group_key=alpha_group_key, now=now):
                     updated.append(_candidate_update_row(candidate, _candidate_stats(stats_by_candidate, candidate), reason="alpha_group_shadow_performance_paused"))
@@ -275,6 +275,14 @@ async def open_darkflow_shadow_forward_samples(
         if trade is None:
             skipped.append({"candidate_key": candidate.candidate_key, "reason": "invalid_shadow_trade_shape"})
             continue
+        if alpha_exploration_group_key is not None:
+            _mark_paused_alpha_group_exploration(
+                candidate,
+                trade=trade,
+                group_key=alpha_exploration_group_key,
+                now=now,
+            )
+            paused_group_exploration_budget[alpha_exploration_group_key] -= 1
         session.add(trade)
         _index_open_shadow_trade(open_plan_index, trade)
         open_market_counts[(candidate.symbol, candidate.direction)] = open_market_counts.get((candidate.symbol, candidate.direction), 0) + 1
@@ -953,15 +961,25 @@ def _pause_shadow_candidate_for_alpha_group(candidate: TradeCandidate, *, group_
     )
 
 
-def _mark_paused_alpha_group_exploration(candidate: TradeCandidate, *, group_key: str, now: datetime) -> None:
-    payload = dict(candidate.decision_payload or {})
-    payload["alpha_sampling_gate"] = {
+def _mark_paused_alpha_group_exploration(
+    candidate: TradeCandidate,
+    *,
+    trade: ShadowPaperTrade,
+    group_key: str,
+    now: datetime,
+) -> None:
+    gate = {
         "decision": "exploration",
         "reason": "limited_paused_group_probe",
         "group_key": group_key,
         "opened_at": _iso(now),
     }
+    payload = dict(candidate.decision_payload or {})
+    payload["alpha_sampling_gate"] = gate
     candidate.decision_payload = payload
+    context = dict(trade.context or {})
+    context["alpha_sampling_gate"] = gate
+    trade.context = context
     candidate.updated_at = now
 
 
