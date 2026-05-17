@@ -236,18 +236,31 @@ async def mark_shadow_paper_trades(session: AsyncSession) -> dict[str, Any]:
     closed: list[dict[str, Any]] = []
     updated: list[dict[str, Any]] = []
     for trade in rows.scalars().all():
+        now = datetime.now(timezone.utc)
         price = await _latest_price(session, trade.symbol)
         if price is None:
-            continue
+            time_exit_context = _darkflow_shadow_forward_time_exit_context(trade, now=now)
+            fallback_price = _darkflow_shadow_forward_fallback_mark_price(trade)
+            if time_exit_context is None or fallback_price is None:
+                continue
+            price, fallback_source = fallback_price
+            exit_reason = DARKFLOW_SHADOW_FORWARD_TIME_EXIT_REASON
+            exit_context: dict[str, Any] = {
+                **time_exit_context,
+                "missing_latest_price_at_time_exit": True,
+                "fallback_mark_price_source": fallback_source,
+            }
+            runner_decision: dict[str, Any] | None = None
+        else:
+            exit_reason = _stop_exit_reason(trade, price)
+            exit_context = {}
+            runner_decision = None
         mark_pnl = _pnl(trade.direction, trade.entry_price, price)
         pnl = _net_pnl(trade, price, exit_side="mark")
         trade.mfe = max(trade.mfe, pnl)
         trade.mae = min(trade.mae, pnl)
         previous_stop_loss = trade.stop_loss
         previous_take_profit = trade.take_profit
-        exit_reason = _stop_exit_reason(trade, price)
-        exit_context: dict[str, Any] = {}
-        runner_decision: dict[str, Any] | None = None
         if exit_reason is None and _take_profit_touched(trade, price):
             runner_decision = _shadow_runner_decision(trade, price)
             if runner_decision["extend"]:
@@ -255,7 +268,7 @@ async def mark_shadow_paper_trades(session: AsyncSession) -> dict[str, Any]:
             else:
                 exit_reason = "take_profit"
         if exit_reason is None:
-            time_exit_context = _darkflow_shadow_forward_time_exit_context(trade, now=datetime.now(timezone.utc))
+            time_exit_context = _darkflow_shadow_forward_time_exit_context(trade, now=now)
             if time_exit_context is not None:
                 exit_reason = DARKFLOW_SHADOW_FORWARD_TIME_EXIT_REASON
                 exit_context = time_exit_context
@@ -268,7 +281,7 @@ async def mark_shadow_paper_trades(session: AsyncSession) -> dict[str, Any]:
             trade.pnl = pnl
             stop_pct = abs(trade.entry_price - trade.stop_loss) / trade.entry_price
             trade.r_multiple = pnl / stop_pct if stop_pct else 0.0
-            trade.closed_at = datetime.now(timezone.utc)
+            trade.closed_at = now
             trade.context = _merge_context(
                 trade.context,
                 {
@@ -291,7 +304,7 @@ async def mark_shadow_paper_trades(session: AsyncSession) -> dict[str, Any]:
                 context_update.update(
                     {
                         "runner_decision": runner_decision,
-                        "runner_extended_at": datetime.now(timezone.utc).isoformat(),
+                        "runner_extended_at": now.isoformat(),
                         "previous_stop_loss": previous_stop_loss,
                         "previous_take_profit": previous_take_profit,
                     }
@@ -773,6 +786,20 @@ def _net_pnl(trade: ShadowPaperTrade, price: float, *, exit_side: str) -> float:
     gross = _pnl(trade.direction, trade.entry_price, price)
     fee_cost = SHADOW_FEE_RATE if exit_side == "mark" else SHADOW_FEE_RATE * 2
     return gross - fee_cost
+
+
+def _darkflow_shadow_forward_fallback_mark_price(trade: ShadowPaperTrade) -> tuple[float, str] | None:
+    context = trade.context if isinstance(trade.context, dict) else {}
+    candidates = (
+        (context.get("last_mark_price"), "last_mark_price"),
+        (context.get("mark_price_at_signal"), "mark_price_at_signal"),
+        (trade.entry_price, "entry_price"),
+    )
+    for value, source in candidates:
+        parsed = _number(value)
+        if parsed is not None and parsed > 0:
+            return parsed, source
+    return None
 
 
 def _darkflow_shadow_forward_time_exit_context(trade: ShadowPaperTrade, *, now: datetime) -> dict[str, Any] | None:

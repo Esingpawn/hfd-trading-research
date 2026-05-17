@@ -199,6 +199,50 @@ async def test_mark_shadow_paper_trades_time_closes_expired_darkflow_shadow_forw
 
 
 @pytest.mark.asyncio
+async def test_mark_shadow_paper_trades_time_closes_expired_darkflow_shadow_forward_without_latest_price(session) -> None:
+    now = datetime.now(timezone.utc)
+    session.add(
+        ShadowPaperTrade(
+            strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+            candidate_type="trade_candidate",
+            candidate_key="darkflow-expired-no-price-candidate",
+            signal_key="darkflow-expired-no-price-signal",
+            symbol="NO_PRICE_USDT",
+            timeframe="short",
+            direction="long",
+            entry_price=100.0,
+            stop_loss=98.0,
+            take_profit=105.0,
+            position_size=1.0,
+            status="open",
+            opened_at=now - timedelta(hours=3),
+            context={
+                "shadow_forward": True,
+                "last_mark_price": 101.0,
+                "entry_plan_state": {
+                    "state": "triggered",
+                    "valid_until": (now - timedelta(minutes=30)).isoformat(),
+                },
+                "candidate_snapshot": {"interval": "30m"},
+            },
+        )
+    )
+    await session.commit()
+
+    mark = await mark_shadow_paper_trades(session)
+    stored = await session.scalar(select(ShadowPaperTrade))
+
+    assert mark["closed"][0]["exit_reason"] == "shadow_forward_time_exit"
+    assert stored.status == "closed"
+    assert stored.exit_reason == "shadow_forward_time_exit"
+    assert stored.context["shadow_forward_time_exit"] is True
+    assert stored.context["missing_latest_price_at_time_exit"] is True
+    assert stored.context["fallback_mark_price_source"] == "last_mark_price"
+    assert stored.context["exit_mark_price"] == 101.0
+    assert stored.pnl == pytest.approx(((101.0 * (1 - 0.0007)) - 100.0) / 100.0 - SHADOW_FEE_RATE * 2)
+
+
+@pytest.mark.asyncio
 async def test_mark_shadow_paper_trades_keeps_fresh_darkflow_shadow_forward_open(session) -> None:
     now = datetime.now(timezone.utc)
     session.add(
