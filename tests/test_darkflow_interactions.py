@@ -110,6 +110,39 @@ def test_detect_darkflow_interactions_marks_reclaim_and_target_hit() -> None:
     assert interaction.r_multiple is not None and interaction.r_multiple > 0
 
 
+def test_detect_darkflow_interactions_prefers_latest_touch_in_recent_window() -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    raw_klines: list[list[float]] = []
+    prices = [
+        (104.0, 105.0, 103.5, 104.2),
+        (103.0, 103.4, 99.9, 101.2),
+        (105.0, 106.0, 104.2, 105.4),
+        (104.5, 104.8, 99.8, 101.4),
+        (102.0, 103.0, 101.2, 102.4),
+    ]
+    for index, (open_price, high, low, close) in enumerate(prices):
+        ts = int((base + timedelta(minutes=30 * index)).timestamp() * 1000)
+        raw_klines.append([ts, open_price, close, low, high, 10.0])
+    item = snapshot(
+        {
+            "klines": raw_klines,
+            "liquidity_sweep": [
+                {"timestamp": raw_klines[0][0], "lower_price": 100.0, "upper_price": 100.8, "type": "bottom_sweep", "score": 1.0}
+            ],
+        },
+        indicator="liquidity_sweep",
+        collected_at=base + timedelta(minutes=150),
+    )
+    zone = extract_darkflow_zones(item)[0]
+    candles = normalize_klines(item.raw_payload["klines"])
+
+    interactions = detect_darkflow_interactions(zone, candles, max_hold_bars=4)
+
+    assert len(interactions) == 1
+    assert interactions[0].event_ts == base + timedelta(minutes=90)
+    assert interactions[0].entry_price == 100.8
+
+
 def test_detect_darkflow_interactions_uses_dynamic_darkflow_target_and_quality() -> None:
     item = snapshot(
         {

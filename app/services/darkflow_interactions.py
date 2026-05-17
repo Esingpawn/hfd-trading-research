@@ -941,11 +941,15 @@ def _interaction_start_index(candles: list[Candle], zone: dict[str, Any], *, max
 def _first_touch_index(candles: list[Candle], zone: dict[str, Any], *, start_index: int) -> int | None:
     lower = float(zone["lower_price"])
     upper = float(zone["upper_price"])
+    latest_cluster_start: int | None = None
+    touching_previous = False
     for index in range(start_index, len(candles)):
         candle = candles[index]
-        if candle.high >= lower and candle.low <= upper:
-            return index
-    return None
+        touching = candle.high >= lower and candle.low <= upper
+        if touching and not touching_previous:
+            latest_cluster_start = index
+        touching_previous = touching
+    return latest_cluster_start
 
 
 def _entry_price(zone: dict[str, Any], touch: Candle) -> float:
