@@ -61,13 +61,15 @@ def test_darkflow_worker_runs_lightweight_core_pipeline() -> None:
     assert "LIVE_TRADING_ENABLED: \"false\"" in block
     assert "TRADING_GATEWAY: disabled" in block
     assert "--interval-seconds" in block
-    assert '      - "300"' in block
+    assert '      - "120"' in block
     assert "--backtest-limit" in block
     assert '      - "2000"' in block
+    assert "--backtest-every-runs" in block
+    assert '      - "5"' in block
     assert "--candidate-limit" in block
-    assert '      - "100"' in block
+    assert '      - "250"' in block
     assert "--shadow-limit" in block
-    assert '      - "50"' in block
+    assert '      - "150"' in block
     assert "--persist-zones" not in block
 
 

@@ -68,13 +68,17 @@ async def run_shadow_paper_replay_all(
 async def list_shadow_paper_trades(
     session: SessionDep,
     limit: int = Query(default=50, ge=1, le=200),
+    strategy_name: str | None = Query(default=None, min_length=1, max_length=120),
 ) -> list[dict[str, object]]:
-    return await shadow_paper_trades(session, limit=limit)
+    return await shadow_paper_trades(session, limit=limit, strategy_name=strategy_name)
 
 
 @router.get("/shadow-paper/stats")
-async def get_shadow_paper_stats(session: SessionDep) -> dict[str, object]:
-    return await shadow_paper_stats(session)
+async def get_shadow_paper_stats(
+    session: SessionDep,
+    strategy_name: str | None = Query(default=None, min_length=1, max_length=120),
+) -> dict[str, object]:
+    return await shadow_paper_stats(session, strategy_name=strategy_name)
 
 
 @router.get("/shadow-paper/promotion")

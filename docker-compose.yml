@@ -182,15 +182,17 @@ services:
       - app.cli
       - darkflow-loop
       - --limit
-      - "150"
+      - "250"
       - --interval-seconds
-      - "300"
+      - "120"
       - --backtest-limit
       - "2000"
+      - --backtest-every-runs
+      - "5"
       - --candidate-limit
-      - "100"
+      - "250"
       - --shadow-limit
-      - "50"
+      - "150"
       - --max-hold-bars
       - "12"
     depends_on:

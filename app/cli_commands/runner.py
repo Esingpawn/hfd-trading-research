@@ -662,6 +662,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Latest darkflow interactions to include in the persisted v2 backtest report",
     )
     darkflow_loop.add_argument(
+        "--backtest-every-runs",
+        type=int,
+        default=1,
+        help="Run the heavier persisted interaction backtest every N refreshes. 1 means every refresh.",
+    )
+    darkflow_loop.add_argument(
         "--candidate-limit",
         type=int,
         default=200,
@@ -1598,6 +1604,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
             heartbeat_ttl_seconds=_heartbeat_ttl(args.interval_seconds),
             limit=args.limit,
             backtest_limit=args.backtest_limit,
+            backtest_every_runs=args.backtest_every_runs,
             candidate_limit=args.candidate_limit,
             shadow_limit=args.shadow_limit,
             max_hold_bars=args.max_hold_bars,
@@ -1613,6 +1620,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 run_number += 1
                 _touch_runtime("darkflow-loop", runtime_meta, run_number=run_number)
                 try:
+                    include_backtest = args.backtest_every_runs <= 1 or run_number % args.backtest_every_runs == 0
                     async with SessionLocal() as session:
                         result = await run_darkflow_pipeline(
                             session,
@@ -1622,6 +1630,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
                             shadow_limit=args.shadow_limit,
                             max_hold_bars=args.max_hold_bars,
                             persist_zones=args.persist_zones,
+                            include_backtest=include_backtest,
                         )
                     _touch_runtime(
                         "darkflow-loop",
@@ -1630,6 +1639,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
                         last_success_at=_utc_now_iso(),
                         last_result={
                             "interactions_inserted": result.get("interactions", {}).get("interactions_inserted"),
+                            "backtest_ran": include_backtest,
                             "candidate_inserted": result.get("trade_candidates", {}).get("inserted"),
                             "candidate_updated": result.get("trade_candidates", {}).get("updated"),
                         },

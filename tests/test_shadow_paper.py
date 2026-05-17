@@ -311,6 +311,63 @@ async def test_shadow_paper_stats_groups_by_candidate(session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_shadow_paper_stats_can_filter_by_strategy(session) -> None:
+    opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            ShadowPaperTrade(
+                strategy_name="shadow_feature_candidates_v1",
+                candidate_type="segment_candidate",
+                candidate_key="legacy-candidate",
+                signal_key="legacy-signal",
+                symbol="BTCUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=100.0,
+                stop_loss=99.0,
+                take_profit=102.0,
+                position_size=1.0,
+                status="closed",
+                pnl=-0.01,
+                opened_at=opened_at,
+                closed_at=opened_at,
+                context={"horizon": "30m"},
+            ),
+            ShadowPaperTrade(
+                strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+                candidate_type="trade_candidate",
+                candidate_key="darkflow-candidate",
+                signal_key="darkflow-signal",
+                symbol="HYPEUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=38.0,
+                stop_loss=37.0,
+                take_profit=40.0,
+                position_size=1.0,
+                status="closed",
+                pnl=0.03,
+                opened_at=opened_at,
+                closed_at=opened_at,
+                context={"horizon": "4h"},
+            ),
+        ]
+    )
+    await session.commit()
+
+    all_stats = await shadow_paper_stats(session)
+    darkflow_stats = await shadow_paper_stats(session, strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1")
+
+    assert all_stats["strategy_name"] == "all_shadow_strategies"
+    assert all_stats["total_trades"] == 2
+    assert darkflow_stats["strategy_name"] == "darkflow_v2_trade_candidate_shadow_forward_v1"
+    assert darkflow_stats["total_trades"] == 1
+    assert darkflow_stats["closed_trades"] == 1
+    assert darkflow_stats["win_rate"] == 1.0
+    assert darkflow_stats["by_candidate"][0]["candidate_key"] == "darkflow-candidate"
+
+
+@pytest.mark.asyncio
 async def test_shadow_paper_stats_orders_drawdown_by_close_time(session) -> None:
     base_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
     session.add_all(

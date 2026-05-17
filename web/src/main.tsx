@@ -33,6 +33,8 @@ import "./styles.css";
 
 echarts.use([RadarChart, EChartLineChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer]);
 
+const DARKFLOW_SHADOW_STRATEGY = "darkflow_v2_trade_candidate_shadow_forward_v1";
+
 type Summary = {
   snapshots: number;
   prices: number;
@@ -737,10 +739,10 @@ function App() {
       if (data.paperTrades === null && !errors.paperTrades) void loadSection("paperTrades", () => fetchJson<PaperTrade[]>("/paper/trades?limit=80", 12000));
     }
     if (activePage === "shadow" && data.shadow === null && !errors.shadow) {
-      void loadSection("shadow", () => fetchJson<ShadowStats>("/shadow-paper/stats", 12000));
+      void loadSection("shadow", () => fetchJson<ShadowStats>(`/shadow-paper/stats?strategy_name=${DARKFLOW_SHADOW_STRATEGY}`, 12000));
     }
     if (activePage === "shadow" && data.shadowTrades === null && !errors.shadowTrades) {
-      void loadSection("shadowTrades", () => fetchJson<ShadowTrade[]>("/shadow-paper/trades?limit=80", 12000));
+      void loadSection("shadowTrades", () => fetchJson<ShadowTrade[]>(`/shadow-paper/trades?limit=80&strategy_name=${DARKFLOW_SHADOW_STRATEGY}`, 12000));
     }
     if (activePage === "indicatorMap") {
       if (data.rulebook === null && !errors.rulebook) void loadSection("rulebook", () => fetchJson<RulebookReport>("/darkflow/rulebook", 12000));

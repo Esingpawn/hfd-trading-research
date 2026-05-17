@@ -304,18 +304,29 @@ async def mark_shadow_paper_trades(session: AsyncSession) -> dict[str, Any]:
     return {"closed": closed, "updated": updated, "policy": _shadow_policy()}
 
 
-async def shadow_paper_trades(session: AsyncSession, *, limit: int = 50) -> list[dict[str, Any]]:
-    rows = await session.execute(select(ShadowPaperTrade).order_by(ShadowPaperTrade.opened_at.desc()).limit(limit))
+async def shadow_paper_trades(
+    session: AsyncSession,
+    *,
+    limit: int = 50,
+    strategy_name: str | None = None,
+) -> list[dict[str, Any]]:
+    query = select(ShadowPaperTrade)
+    if strategy_name:
+        query = query.where(ShadowPaperTrade.strategy_name == strategy_name)
+    rows = await session.execute(query.order_by(ShadowPaperTrade.opened_at.desc()).limit(limit))
     return [_trade_payload(item) for item in rows.scalars().all()]
 
 
-async def shadow_paper_stats(session: AsyncSession) -> dict[str, Any]:
-    rows = await session.execute(select(ShadowPaperTrade))
+async def shadow_paper_stats(session: AsyncSession, *, strategy_name: str | None = None) -> dict[str, Any]:
+    query = select(ShadowPaperTrade)
+    if strategy_name:
+        query = query.where(ShadowPaperTrade.strategy_name == strategy_name)
+    rows = await session.execute(query)
     trades = rows.scalars().all()
     totals = _trade_stats(trades)
     by_candidate = _grouped_trade_stats(trades, key_func=_candidate_group_key)[:20]
     return {
-        "strategy_name": SHADOW_STRATEGY_NAME,
+        "strategy_name": strategy_name or "all_shadow_strategies",
         **totals,
         "by_candidate": by_candidate,
         "by_horizon": _grouped_trade_stats(trades, key_func=_horizon_group_key)[:20],

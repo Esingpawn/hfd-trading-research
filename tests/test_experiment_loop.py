@@ -371,6 +371,27 @@ async def test_darkflow_pipeline_can_skip_zone_persistence_for_lightweight_loop(
 
 
 @pytest.mark.asyncio
+async def test_darkflow_pipeline_can_defer_heavy_backtest_for_lightweight_refresh(session) -> None:
+    await _add_darkflow_snapshot(session)
+
+    result = await run_darkflow_pipeline(
+        session,
+        limit=10,
+        backtest_limit=100,
+        candidate_limit=10,
+        shadow_limit=10,
+        max_hold_bars=12,
+        include_backtest=False,
+    )
+    pipeline_run = await session.scalar(select(ExperimentRun).where(ExperimentRun.name == "darkflow_pipeline_run"))
+
+    assert result["policy"]["runs_interaction_backtest"] is False
+    assert result["interaction_backtest"]["skipped"] is True
+    assert result["trade_candidates"]["inserted"] == 1
+    assert pipeline_run.metrics["interaction_backtest"]["skipped"] is True
+
+
+@pytest.mark.asyncio
 async def test_darkflow_pipeline_marks_failed_run_when_iteration_errors(session, monkeypatch) -> None:
     async def fail_mark_shadow_paper_trades(_session):
         raise RuntimeError("boom")

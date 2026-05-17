@@ -379,7 +379,7 @@ async def _darkflow_freshness(
         },
         "pipeline": {
             "expected_worker": "darkflow-worker",
-            "expected_command": "python -m app.cli darkflow-loop --interval-seconds 300",
+            "expected_command": "python -m app.cli darkflow-loop --interval-seconds 120 --backtest-every-runs 5",
             "report_only": True,
         },
     }

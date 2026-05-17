@@ -40,6 +40,7 @@ async def run_experiment_backfill(
     darkflow_shadow_limit: int = 100,
     darkflow_max_hold_bars: int = 12,
     darkflow_persist_zones: bool = True,
+    darkflow_include_backtest: bool = True,
 ) -> dict[str, Any]:
     signal_result = await backfill_signal_outcomes(
         session,
@@ -62,6 +63,7 @@ async def run_experiment_backfill(
             shadow_limit=darkflow_shadow_limit,
             max_hold_bars=darkflow_max_hold_bars,
             persist_zones=darkflow_persist_zones,
+            include_backtest=darkflow_include_backtest,
         )
     if include_feature_research:
         horizons = list(feature_horizons or DEFAULT_FEATURE_HORIZONS)
@@ -113,6 +115,7 @@ async def run_darkflow_pipeline(
     shadow_limit: int,
     max_hold_bars: int,
     persist_zones: bool = True,
+    include_backtest: bool = True,
 ) -> dict[str, Any]:
     params = _darkflow_pipeline_params(
         limit=limit,
@@ -121,6 +124,7 @@ async def run_darkflow_pipeline(
         shadow_limit=shadow_limit,
         max_hold_bars=max_hold_bars,
         persist_zones=persist_zones,
+        include_backtest=include_backtest,
     )
     pipeline_run = await _start_darkflow_pipeline_run(session, params=params)
     try:
@@ -132,11 +136,19 @@ async def run_darkflow_pipeline(
             persist_zones=params["persist_zones"],
             commit=True,
         )
-        backtest = await darkflow_interaction_backtest(
-            session,
-            limit=params["backtest_limit"],
-            persist=True,
-        )
+        if params["include_backtest"]:
+            backtest = await darkflow_interaction_backtest(
+                session,
+                limit=params["backtest_limit"],
+                persist=True,
+            )
+        else:
+            backtest = {
+                "enabled": False,
+                "skipped": True,
+                "reason": "backtest_deferred_for_lightweight_refresh",
+                "backtest_limit": params["backtest_limit"],
+            }
         candidates = await materialize_darkflow_trade_candidates(
             session,
             limit=params["candidate_limit"],
@@ -153,7 +165,7 @@ async def run_darkflow_pipeline(
             "interaction_backtest": backtest,
             "trade_candidates": candidates,
             "promotion": promotion,
-            "policy": _darkflow_pipeline_policy(params["persist_zones"]),
+            "policy": _darkflow_pipeline_policy(params["persist_zones"], params["include_backtest"]),
         }
         payload["pipeline_run"] = await _complete_darkflow_pipeline_run(
             session,
@@ -180,6 +192,7 @@ def _darkflow_pipeline_params(
     shadow_limit: int,
     max_hold_bars: int,
     persist_zones: bool,
+    include_backtest: bool,
 ) -> dict[str, Any]:
     return {
         "limit": max(1, int(limit)),
@@ -188,16 +201,18 @@ def _darkflow_pipeline_params(
         "shadow_limit": max(1, int(shadow_limit)),
         "max_hold_bars": max(1, int(max_hold_bars)),
         "persist_zones": bool(persist_zones),
+        "include_backtest": bool(include_backtest),
     }
 
 
-def _darkflow_pipeline_policy(persist_zones: bool) -> dict[str, Any]:
+def _darkflow_pipeline_policy(persist_zones: bool, include_backtest: bool = True) -> dict[str, Any]:
     return {
         "research_only": True,
         "opens_live_orders": False,
         "opens_paper_trades": False,
         "uses_isolated_shadow_paper": True,
         "persists_darkflow_zones": bool(persist_zones),
+        "runs_interaction_backtest": bool(include_backtest),
         "purpose": "keep core_darkflow_v2 zones/interactions/candidates fresh from latest collected snapshots",
     }
 
@@ -219,7 +234,7 @@ async def _start_darkflow_pipeline_run(
         params=params,
         metrics={
             "stage": "started",
-            "policy": _darkflow_pipeline_policy(bool(params.get("persist_zones"))),
+            "policy": _darkflow_pipeline_policy(bool(params.get("persist_zones")), bool(params.get("include_backtest", True))),
         },
         notes="lightweight core_darkflow_v2 maintenance heartbeat started",
         created_at=created_at,
@@ -275,6 +290,7 @@ async def _complete_darkflow_pipeline_run(
             "promotion_status_counts": summary.get("promotion_status_counts") or {},
         },
         "policy": payload.get("policy") or {},
+        "interaction_backtest": payload.get("interaction_backtest") or {},
     }
     run.notes = "lightweight core_darkflow_v2 maintenance heartbeat completed"
     await session.commit()
@@ -307,7 +323,10 @@ async def _fail_darkflow_pipeline_run(
     run.metrics = {
         "stage": "failed",
         "error": error,
-        "policy": _darkflow_pipeline_policy(bool(params.get("persist_zones"))),
+        "policy": _darkflow_pipeline_policy(
+            bool(params.get("persist_zones")),
+            bool(params.get("include_backtest", True)),
+        ),
     }
     run.notes = "lightweight core_darkflow_v2 maintenance heartbeat failed"
     await session.commit()
