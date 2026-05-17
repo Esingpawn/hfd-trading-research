@@ -89,6 +89,32 @@ bash scripts/linux/backup-postgres.sh
 
 ## 5. 更新部署
 
+当前生产环境使用 Git 工作区 `/opt/hfd-git.tmp` 部署。`docker-compose.yml` 已固定 `name: hfd`，因此从该目录运行 Compose 仍会使用现有 `hfd_*` 容器和数据卷。
+
+本地推荐部署命令：
+
+```powershell
+git status --short
+git push production main
+.\scripts\deploy-production.ps1 -Services api,darkflow-worker
+```
+
+`production` remote 通过 SSH 推送到服务器工作区，不依赖服务器从 GitHub 拉取代码：
+
+```text
+ssh://root@124.221.31.75:2222/opt/hfd-git.tmp
+```
+
+GitHub 网络正常时可以额外加 `-PushOrigin`：
+
+```powershell
+.\scripts\deploy-production.ps1 -Services api,darkflow-worker -PushOrigin
+```
+
+服务器上的 `.env` 是本地运行配置，必须保留在服务器且不纳入 Git。不要在生产环境执行 `docker compose down -v`，这会删除数据库和运行时数据卷。
+
+旧的服务器内拉取方式如下，只适用于服务器 GitHub 网络稳定时：
+
 ```bash
 cd /opt/hfd
 git pull
