@@ -204,7 +204,7 @@ services:
       - app.cli
       - darkflow-loop
       - --limit
-      - "500"
+      - "250"
       - --interval-seconds
       - "120"
       - --backtest-limit
