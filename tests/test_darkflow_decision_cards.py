@@ -884,6 +884,87 @@ async def test_refresh_audits_blocked_candidates_without_promoting_to_shadow(ses
 
 
 @pytest.mark.asyncio
+async def test_refresh_prioritizes_pending_shadow_candidates_before_newer_blocked_rows(session) -> None:
+    old_base = datetime.now(timezone.utc) - timedelta(hours=6)
+    new_base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-old-pending-shadow-audit",
+            zone_key="zone-old-pending-shadow-audit",
+            source_snapshot_id="snapshot-old-pending-shadow-audit",
+            symbol="BTCUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            playbook="pullback_to_cost",
+            direction="long",
+            interaction_type="wick_pierce_reclaim",
+            event_ts=old_base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=old_base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+            },
+        )
+    )
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-new-blocked-audit-window",
+            zone_key="zone-new-blocked-audit-window",
+            source_snapshot_id="snapshot-new-blocked-audit-window",
+            symbol="ETHUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            playbook="pullback_to_cost",
+            direction="long",
+            interaction_type="wick_pierce_reclaim",
+            event_ts=new_base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=new_base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": ["parent_trend_conflict"]},
+            },
+        )
+    )
+    await session.commit()
+    await materialize_darkflow_trade_candidates(session, limit=10)
+
+    result = await audit_darkflow_trade_candidates(session, limit=1, include_blocked=True)
+    candidates = (await session.execute(select(TradeCandidate))).scalars().all()
+    pending = next(candidate for candidate in candidates if candidate.symbol == "BTCUSDT")
+    blocked = next(candidate for candidate in candidates if candidate.symbol == "ETHUSDT")
+
+    assert result["audited"] == 1
+    assert result["rows"][0]["candidate_key"] == pending.candidate_key
+    assert pending.anti_repaint_status == "passed"
+    assert pending.promotion_status == "shadow_forward_pending"
+    assert blocked.anti_repaint_status == "missing"
+
+
+@pytest.mark.asyncio
 async def test_refresh_materializes_latest_candidates_before_promotion(session) -> None:
     base = datetime.now(timezone.utc) - timedelta(minutes=5)
     session.add(

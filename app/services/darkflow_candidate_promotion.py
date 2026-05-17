@@ -74,7 +74,7 @@ async def audit_darkflow_trade_candidates(
     limit: int = DEFAULT_PROMOTION_LIMIT,
     include_blocked: bool = False,
 ) -> dict[str, Any]:
-    rows = await _candidate_rows(session, limit=limit, include_blocked=include_blocked)
+    rows = await _candidate_rows(session, limit=limit, include_blocked=include_blocked, prioritize_pending_shadow_audit=True)
     passed = 0
     failed = 0
     skipped: list[dict[str, Any]] = []
@@ -621,12 +621,33 @@ async def _darkflow_freshness(
     }
 
 
-async def _candidate_rows(session: AsyncSession, *, limit: int, include_blocked: bool) -> list[TradeCandidate]:
+async def _candidate_rows(
+    session: AsyncSession,
+    *,
+    limit: int,
+    include_blocked: bool,
+    prioritize_pending_shadow_audit: bool = False,
+) -> list[TradeCandidate]:
     query = select(TradeCandidate).where(TradeCandidate.lineage == "core_darkflow_v2")
     if not include_blocked:
         query = query.where(TradeCandidate.status == "shadow_candidate")
+    order_by = []
+    if prioritize_pending_shadow_audit:
+        order_by.append(
+            case(
+                (
+                    (TradeCandidate.status == "shadow_candidate")
+                    & (TradeCandidate.anti_repaint_status != "passed")
+                    & (TradeCandidate.shadow_status.in_(["not_started", "collecting"])),
+                    0,
+                ),
+                (TradeCandidate.status == "shadow_candidate", 1),
+                else_=2,
+            )
+        )
+    order_by.extend([TradeCandidate.setup_time.desc(), TradeCandidate.updated_at.desc(), TradeCandidate.id.desc()])
     rows = await session.scalars(
-        query.order_by(TradeCandidate.setup_time.desc(), TradeCandidate.updated_at.desc(), TradeCandidate.id.desc()).limit(max(1, int(limit)))
+        query.order_by(*order_by).limit(max(1, int(limit)))
     )
     return list(rows.all())
 
