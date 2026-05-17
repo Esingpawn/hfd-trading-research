@@ -13,6 +13,7 @@ from app.services.darkflow_candidate_promotion import (
     DARKFLOW_V2_SHADOW_STRATEGY_NAME,
     DEFAULT_ENTRY_TOLERANCE_PCT,
     DEFAULT_MAX_CANDIDATE_AGE_HOURS,
+    DEFAULT_PAUSED_GROUP_EXPLORATION_LIMIT,
     DEFAULT_PROMOTION_LIMIT,
     DEFAULT_SHADOW_FORWARD_LIMIT,
     refresh_darkflow_candidate_promotion,
@@ -114,6 +115,7 @@ async def accelerate_darkflow_alpha(
     materialize: bool = True,
     mark_first: bool = True,
     scoreboard_limit: int = DEFAULT_ALPHA_SCOREBOARD_LIMIT,
+    paused_group_exploration_limit: int = DEFAULT_PAUSED_GROUP_EXPLORATION_LIMIT,
 ) -> dict[str, Any]:
     mark_result: dict[str, Any] = {"enabled": False, "reason": "mark_first_disabled"}
     if mark_first:
@@ -130,6 +132,7 @@ async def accelerate_darkflow_alpha(
         materialize=materialize,
         priority_group_keys=priority_group_keys,
         paused_group_keys=paused_group_keys,
+        paused_group_exploration_limit=paused_group_exploration_limit,
     )
     scoreboard = await darkflow_alpha_scoreboard(session, limit=scoreboard_limit, min_closed_trades=1)
     return {
@@ -144,6 +147,7 @@ async def accelerate_darkflow_alpha(
         "sampling_plan": {
             "priority_group_count": sampling_plan["priority_group_count"],
             "paused_group_count": sampling_plan["paused_group_count"],
+            "paused_group_exploration_limit": max(0, int(paused_group_exploration_limit)),
             "priority_groups": sampling_plan["priority_groups"][:20],
             "paused_groups": sampling_plan["paused_groups"][:20],
         },

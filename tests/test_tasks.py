@@ -91,6 +91,7 @@ def test_task_enqueue_payload_keeps_darkflow_alpha_limits_and_false_flags() -> N
         min_closed_trades=3,
         max_candidate_age_hours=24.0,
         entry_tolerance_pct=0.02,
+        paused_group_exploration_limit=2,
         materialize=False,
         mark_first=False,
     )
@@ -101,6 +102,7 @@ def test_task_enqueue_payload_keeps_darkflow_alpha_limits_and_false_flags() -> N
     assert payload["min_closed_trades"] == 3
     assert payload["max_candidate_age_hours"] == 24.0
     assert payload["entry_tolerance_pct"] == 0.02
+    assert payload["paused_group_exploration_limit"] == 2
     assert payload["materialize"] is False
     assert payload["mark_first"] is False
 

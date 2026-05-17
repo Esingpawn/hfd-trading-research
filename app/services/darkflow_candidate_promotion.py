@@ -41,6 +41,7 @@ DEFAULT_SHADOW_FORWARD_LIMIT = 100
 DEFAULT_SHADOW_FORWARD_SCAN_MULTIPLIER = 5
 DEFAULT_MAX_CANDIDATE_AGE_HOURS = 72.0
 DEFAULT_ENTRY_TOLERANCE_PCT = 0.025
+DEFAULT_PAUSED_GROUP_EXPLORATION_LIMIT = 1
 DEFAULT_MAX_OPEN_SHADOW_TRADES_PER_MARKET = 3
 SHADOW_FEE_RATE = 0.0004
 SHADOW_SLIPPAGE_RATE_BY_TIER = {
@@ -123,12 +124,14 @@ async def open_darkflow_shadow_forward_samples(
     entry_tolerance_pct: float = DEFAULT_ENTRY_TOLERANCE_PCT,
     priority_group_keys: list[str] | set[str] | tuple[str, ...] | None = None,
     paused_group_keys: list[str] | set[str] | tuple[str, ...] | None = None,
+    paused_group_exploration_limit: int = DEFAULT_PAUSED_GROUP_EXPLORATION_LIMIT,
 ) -> dict[str, Any]:
     requested_limit = max(1, int(limit))
     scan_limit = _shadow_candidate_scan_limit(requested_limit)
     rows = await _shadow_ready_candidate_rows(session, limit=scan_limit)
     priority_groups = _normalized_group_keys(priority_group_keys)
     paused_groups = _normalized_group_keys(paused_group_keys)
+    paused_group_exploration_budget = _paused_group_exploration_budget(paused_groups, paused_group_exploration_limit)
     if priority_groups or paused_groups:
         rows = _sort_candidates_by_alpha_sampling_plan(rows, priority_groups=priority_groups, paused_groups=paused_groups)
     market_stats = await _shadow_market_performance_stats(session)
@@ -145,18 +148,22 @@ async def open_darkflow_shadow_forward_samples(
         scanned += 1
         alpha_group_key = _candidate_alpha_group_key(candidate)
         if alpha_group_key in paused_groups:
-            if _pause_shadow_candidate_for_alpha_group(candidate, group_key=alpha_group_key, now=now):
-                updated.append(_candidate_update_row(candidate, _candidate_stats(stats_by_candidate, candidate), reason="alpha_group_shadow_performance_paused"))
-            skipped.append(
-                {
-                    "candidate_key": candidate.candidate_key,
-                    "symbol": candidate.symbol,
-                    "direction": candidate.direction,
-                    "reason": "alpha_group_shadow_performance_paused",
-                    "alpha_group_key": alpha_group_key,
-                }
-            )
-            continue
+            if paused_group_exploration_budget.get(alpha_group_key, 0) > 0:
+                paused_group_exploration_budget[alpha_group_key] -= 1
+                _mark_paused_alpha_group_exploration(candidate, group_key=alpha_group_key, now=now)
+            else:
+                if _pause_shadow_candidate_for_alpha_group(candidate, group_key=alpha_group_key, now=now):
+                    updated.append(_candidate_update_row(candidate, _candidate_stats(stats_by_candidate, candidate), reason="alpha_group_shadow_performance_paused"))
+                skipped.append(
+                    {
+                        "candidate_key": candidate.candidate_key,
+                        "symbol": candidate.symbol,
+                        "direction": candidate.direction,
+                        "reason": "alpha_group_shadow_performance_paused",
+                        "alpha_group_key": alpha_group_key,
+                    }
+                )
+                continue
         market_gate = _shadow_market_gate_from_stats(candidate, market_stats)
         if market_gate["decision"] == "paused":
             if _pause_shadow_candidate_for_market(candidate, gate=market_gate, now=now):
@@ -300,11 +307,13 @@ async def open_darkflow_shadow_forward_samples(
         "thresholds": {
             "max_candidate_age_hours": float(max_candidate_age_hours),
             "entry_tolerance_pct": float(entry_tolerance_pct),
+            "paused_group_exploration_limit": max(0, int(paused_group_exploration_limit)),
         },
         "alpha_sampling": {
             "applied": bool(priority_groups or paused_groups),
             "priority_group_count": len(priority_groups),
             "paused_group_count": len(paused_groups),
+            "paused_group_exploration_limit": max(0, int(paused_group_exploration_limit)),
         },
         "policy": _policy(),
     }
@@ -320,6 +329,7 @@ async def refresh_darkflow_candidate_promotion(
     materialize: bool = True,
     priority_group_keys: list[str] | set[str] | tuple[str, ...] | None = None,
     paused_group_keys: list[str] | set[str] | tuple[str, ...] | None = None,
+    paused_group_exploration_limit: int = DEFAULT_PAUSED_GROUP_EXPLORATION_LIMIT,
 ) -> dict[str, Any]:
     materialize_result: dict[str, Any] = {"enabled": False}
     if materialize:
@@ -332,6 +342,7 @@ async def refresh_darkflow_candidate_promotion(
         entry_tolerance_pct=entry_tolerance_pct,
         priority_group_keys=priority_group_keys,
         paused_group_keys=paused_group_keys,
+        paused_group_exploration_limit=paused_group_exploration_limit,
     )
     summary = await darkflow_candidate_promotion_report(session, limit=limit)
     return {
@@ -942,8 +953,25 @@ def _pause_shadow_candidate_for_alpha_group(candidate: TradeCandidate, *, group_
     )
 
 
+def _mark_paused_alpha_group_exploration(candidate: TradeCandidate, *, group_key: str, now: datetime) -> None:
+    payload = dict(candidate.decision_payload or {})
+    payload["alpha_sampling_gate"] = {
+        "decision": "exploration",
+        "reason": "limited_paused_group_probe",
+        "group_key": group_key,
+        "opened_at": _iso(now),
+    }
+    candidate.decision_payload = payload
+    candidate.updated_at = now
+
+
 def _normalized_group_keys(values: list[str] | set[str] | tuple[str, ...] | None) -> set[str]:
     return {str(item) for item in (values or []) if str(item)}
+
+
+def _paused_group_exploration_budget(paused_groups: set[str], limit: int) -> dict[str, int]:
+    budget = max(0, int(limit))
+    return {group_key: budget for group_key in paused_groups}
 
 
 def _sort_candidates_by_alpha_sampling_plan(
@@ -1417,6 +1445,25 @@ def _shadow_trade_from_candidate(
     if candidate.direction == "short" and not (candidate.target_price < entry_price < candidate.stop_price):
         return None
     signal_key = _shadow_forward_signal_key(candidate, opened_at=now)
+    payload = candidate.decision_payload if isinstance(candidate.decision_payload, dict) else {}
+    context = {
+        "research_only": True,
+        "shadow_forward": True,
+        "opens_paper_trades": False,
+        "opens_live_orders": False,
+        "trade_candidate_id": candidate.id,
+        "source_interaction_id": candidate.source_interaction_id,
+        "lineage": candidate.lineage,
+        "mark_price_at_signal": mark_price,
+        "planned_entry_price": candidate.entry_price,
+        "entry_tolerance_pct": entry_tolerance_pct,
+        "entry_plan_state": entry_plan_state or {},
+        "shadow_plan_fingerprint": _candidate_plan_fingerprint(candidate),
+        "execution_model": _execution_model(asset_tier),
+        "candidate_snapshot": _candidate_snapshot(candidate),
+    }
+    if isinstance(payload.get("alpha_sampling_gate"), dict):
+        context["alpha_sampling_gate"] = dict(payload["alpha_sampling_gate"])
     return ShadowPaperTrade(
         strategy_name=DARKFLOW_V2_SHADOW_STRATEGY_NAME,
         candidate_type="trade_candidate",
@@ -1434,22 +1481,7 @@ def _shadow_trade_from_candidate(
         mfe=0.0,
         mae=0.0,
         opened_at=now,
-        context={
-            "research_only": True,
-            "shadow_forward": True,
-            "opens_paper_trades": False,
-            "opens_live_orders": False,
-            "trade_candidate_id": candidate.id,
-            "source_interaction_id": candidate.source_interaction_id,
-            "lineage": candidate.lineage,
-            "mark_price_at_signal": mark_price,
-            "planned_entry_price": candidate.entry_price,
-            "entry_tolerance_pct": entry_tolerance_pct,
-            "entry_plan_state": entry_plan_state or {},
-            "shadow_plan_fingerprint": _candidate_plan_fingerprint(candidate),
-            "execution_model": _execution_model(asset_tier),
-            "candidate_snapshot": _candidate_snapshot(candidate),
-        },
+        context=context,
     )
 
 

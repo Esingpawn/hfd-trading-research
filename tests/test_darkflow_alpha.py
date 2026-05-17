@@ -196,7 +196,7 @@ async def test_accelerate_darkflow_alpha_opens_only_isolated_shadow_forward_samp
 
 
 @pytest.mark.asyncio
-async def test_accelerate_darkflow_alpha_uses_sampling_plan_to_skip_weak_same_market_group(session) -> None:
+async def test_accelerate_darkflow_alpha_allows_limited_exploration_for_weak_same_market_group(session) -> None:
     now = datetime.now(timezone.utc)
     history_base = now - timedelta(hours=3)
     session.add_all(
@@ -267,6 +267,7 @@ async def test_accelerate_darkflow_alpha_uses_sampling_plan_to_skip_weak_same_ma
         materialize=False,
         mark_first=False,
         entry_tolerance_pct=0.01,
+        paused_group_exploration_limit=1,
     )
 
     opened_keys = {item["candidate_key"] for item in result["steps"]["promotion_refresh"]["shadow_forward"]["opened"]}
@@ -275,11 +276,77 @@ async def test_accelerate_darkflow_alpha_uses_sampling_plan_to_skip_weak_same_ma
     paper_rows = (await session.scalars(select(PaperTrade))).all()
 
     assert "darkflow-card:v2:strong-source" in opened_keys
-    assert "darkflow-card:v2:weak-source" not in opened_keys
-    assert any(item["candidate_key"] == "darkflow-card:v2:weak-source" and item["reason"] == "alpha_group_shadow_performance_paused" for item in skipped)
+    assert "darkflow-card:v2:weak-source" in opened_keys
+    weak_trade = next(row for row in shadow_rows if row.candidate_key == "darkflow-card:v2:weak-source")
+    assert weak_trade.context["alpha_sampling_gate"]["decision"] == "exploration"
+    assert weak_trade.context["alpha_sampling_gate"]["reason"] == "limited_paused_group_probe"
+    assert not any(item["candidate_key"] == "darkflow-card:v2:weak-source" and item["reason"] == "alpha_group_shadow_performance_paused" for item in skipped)
     assert result["sampling_plan"]["priority_group_count"] >= 1
     assert result["sampling_plan"]["paused_group_count"] >= 1
+    assert result["sampling_plan"]["paused_group_exploration_limit"] == 1
     assert all(row.context.get("opens_paper_trades") is False for row in shadow_rows)
+    assert paper_rows == []
+
+
+@pytest.mark.asyncio
+async def test_accelerate_darkflow_alpha_can_disable_paused_group_exploration(session) -> None:
+    now = datetime.now(timezone.utc)
+    history_base = now - timedelta(hours=3)
+    session.add_all(
+        [
+            _shadow_trade(
+                f"weak-history-disabled-{index}",
+                candidate_key=f"weak-disabled-candidate-{index}",
+                symbol="BTCUSDT",
+                direction="long",
+                strategy_id="liquidity_sweep_reversal",
+                market_state="liquidity_hunt_reversal",
+                pnl=-0.02,
+                opened_at=history_base + timedelta(minutes=index),
+            )
+            for index in range(3)
+        ]
+    )
+    weak_source = _source_interaction(
+        interaction_key="weak-source-disabled",
+        playbook="liquidity_sweep_reversal",
+        setup_time=now - timedelta(minutes=14),
+    )
+    session.add(weak_source)
+    await session.flush()
+    session.add(
+        _candidate(
+            "darkflow-card:v2:weak-source-disabled",
+            setup_time=now - timedelta(minutes=14),
+            source_interaction_id=weak_source.id,
+            strategy_id="liquidity_sweep_reversal",
+            market_state="liquidity_hunt_reversal",
+        )
+    )
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=now, created_at=now))
+    await session.commit()
+
+    result = await accelerate_darkflow_alpha(
+        session,
+        candidate_limit=10,
+        shadow_limit=5,
+        materialize=False,
+        mark_first=False,
+        entry_tolerance_pct=0.01,
+        paused_group_exploration_limit=0,
+    )
+
+    opened_keys = {item["candidate_key"] for item in result["steps"]["promotion_refresh"]["shadow_forward"]["opened"]}
+    skipped = result["steps"]["promotion_refresh"]["shadow_forward"]["skipped"]
+    paper_rows = (await session.scalars(select(PaperTrade))).all()
+
+    assert "darkflow-card:v2:weak-source-disabled" not in opened_keys
+    assert any(
+        item["candidate_key"] == "darkflow-card:v2:weak-source-disabled"
+        and item["reason"] == "alpha_group_shadow_performance_paused"
+        for item in skipped
+    )
+    assert result["sampling_plan"]["paused_group_exploration_limit"] == 0
     assert paper_rows == []
 
 

@@ -114,6 +114,11 @@ def blocker_detail(code: str, *, evidence: PromotionGateEvidence | None = None) 
         PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN: ("dedupe", "blocker", "存在重复的影子前向计划，避免重复统计同一机会。"),
         PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED: ("market_quality", "blocker", "该币种/方向的影子前向表现较弱，已暂停继续开新样本。"),
         PROMOTION_BLOCKER_RR_RATIO_BELOW_THRESHOLD: ("risk_shape", rr_severity, "盈亏比低于晋级阈值，可以继续积累影子样本，但不能进入纸上复核。"),
+        "quality_score_below_threshold": ("risk_shape", "blocker", "质量评分低于候选阈值，教程规则、暗流共振或风险形态证据不足。"),
+        "parent_trend_conflict": ("risk_shape", "blocker", "父级趋势与当前入场方向冲突，顺大势条件不成立。"),
+        "body_break_invalidation": ("risk_shape", "blocker", "价格出现实体突破失效区，原暗流反应区已被破坏。"),
+        "official_rule_unmapped": ("risk_shape", "blocker", "该信号尚未映射到明确教程规则，不能作为可信入场依据。"),
+        "exit_filter_not_opening_playbook": ("risk_shape", "blocker", "该剧本只作为离场或过滤条件，不允许独立生成开仓候选。"),
     }
     return details.get(code, ("risk_shape", "blocker", f"存在未分类阻塞项：{code}"))
 

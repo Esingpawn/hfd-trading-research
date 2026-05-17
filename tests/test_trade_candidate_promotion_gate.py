@@ -82,6 +82,26 @@ def test_gate_treats_low_rr_as_review_blocker_only_after_shadow_passes() -> None
     assert review.blocker_groups["risk_shape"][0]["severity"] == "blocker"
 
 
+def test_gate_explains_quality_and_trend_blockers_in_chinese() -> None:
+    decision = _decision(
+        blockers=(
+            "quality_score_below_threshold",
+            "parent_trend_conflict",
+            "body_break_invalidation",
+            "official_rule_unmapped",
+            "exit_filter_not_opening_playbook",
+        ),
+    )
+
+    messages = [item["message"] for item in decision.blocker_groups["risk_shape"]]
+    assert all("存在未分类阻塞项" not in message for message in messages)
+    assert any("质量评分" in message for message in messages)
+    assert any("父级趋势" in message for message in messages)
+    assert any("实体突破" in message for message in messages)
+    assert any("教程规则" in message for message in messages)
+    assert any("只作为离场" in message for message in messages)
+
+
 def test_gate_watches_frozen_entry_plan_before_review_ready() -> None:
     decision = _decision(
         promotion_status="paper_review_ready",

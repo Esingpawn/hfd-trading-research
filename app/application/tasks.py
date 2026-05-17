@@ -482,6 +482,7 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
             materialize=_payload_bool(payload, "materialize", True),
             mark_first=_payload_bool(payload, "mark_first", True),
             scoreboard_limit=_payload_int(payload, "scoreboard_limit", 50),
+            paused_group_exploration_limit=_payload_int(payload, "paused_group_exploration_limit", 1),
         )
     if task_name in {"darkflow.shadow_replay", "darkflow-shadow-replay"}:
         return await darkflow_shadow_replay(
