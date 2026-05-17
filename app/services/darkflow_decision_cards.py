@@ -26,6 +26,7 @@ PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING = "isolated_v2_shadow_forward_sample_mi
 PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING = "isolated_v2_shadow_forward_sample_collecting"
 PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED = "isolated_v2_shadow_forward_sample_failed"
 PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED = "entry_plan_retired"
+PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN = "duplicate_shadow_forward_plan"
 PROMOTION_BLOCKER_PERSISTENT_TABLE_MISSING = "persistent_trade_candidate_table_missing"
 _HARD_QUALITY_BLOCKERS = {
     "body_break_invalidation",
@@ -594,7 +595,10 @@ def _merge_lifecycle_blockers(
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
-        blockers.add(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
+        if PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN in blockers:
+            blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
+        else:
+            blockers.add(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
     else:
         blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
         blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
@@ -605,6 +609,7 @@ def _merge_lifecycle_blockers(
         PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING,
         PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED,
         PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED,
+        PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN,
     ]
     return [item for item in ordered if item in blockers] + sorted(blockers - set(ordered))
 

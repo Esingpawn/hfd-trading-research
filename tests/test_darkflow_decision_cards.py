@@ -661,6 +661,65 @@ async def test_shadow_forward_scans_past_expired_front_rows_to_open_later_candid
 
 
 @pytest.mark.asyncio
+async def test_shadow_forward_retires_duplicate_open_plan(session) -> None:
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    for index in range(2):
+        session.add(
+            DarkflowInteraction(
+                interaction_key=f"candidate-duplicate-plan-{index}",
+                zone_key=f"zone-candidate-duplicate-plan-{index}",
+                source_snapshot_id=f"snapshot-candidate-duplicate-plan-{index}",
+                symbol="BTCUSDT",
+                timeframe="short",
+                interval="30m",
+                indicator="trend_price",
+                playbook="pullback_to_cost",
+                direction="long",
+                interaction_type="wick_pierce_reclaim",
+                event_ts=base + timedelta(seconds=index),
+                entry_price=100.0 + index * 0.01,
+                stop_price=99.0,
+                target_price=102.0,
+                invalidation_price=99.0,
+                exit_price=102.0,
+                exit_ts=base + timedelta(minutes=30),
+                exit_reason="target_hit",
+                pnl_pct=0.02,
+                r_multiple=2.0,
+                mfe=0.025,
+                mae=-0.004,
+                status="backtested",
+                context={
+                    "interaction_schema": "v2",
+                    "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+                },
+            )
+        )
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=base, created_at=base))
+    await session.commit()
+    await materialize_darkflow_trade_candidates(session, limit=10)
+    await audit_darkflow_trade_candidates(session, limit=10)
+
+    result = await open_darkflow_shadow_forward_samples(
+        session,
+        limit=10,
+        max_candidate_age_hours=0,
+        entry_tolerance_pct=0.05,
+    )
+    trades = (await session.execute(select(ShadowPaperTrade))).scalars().all()
+    candidates = (await session.execute(select(TradeCandidate).order_by(TradeCandidate.shadow_status))).scalars().all()
+
+    assert len(result["opened"]) == 1
+    assert len(trades) == 1
+    assert trades[0].context["shadow_plan_fingerprint"]
+    assert any(item["reason"] == "duplicate_shadow_forward_plan" for item in result["updated"])
+    assert {candidate.shadow_status for candidate in candidates} == {"collecting", "retired"}
+    retired = next(candidate for candidate in candidates if candidate.shadow_status == "retired")
+    assert retired.promotion_status == "duplicate_shadow_plan"
+    assert retired.promotion_blockers == ["duplicate_shadow_forward_plan"]
+
+
+@pytest.mark.asyncio
 async def test_shadow_forward_waits_when_price_has_not_reached_frozen_entry_range(session) -> None:
     base = datetime.now(timezone.utc) - timedelta(minutes=5)
     session.add(

@@ -12,6 +12,7 @@ from app.models import DarkflowInteraction, ExperimentRun, PriceSnapshot, Shadow
 from app.services.darkflow_decision_cards import (
     PROMOTION_BLOCKER_ANTI_REPAINT_FAILED,
     PROMOTION_BLOCKER_ANTI_REPAINT_MISSING,
+    PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN,
     PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED,
     PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING,
     PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED,
@@ -125,6 +126,26 @@ async def open_darkflow_shadow_forward_samples(
             continue
         if stats["open_trades"]:
             skipped.append({"candidate_key": candidate.candidate_key, "reason": "open_shadow_forward_exists"})
+            continue
+        duplicate_plan = await _open_duplicate_shadow_plan(session, candidate)
+        if duplicate_plan is not None:
+            if _retire_shadow_candidate(
+                candidate,
+                reason="duplicate_shadow_forward_plan",
+                entry_plan_state=None,
+                now=now,
+                blocker=PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN,
+            ):
+                updated.append(_candidate_update_row(candidate, stats, reason="duplicate_shadow_forward_plan"))
+            skipped.append(
+                {
+                    "candidate_key": candidate.candidate_key,
+                    "symbol": candidate.symbol,
+                    "reason": "duplicate_shadow_forward_plan",
+                    "existing_candidate_key": duplicate_plan.candidate_key,
+                    "existing_trade_id": duplicate_plan.id,
+                }
+            )
             continue
         plan_check = _candidate_plan_openable(
             candidate,
@@ -528,6 +549,89 @@ async def _shadow_stats(session: AsyncSession, candidate_key: str) -> dict[str, 
     }
 
 
+async def _open_duplicate_shadow_plan(session: AsyncSession, candidate: TradeCandidate) -> ShadowPaperTrade | None:
+    fingerprint = _candidate_plan_fingerprint(candidate)
+    if fingerprint is None:
+        return None
+    rows = await session.scalars(
+        select(ShadowPaperTrade)
+        .where(
+            ShadowPaperTrade.strategy_name == DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+            ShadowPaperTrade.status == "open",
+            ShadowPaperTrade.symbol == candidate.symbol,
+            ShadowPaperTrade.direction == candidate.direction,
+        )
+        .order_by(ShadowPaperTrade.opened_at.desc(), ShadowPaperTrade.id.desc())
+        .limit(100)
+    )
+    for trade in rows.all():
+        if trade.candidate_key == candidate.candidate_key:
+            continue
+        context = trade.context if isinstance(trade.context, dict) else {}
+        existing = context.get("shadow_plan_fingerprint")
+        if existing == fingerprint:
+            return trade
+        snapshot = context.get("candidate_snapshot") if isinstance(context.get("candidate_snapshot"), dict) else {}
+        if _candidate_snapshot_matches_plan(candidate, snapshot):
+            return trade
+    return None
+
+
+def _candidate_plan_fingerprint(candidate: TradeCandidate) -> str | None:
+    if candidate.entry_price <= 0 or candidate.stop_price <= 0 or candidate.target_price <= 0:
+        return None
+    entry = _rounded_price_bucket(candidate.entry_price)
+    stop = _rounded_price_bucket(candidate.stop_price)
+    target = _rounded_price_bucket(candidate.target_price)
+    return ":".join(
+        [
+            candidate.strategy_id,
+            candidate.symbol,
+            candidate.timeframe,
+            candidate.direction,
+            entry,
+            stop,
+            target,
+        ]
+    )
+
+
+def _candidate_snapshot_matches_plan(candidate: TradeCandidate, snapshot: dict[str, Any]) -> bool:
+    if not snapshot:
+        return False
+    if str(snapshot.get("strategy_id") or "") != candidate.strategy_id:
+        return False
+    if str(snapshot.get("timeframe") or "") != candidate.timeframe:
+        return False
+    if _float(snapshot.get("entry_price")) is None or _float(snapshot.get("stop_price")) is None or _float(snapshot.get("target_price")) is None:
+        return False
+    return (
+        _same_price_bucket(candidate.entry_price, float(snapshot["entry_price"]))
+        and _same_price_bucket(candidate.stop_price, float(snapshot["stop_price"]))
+        and _same_price_bucket(candidate.target_price, float(snapshot["target_price"]))
+    )
+
+
+def _rounded_price_bucket(price: float) -> str:
+    if price >= 1000:
+        digits = 0
+    elif price >= 100:
+        digits = 1
+    elif price >= 10:
+        digits = 2
+    elif price >= 1:
+        digits = 4
+    else:
+        digits = 6
+    return f"{round(float(price), digits):.{digits}f}"
+
+
+def _same_price_bucket(left: float, right: float) -> bool:
+    if left <= 0 or right <= 0:
+        return False
+    return _rounded_price_bucket(left) == _rounded_price_bucket(right)
+
+
 def _update_shadow_lifecycle(candidate: TradeCandidate, stats: dict[str, Any], *, now: datetime) -> bool:
     previous = (candidate.shadow_status, candidate.promotion_status, tuple(candidate.promotion_blockers or []))
     if candidate.shadow_status == "retired":
@@ -551,6 +655,7 @@ def _retire_shadow_candidate(
     reason: str,
     entry_plan_state: dict[str, Any] | None,
     now: datetime,
+    blocker: str = PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED,
 ) -> bool:
     previous = (
         candidate.status,
@@ -561,6 +666,11 @@ def _retire_shadow_candidate(
     )
     candidate.status = "entry_plan_retired"
     candidate.shadow_status = "retired"
+    blockers = set(str(item) for item in (candidate.promotion_blockers or []))
+    blockers.add(blocker)
+    if blocker == PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN:
+        blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
+    candidate.promotion_blockers = _ordered_blockers(blockers)
     payload = dict(candidate.decision_payload or {})
     payload["entry_plan_retirement"] = {
         "reason": reason,
@@ -853,6 +963,7 @@ def _shadow_trade_from_candidate(
             "planned_entry_price": candidate.entry_price,
             "entry_tolerance_pct": entry_tolerance_pct,
             "entry_plan_state": entry_plan_state or {},
+            "shadow_plan_fingerprint": _candidate_plan_fingerprint(candidate),
             "execution_model": _execution_model(asset_tier),
             "candidate_snapshot": _candidate_snapshot(candidate),
         },
@@ -875,10 +986,12 @@ def _apply_lifecycle(candidate: TradeCandidate) -> None:
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
         blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
+        blockers.discard(PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN)
     elif candidate.shadow_status == "collecting":
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
         blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
+        blockers.discard(PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN)
         blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
     elif candidate.shadow_status == "failed":
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
@@ -888,9 +1001,13 @@ def _apply_lifecycle(candidate: TradeCandidate) -> None:
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
-        blockers.add(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
+        if PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN in blockers:
+            blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
+        else:
+            blockers.add(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
     else:
         blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
+        blockers.discard(PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN)
         blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
     candidate.promotion_blockers = _ordered_blockers(blockers)
     candidate.paper_eligible = False
@@ -900,6 +1017,8 @@ def _apply_lifecycle(candidate: TradeCandidate) -> None:
 
 def _promotion_status(candidate: TradeCandidate) -> str:
     blockers = set(candidate.promotion_blockers or [])
+    if PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN in blockers:
+        return "duplicate_shadow_plan"
     if candidate.shadow_status == "retired" or PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED in blockers:
         return "entry_plan_retired"
     if candidate.status != "shadow_candidate":
@@ -925,6 +1044,7 @@ def _ordered_blockers(blockers: set[str]) -> list[str]:
         PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING,
         PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED,
         PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED,
+        PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN,
     ]
     return [item for item in ordered if item in blockers] + sorted(blockers - set(ordered))
 
