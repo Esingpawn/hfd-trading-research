@@ -1038,6 +1038,85 @@ async def test_shadow_forward_skips_invalidated_frozen_entry_range(session) -> N
 
 
 @pytest.mark.asyncio
+async def test_shadow_forward_pauses_weak_symbol_direction_market(session) -> None:
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    for index, pnl in enumerate([-0.01, -0.02, -0.015]):
+        session.add(
+            ShadowPaperTrade(
+                strategy_name=DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+                candidate_type="trade_candidate",
+                candidate_key=f"old-doge-{index}",
+                signal_key=f"old-doge-signal-{index}",
+                symbol="DOGEUSDT",
+                timeframe="short",
+                direction="short",
+                entry_price=0.11,
+                stop_loss=0.112,
+                take_profit=0.106,
+                position_size=1.0,
+                status="closed",
+                pnl=pnl,
+                opened_at=base - timedelta(hours=2, minutes=index),
+                closed_at=base - timedelta(hours=1, minutes=index),
+                context={"shadow_plan_fingerprint": f"old-doge-plan-{index}"},
+            )
+        )
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-shadow-weak-market",
+            zone_key="zone-candidate-shadow-weak-market",
+            source_snapshot_id="snapshot-candidate-shadow-weak-market",
+            symbol="DOGEUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            playbook="pullback_to_cost",
+            direction="short",
+            interaction_type="wick_pierce_reclaim",
+            event_ts=base,
+            entry_price=0.11,
+            stop_price=0.112,
+            target_price=0.106,
+            invalidation_price=0.112,
+            exit_price=0.106,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+            },
+        )
+    )
+    session.add(PriceSnapshot(symbol="DOGEUSDT", price=0.11, raw_payload={}, collected_at=base, created_at=base))
+    await session.commit()
+    await materialize_darkflow_trade_candidates(session, limit=10)
+    await audit_darkflow_trade_candidates(session, limit=10)
+
+    result = await open_darkflow_shadow_forward_samples(
+        session,
+        limit=10,
+        max_candidate_age_hours=1,
+        entry_tolerance_pct=0.05,
+    )
+    candidate = await session.scalar(select(TradeCandidate).where(TradeCandidate.symbol == "DOGEUSDT"))
+    open_trades = (await session.execute(select(ShadowPaperTrade).where(ShadowPaperTrade.status == "open"))).scalars().all()
+
+    assert result["opened"] == []
+    assert result["skipped"][0]["reason"] == "shadow_market_performance_paused"
+    assert result["skipped"][0]["market_gate"]["decision"] == "paused"
+    assert open_trades == []
+    assert candidate is not None
+    assert candidate.promotion_status == "shadow_market_paused"
+    assert "shadow_market_performance_paused" in candidate.promotion_blockers
+    assert candidate.decision_payload["shadow_market_gate"]["reason"] == "weak_symbol_direction_shadow_performance"
+
+
+@pytest.mark.asyncio
 async def test_entry_plan_state_report_summarizes_frozen_candidate_states(session) -> None:
     base = datetime.now(timezone.utc) - timedelta(minutes=5)
     session.add(

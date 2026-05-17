@@ -697,7 +697,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [activePage, setActivePage] = useState<PageId>(() => pageFromHash());
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [filters, setFilters] = useState<Filters>({ query: "", direction: "all", state: "all", minQuality: 0, onlyActionable: false });
+  const [filters, setFilters] = useState<Filters>({ query: "", direction: "all", state: "all", minQuality: 0, onlyActionable: true });
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -923,13 +923,15 @@ function TopStatusBar({ data, errors, loading, onRefresh, onJumpFreshness }: { d
 
 function OverviewPage({ data, rows, onNavigate }: { data: LoadState; rows: CardRow[]; onNavigate: (page: PageId) => void }) {
   const waiting = rows.filter((item) => item.state === "waiting").length;
+  const triggered = rows.filter((item) => item.state === "triggered").length;
+  const actionable = rows.filter((item) => item.state === "waiting" || item.state === "triggered").length;
   const shadowReady = rows.filter((item) => item.promotionStatus === "shadow_forward_pending" || item.status === "shadow_candidate").length;
   return (
     <div className="pageStack">
       <section className="metricGrid">
         <Metric title="暗流质量样本" value={`${fmt(data.darkflow?.quality_interaction_count, 0)} / ${fmt(data.darkflow?.interaction_count, 0)}`} detail={`质量样本盈利因子 ${fmt(data.darkflow?.quality_stats?.profit_factor, 2)}`} tone="good" />
+        <Metric title="当前有效机会" value={fmt(actionable, 0)} detail={`${fmt(triggered, 0)} 已触发 · ${fmt(waiting, 0)} 等待`} tone={actionable > 0 ? "good" : "warn"} />
         <Metric title="候选总数" value={fmt(rows.length, 0)} detail={`${shadowReady} 个进入影子观察边界`} tone="info" />
-        <Metric title="等待入场" value={fmt(waiting, 0)} detail="价格尚未进入冻结入场区间" tone="warn" />
         <Metric title="数据质量" value={qualityText(data.quality?.status)} detail={`${data.quality?.issues.length ?? 0} 个问题`} tone={data.quality?.status === "ok" ? "good" : "warn"} />
       </section>
       <section className="twoColumn">
@@ -2007,6 +2009,7 @@ function blockerDetail(value: string): ReasonItem {
     isolated_v2_shadow_forward_sample_failed: { group: "样本", title: "影子样本未达标", text: "前向影子样本已经闭合，但胜率、盈利因子或回撤没有达到晋级门槛。", tone: "warn" },
     entry_plan_retired: { group: "入场计划", title: "入场计划已退休", text: "原来的冻结入场区间已经过期、错过或失效，不能继续追价，需要等待新的暗流信号。", tone: "warn" },
     duplicate_shadow_forward_plan: { group: "样本", title: "重复影子计划", text: "同一币种、方向、策略和相近入场计划已经在影子采样中，系统不再重复开样本，避免统计被重复信号污染。", tone: "warn" },
+    shadow_market_performance_paused: { group: "样本", title: "该币种方向已暂停采样", text: "同一币种和方向的唯一计划影子表现过弱，系统暂停继续开新影子样本，避免低质量来源继续污染统计。", tone: "warn" },
     parent_trend_conflict: { group: "趋势", title: "与更高周期趋势冲突", text: "入场方向和更大周期趋势相反，容易变成逆势接刀或逆势摸顶。", tone: "warn" },
     quality_score_below_threshold: { group: "评分", title: "质量评分不足", text: "当前综合评分低于候选晋级门槛，可能是确认不足、趋势冲突或样本证据不够。", tone: "warn" },
     rr_ratio_below_threshold: { group: "风控", title: "盈亏比不足", text: "计划止损和目标之间的收益空间不够，即使方向对也不值得承担这笔风险。", tone: "warn" },
@@ -2015,7 +2018,7 @@ function blockerDetail(value: string): ReasonItem {
     blocker_indicators_nearby: { group: "阻断", title: "附近有阻断类指标", text: "入场区域附近出现耗尽、反向大单或结构破坏信号，需要暂停追踪。", tone: "warn" },
   } as Record<string, ReasonItem>)[value] ?? { title: readableCode(value), text: "系统返回了新的阻断码，当前先按原始含义展示，后续可补充风控解释。", tone: "warn" };
 }
-function promotionText(value: string) { return ({ blocked: "研究阻断", shadow_ready_pending_audit: "待防重绘审计", shadow_forward_pending: "待影子入场", shadow_forward_collecting: "影子样本采集中", shadow_forward_failed: "影子样本未达标", entry_plan_retired: "入场计划已退休", duplicate_shadow_plan: "重复影子计划", shadow_running: "影子运行中", paper_review_ready: "待人工复核" } as Record<string, string>)[value] ?? value.replace(/_/g, " "); }
+function promotionText(value: string) { return ({ blocked: "研究阻断", shadow_ready_pending_audit: "待防重绘审计", shadow_forward_pending: "待影子入场", shadow_forward_collecting: "影子样本采集中", shadow_forward_failed: "影子样本未达标", entry_plan_retired: "入场计划已退休", duplicate_shadow_plan: "重复影子计划", shadow_market_paused: "弱势方向暂停", shadow_running: "影子运行中", paper_review_ready: "待人工复核" } as Record<string, string>)[value] ?? value.replace(/_/g, " "); }
 function auditText(value: string) { return ({ missing: "缺失", passed: "通过", failed: "失败" } as Record<string, string>)[value] ?? value; }
 function shadowText(value: string) { return ({ not_started: "未开始", collecting: "采集中", retired: "已退休", failed: "未达标", passed: "已达标", closed: "已结束" } as Record<string, string>)[value] ?? value; }
 function entryStateText(value: string) { return ({ triggered: "已触发", waiting: "等待入场", missed: "已错过", expired: "时间过期", invalidated: "条件作废", missing_price: "缺少价格", invalid_shape: "形态异常", entry_plan_retired: "入场计划已退休", blocked: "研究阻断", shadow_candidate: "影子候选" } as Record<string, string>)[value] ?? value.replace(/_/g, " "); }

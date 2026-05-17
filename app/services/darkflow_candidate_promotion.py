@@ -36,6 +36,12 @@ SHADOW_FORWARD_MIN_CLOSED_TRADES = 10
 SHADOW_FORWARD_MIN_WIN_RATE = 0.52
 SHADOW_FORWARD_MIN_PROFIT_FACTOR = 1.15
 SHADOW_FORWARD_MAX_DRAWDOWN = 0.12
+SHADOW_MARKET_MIN_CLOSED_TRADES = 3
+SHADOW_MARKET_PAUSE_MAX_WIN_RATE = 0.35
+SHADOW_MARKET_PAUSE_MAX_PROFIT_FACTOR = 0.8
+SHADOW_MARKET_PRIORITY_MIN_WIN_RATE = 0.55
+SHADOW_MARKET_PRIORITY_MIN_PROFIT_FACTOR = 1.15
+PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED = "shadow_market_performance_paused"
 _TERMINAL_PLAN_CHECK_REASONS = {
     "unsupported_direction",
     "invalid_plan_prices",
@@ -111,6 +117,20 @@ async def open_darkflow_shadow_forward_samples(
     scanned = 0
     for candidate in rows:
         scanned += 1
+        market_gate = await _shadow_market_performance_gate(session, candidate)
+        if market_gate["decision"] == "paused":
+            if _pause_shadow_candidate_for_market(candidate, gate=market_gate, now=now):
+                updated.append(_candidate_update_row(candidate, await _shadow_stats(session, candidate.candidate_key), reason="shadow_market_performance_paused"))
+            skipped.append(
+                {
+                    "candidate_key": candidate.candidate_key,
+                    "symbol": candidate.symbol,
+                    "direction": candidate.direction,
+                    "reason": "shadow_market_performance_paused",
+                    "market_gate": market_gate,
+                }
+            )
+            continue
         stats = await _shadow_stats(session, candidate.candidate_key)
         if _update_shadow_lifecycle(candidate, stats, now=now):
             updated.append(
@@ -475,7 +495,20 @@ async def _shadow_ready_candidate_rows(session: AsyncSession, *, limit: int) -> 
         )
         .limit(max(1, int(limit)))
     )
-    return list(rows.all())
+    candidates = list(rows.all())
+    market_stats = await _shadow_market_performance_stats(session)
+
+    def sort_key(candidate: TradeCandidate) -> tuple[int, datetime, datetime, str]:
+        gate = _shadow_market_gate_from_stats(candidate, market_stats)
+        rank = {"priority": 2, "neutral": 1, "paused": 0}.get(str(gate["decision"]), 1)
+        return (
+            rank,
+            _aware(candidate.setup_time or datetime.min.replace(tzinfo=timezone.utc)),
+            _aware(candidate.updated_at or datetime.min.replace(tzinfo=timezone.utc)),
+            candidate.id,
+        )
+
+    return sorted(candidates, key=sort_key, reverse=True)
 
 
 async def _source_interaction(session: AsyncSession, candidate: TradeCandidate) -> DarkflowInteraction | None:
@@ -559,6 +592,156 @@ async def _shadow_stats(session: AsyncSession, candidate_key: str) -> dict[str, 
         "profit_factor": gross_win / gross_loss if gross_loss else (999.0 if gross_win else None),
         "max_drawdown": _max_drawdown(returns),
     }
+
+
+async def _shadow_market_performance_gate(session: AsyncSession, candidate: TradeCandidate) -> dict[str, Any]:
+    return _shadow_market_gate_from_stats(candidate, await _shadow_market_performance_stats(session))
+
+
+async def _shadow_market_performance_stats(session: AsyncSession) -> dict[tuple[str, str], dict[str, Any]]:
+    rows = await session.scalars(
+        select(ShadowPaperTrade)
+        .where(ShadowPaperTrade.strategy_name == DARKFLOW_V2_SHADOW_STRATEGY_NAME)
+        .order_by(ShadowPaperTrade.opened_at)
+    )
+    buckets: dict[tuple[str, str], list[ShadowPaperTrade]] = {}
+    for trade in rows.all():
+        buckets.setdefault((trade.symbol, trade.direction), []).append(trade)
+    return {key: _market_trade_stats(_unique_market_plan_trades(items)) for key, items in buckets.items()}
+
+
+def _shadow_market_gate_from_stats(candidate: TradeCandidate, stats_by_market: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any]:
+    stats = stats_by_market.get((candidate.symbol, candidate.direction)) or _empty_market_stats()
+    closed = int(stats.get("closed_trades") or 0)
+    win_rate = stats.get("win_rate")
+    profit_factor = stats.get("profit_factor")
+    if (
+        closed >= SHADOW_MARKET_MIN_CLOSED_TRADES
+        and isinstance(win_rate, (int, float))
+        and isinstance(profit_factor, (int, float))
+        and float(win_rate) <= SHADOW_MARKET_PAUSE_MAX_WIN_RATE
+        and float(profit_factor) <= SHADOW_MARKET_PAUSE_MAX_PROFIT_FACTOR
+    ):
+        decision = "paused"
+        reason = "weak_symbol_direction_shadow_performance"
+    elif (
+        closed >= SHADOW_MARKET_MIN_CLOSED_TRADES
+        and isinstance(win_rate, (int, float))
+        and isinstance(profit_factor, (int, float))
+        and float(win_rate) >= SHADOW_MARKET_PRIORITY_MIN_WIN_RATE
+        and float(profit_factor) >= SHADOW_MARKET_PRIORITY_MIN_PROFIT_FACTOR
+    ):
+        decision = "priority"
+        reason = "strong_symbol_direction_shadow_performance"
+    else:
+        decision = "neutral"
+        reason = "insufficient_or_mixed_symbol_direction_shadow_performance"
+    return {
+        "decision": decision,
+        "reason": reason,
+        "symbol": candidate.symbol,
+        "direction": candidate.direction,
+        "closed_trades": closed,
+        "win_rate": win_rate,
+        "profit_factor": profit_factor,
+        "max_drawdown": stats.get("max_drawdown"),
+        "thresholds": {
+            "min_closed_trades": SHADOW_MARKET_MIN_CLOSED_TRADES,
+            "pause_max_win_rate": SHADOW_MARKET_PAUSE_MAX_WIN_RATE,
+            "pause_max_profit_factor": SHADOW_MARKET_PAUSE_MAX_PROFIT_FACTOR,
+            "priority_min_win_rate": SHADOW_MARKET_PRIORITY_MIN_WIN_RATE,
+            "priority_min_profit_factor": SHADOW_MARKET_PRIORITY_MIN_PROFIT_FACTOR,
+        },
+    }
+
+
+def _pause_shadow_candidate_for_market(candidate: TradeCandidate, *, gate: dict[str, Any], now: datetime) -> bool:
+    previous = (
+        candidate.status,
+        candidate.shadow_status,
+        candidate.promotion_status,
+        tuple(candidate.promotion_blockers or []),
+        candidate.decision_payload,
+    )
+    blockers = set(str(item) for item in (candidate.promotion_blockers or []))
+    blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
+    blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
+    blockers.add(PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED)
+    candidate.promotion_blockers = _ordered_blockers(blockers)
+    candidate.shadow_status = "retired"
+    candidate.status = "entry_plan_retired"
+    payload = dict(candidate.decision_payload or {})
+    payload["shadow_market_gate"] = gate | {"paused_at": _iso(now)}
+    candidate.decision_payload = payload
+    candidate.updated_at = now
+    _apply_lifecycle(candidate)
+    return previous != (
+        candidate.status,
+        candidate.shadow_status,
+        candidate.promotion_status,
+        tuple(candidate.promotion_blockers or []),
+        candidate.decision_payload,
+    )
+
+
+def _unique_market_plan_trades(trades: list[ShadowPaperTrade]) -> list[ShadowPaperTrade]:
+    best_by_plan: dict[str, ShadowPaperTrade] = {}
+    for trade in trades:
+        key = _trade_market_plan_fingerprint(trade)
+        current = best_by_plan.get(key)
+        if current is None or _trade_market_plan_rank(trade) > _trade_market_plan_rank(current):
+            best_by_plan[key] = trade
+    return list(best_by_plan.values())
+
+
+def _trade_market_plan_rank(trade: ShadowPaperTrade) -> tuple[int, datetime, str]:
+    closed_rank = 1 if trade.status == "closed" and isinstance(trade.pnl, (int, float)) else 0
+    observed_at = trade.closed_at or trade.opened_at or datetime.min.replace(tzinfo=timezone.utc)
+    return (closed_rank, _aware(observed_at), trade.id)
+
+
+def _trade_market_plan_fingerprint(trade: ShadowPaperTrade) -> str:
+    context = trade.context if isinstance(trade.context, dict) else {}
+    explicit = context.get("shadow_plan_fingerprint")
+    if explicit:
+        return f"explicit:{explicit}"
+    snapshot = context.get("candidate_snapshot") if isinstance(context.get("candidate_snapshot"), dict) else {}
+    return ":".join(
+        [
+            trade.strategy_name,
+            str(snapshot.get("strategy_id") or trade.strategy_name),
+            trade.symbol,
+            trade.timeframe,
+            trade.direction,
+            _rounded_price_bucket(_float(snapshot.get("entry_price")) or trade.entry_price),
+            _rounded_price_bucket(_float(snapshot.get("stop_price")) or trade.stop_loss),
+            _rounded_price_bucket(_float(snapshot.get("target_price")) or trade.take_profit),
+        ]
+    )
+
+
+def _market_trade_stats(trades: list[ShadowPaperTrade]) -> dict[str, Any]:
+    closed = sorted(
+        [item for item in trades if item.status == "closed" and isinstance(item.pnl, (int, float))],
+        key=lambda item: _aware(item.closed_at or item.opened_at or datetime.min.replace(tzinfo=timezone.utc)),
+    )
+    wins = [float(item.pnl) for item in closed if float(item.pnl or 0.0) > 0]
+    losses = [float(item.pnl) for item in closed if float(item.pnl or 0.0) < 0]
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    returns = [float(item.pnl or 0.0) for item in closed]
+    return {
+        "open_trades": sum(1 for item in trades if item.status == "open"),
+        "closed_trades": len(closed),
+        "total_trades": len(trades),
+        "win_rate": len(wins) / len(closed) if closed else None,
+        "profit_factor": gross_win / gross_loss if gross_loss else (999.0 if gross_win else None),
+        "max_drawdown": _max_drawdown(returns),
+    }
+
+
+def _empty_market_stats() -> dict[str, Any]:
+    return {"open_trades": 0, "closed_trades": 0, "total_trades": 0, "win_rate": None, "profit_factor": None, "max_drawdown": 0.0}
 
 
 async def _open_duplicate_shadow_plan(session: AsyncSession, candidate: TradeCandidate) -> ShadowPaperTrade | None:
@@ -1013,7 +1196,7 @@ def _apply_lifecycle(candidate: TradeCandidate) -> None:
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
         blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
-        if PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN in blockers:
+        if PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN in blockers or PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED in blockers:
             blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
         else:
             blockers.add(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
@@ -1029,6 +1212,8 @@ def _apply_lifecycle(candidate: TradeCandidate) -> None:
 
 def _promotion_status(candidate: TradeCandidate) -> str:
     blockers = set(candidate.promotion_blockers or [])
+    if PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED in blockers:
+        return "shadow_market_paused"
     if PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN in blockers:
         return "duplicate_shadow_plan"
     if candidate.shadow_status == "retired" or PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED in blockers:
@@ -1057,6 +1242,7 @@ def _ordered_blockers(blockers: set[str]) -> list[str]:
         PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED,
         PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED,
         PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN,
+        PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED,
     ]
     return [item for item in ordered if item in blockers] + sorted(blockers - set(ordered))
 
