@@ -481,6 +481,74 @@ async def test_trade_candidates_retire_duplicate_exposure_plans_during_materiali
 
 
 @pytest.mark.asyncio
+async def test_trade_candidates_choose_sampleable_duplicate_exposure_representative(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    rows = [
+        {
+            "key": "blocked-high-rr",
+            "target": 104.0,
+            "quality": 95.0,
+            "blockers": ["parent_trend_conflict"],
+        },
+        {
+            "key": "sampleable-lower-rr",
+            "target": 102.0,
+            "quality": 82.0,
+            "blockers": [],
+        },
+    ]
+    for row in rows:
+        session.add(
+            DarkflowInteraction(
+                interaction_key=f"candidate-sampleable-duplicate-{row['key']}",
+                zone_key=f"zone-sampleable-duplicate-{row['key']}",
+                source_snapshot_id=f"snapshot-sampleable-duplicate-{row['key']}",
+                symbol="BTCUSDT",
+                timeframe="short",
+                interval="30m",
+                indicator="trend_price",
+                playbook="pullback_to_cost",
+                direction="long",
+                interaction_type="wick_pierce_reclaim",
+                event_ts=base,
+                entry_price=100.0,
+                stop_price=99.0,
+                target_price=float(row["target"]),
+                invalidation_price=99.0,
+                exit_price=float(row["target"]),
+                exit_ts=base + timedelta(minutes=30),
+                exit_reason="target_hit",
+                pnl_pct=0.02,
+                r_multiple=2.0,
+                mfe=0.025,
+                mae=-0.004,
+                status="backtested",
+                context={
+                    "interaction_schema": "v2",
+                    "quality": {
+                        "score": float(row["quality"]),
+                        "confirmations": ["official_rule_mapped", "dynamic_darkflow_target"],
+                        "blockers": row["blockers"],
+                    },
+                },
+            )
+        )
+    await session.commit()
+
+    result = await materialize_darkflow_trade_candidates(session, limit=10)
+    candidates = (await session.execute(select(TradeCandidate).order_by(TradeCandidate.target_price))).scalars().all()
+    representative = next(candidate for candidate in candidates if candidate.status == "shadow_candidate")
+    duplicate = next(candidate for candidate in candidates if candidate.status == "entry_plan_retired")
+
+    assert result["duplicate_exposure_count"] == 1
+    assert representative.candidate_key.endswith("sampleable-lower-rr")
+    assert representative.blockers == []
+    assert representative.target_price == 102.0
+    assert duplicate.candidate_key.endswith("blocked-high-rr")
+    assert duplicate.decision_payload["duplicate_shadow_plan"]["duplicate_of"] == representative.candidate_key
+
+
+@pytest.mark.asyncio
 async def test_trade_candidate_materialize_fetches_deeper_card_pool_for_coverage(session) -> None:
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
     for index, symbol in enumerate(["BTCUSDT", "ETHUSDT", "SOLUSDT"]):

@@ -521,10 +521,14 @@ def _representative_exposure_candidates(cards: list[dict[str, Any]]) -> dict[str
     return representatives
 
 
-def _representative_rank(card: dict[str, Any]) -> tuple[float, float, str]:
+def _representative_rank(card: dict[str, Any]) -> tuple[int, float, float, str]:
     scores = card.get("scores") if isinstance(card.get("scores"), dict) else {}
     risk = card.get("risk") if isinstance(card.get("risk"), dict) else {}
+    risk_gate = card.get("risk_gate") if isinstance(card.get("risk_gate"), dict) else {}
+    blockers = [str(value) for value in risk_gate.get("blockers") or []]
+    sampleable_rank = 1 if not _shadow_sampling_blockers(blockers) else 0
     return (
+        sampleable_rank,
         _float(scores.get("quality_score")) or 0.0,
         _float(risk.get("rr_ratio")) or 0.0,
         str(card.get("card_id") or ""),
