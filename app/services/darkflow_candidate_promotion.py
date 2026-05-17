@@ -26,6 +26,7 @@ DEFAULT_SHADOW_FORWARD_LIMIT = 100
 DEFAULT_SHADOW_FORWARD_SCAN_MULTIPLIER = 5
 DEFAULT_MAX_CANDIDATE_AGE_HOURS = 72.0
 DEFAULT_ENTRY_TOLERANCE_PCT = 0.025
+DEFAULT_MAX_OPEN_SHADOW_TRADES_PER_MARKET = 3
 SHADOW_FEE_RATE = 0.0004
 SHADOW_SLIPPAGE_RATE_BY_TIER = {
     "core": 0.0002,
@@ -114,6 +115,7 @@ async def open_darkflow_shadow_forward_samples(
     stats_by_candidate = await _shadow_stats_by_candidate(session, [candidate.candidate_key for candidate in rows])
     latest_prices = await _latest_prices(session, sorted({candidate.symbol for candidate in rows}))
     open_plan_index = await _open_shadow_plan_index(session, rows)
+    open_market_counts = _open_shadow_market_counts(open_plan_index)
     opened: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     updated: list[dict[str, Any]] = []
@@ -151,6 +153,19 @@ async def open_darkflow_shadow_forward_samples(
             continue
         if stats["open_trades"]:
             skipped.append({"candidate_key": candidate.candidate_key, "reason": "open_shadow_forward_exists"})
+            continue
+        market_open_count = open_market_counts.get((candidate.symbol, candidate.direction), 0)
+        if market_open_count >= DEFAULT_MAX_OPEN_SHADOW_TRADES_PER_MARKET:
+            skipped.append(
+                {
+                    "candidate_key": candidate.candidate_key,
+                    "symbol": candidate.symbol,
+                    "direction": candidate.direction,
+                    "reason": "market_shadow_forward_slot_full",
+                    "open_market_trades": market_open_count,
+                    "max_open_market_trades": DEFAULT_MAX_OPEN_SHADOW_TRADES_PER_MARKET,
+                }
+            )
             continue
         duplicate_plan = _open_duplicate_shadow_plan_from_index(open_plan_index, candidate)
         if duplicate_plan is not None:
@@ -221,6 +236,7 @@ async def open_darkflow_shadow_forward_samples(
             continue
         session.add(trade)
         _index_open_shadow_trade(open_plan_index, trade)
+        open_market_counts[(candidate.symbol, candidate.direction)] = open_market_counts.get((candidate.symbol, candidate.direction), 0) + 1
         candidate.shadow_status = "collecting"
         candidate.updated_at = now
         _apply_lifecycle(candidate)
@@ -502,12 +518,16 @@ async def _shadow_ready_candidate_rows(session: AsyncSession, *, limit: int) -> 
     )
     candidates = list(rows.all())
     market_stats = await _shadow_market_performance_stats(session)
+    stats_by_candidate = await _shadow_stats_by_candidate(session, [candidate.candidate_key for candidate in candidates])
 
-    def sort_key(candidate: TradeCandidate) -> tuple[int, datetime, datetime, str]:
+    def sort_key(candidate: TradeCandidate) -> tuple[int, int, datetime, datetime, str]:
         gate = _shadow_market_gate_from_stats(candidate, market_stats)
         rank = {"priority": 2, "neutral": 1, "paused": 0}.get(str(gate["decision"]), 1)
+        stats = _candidate_stats(stats_by_candidate, candidate)
+        no_shadow_sample_rank = 1 if stats["total_trades"] == 0 else 0
         return (
             rank,
+            no_shadow_sample_rank,
             _aware(candidate.setup_time or datetime.min.replace(tzinfo=timezone.utc)),
             _aware(candidate.updated_at or datetime.min.replace(tzinfo=timezone.utc)),
             candidate.id,
@@ -904,6 +924,13 @@ def _open_duplicate_shadow_plan_from_index(
     if fingerprint is None:
         return None
     return index.get((candidate.symbol, candidate.direction), {}).get(f"candidate:{fingerprint}")
+
+
+def _open_shadow_market_counts(index: dict[tuple[str, str], dict[str, ShadowPaperTrade]]) -> dict[tuple[str, str], int]:
+    counts: dict[tuple[str, str], int] = {}
+    for market, bucket in index.items():
+        counts[market] = len({trade.id for trade in bucket.values()})
+    return counts
 
 
 def _index_open_shadow_trade(

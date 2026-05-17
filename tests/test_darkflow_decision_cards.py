@@ -885,6 +885,86 @@ async def test_shadow_forward_round_robins_markets_for_sample_coverage(session) 
 
 
 @pytest.mark.asyncio
+async def test_shadow_forward_caps_open_samples_per_symbol_direction(session) -> None:
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    for index in range(3):
+        session.add(
+            ShadowPaperTrade(
+                strategy_name=DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+                candidate_type="trade_candidate",
+                candidate_key=f"existing-btc-{index}",
+                signal_key=f"existing-btc-signal-{index}",
+                symbol="BTCUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=100.0 + index,
+                stop_loss=99.0 + index,
+                take_profit=102.0 + index,
+                position_size=1.0,
+                status="open",
+                opened_at=base + timedelta(seconds=index),
+                context={
+                    "shadow_forward": True,
+                    "shadow_plan_fingerprint": f"existing-btc-plan-{index}",
+                    "candidate_snapshot": {
+                        "strategy_id": "pullback_to_cost",
+                        "timeframe": "short",
+                        "entry_price": 100.0 + index,
+                        "stop_price": 99.0 + index,
+                        "target_price": 102.0 + index,
+                    },
+                },
+            )
+        )
+    for index, symbol in enumerate(["BTCUSDT", "ETHUSDT"]):
+        session.add(
+            DarkflowInteraction(
+                interaction_key=f"candidate-market-cap-{symbol}",
+                zone_key=f"zone-market-cap-{symbol}",
+                source_snapshot_id=f"snapshot-market-cap-{symbol}",
+                symbol=symbol,
+                timeframe="short",
+                interval="30m",
+                indicator="trend_price",
+                playbook="pullback_to_cost",
+                direction="long",
+                interaction_type="wick_pierce_reclaim",
+                event_ts=base + timedelta(minutes=index),
+                entry_price=100.0,
+                stop_price=99.0,
+                target_price=102.0,
+                invalidation_price=99.0,
+                exit_price=102.0,
+                exit_ts=base + timedelta(minutes=30 + index),
+                exit_reason="target_hit",
+                pnl_pct=0.02,
+                r_multiple=2.0,
+                mfe=0.025,
+                mae=-0.004,
+                status="backtested",
+                context={
+                    "interaction_schema": "v2",
+                    "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+                },
+            )
+        )
+        session.add(PriceSnapshot(symbol=symbol, price=100.0, raw_payload={}, collected_at=base, created_at=base))
+    await session.commit()
+    await materialize_darkflow_trade_candidates(session, limit=10)
+    await audit_darkflow_trade_candidates(session, limit=10)
+
+    result = await open_darkflow_shadow_forward_samples(
+        session,
+        limit=2,
+        max_candidate_age_hours=0,
+        entry_tolerance_pct=0.05,
+    )
+
+    assert [item["symbol"] for item in result["opened"]] == ["ETHUSDT"]
+    assert any(item["reason"] == "market_shadow_forward_slot_full" and item["symbol"] == "BTCUSDT" for item in result["skipped"])
+
+
+@pytest.mark.asyncio
 async def test_shadow_forward_retires_duplicate_open_plan(session) -> None:
     base = datetime.now(timezone.utc) - timedelta(minutes=5)
     for index in range(2):
