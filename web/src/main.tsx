@@ -591,7 +591,7 @@ type LoadState = {
 
 type SectionKey = keyof LoadState;
 type LoadErrors = Partial<Record<SectionKey, string>>;
-type PageId = "overview" | "tradeCards" | "candidates" | "entryPlans" | "experimentLab" | "backtest" | "paperTrading" | "shadow" | "indicatorMap" | "dataFreshness" | "safety" | "logs";
+type PageId = "overview" | "tradeCards" | "candidates" | "entryPlans" | "experimentLab" | "backtest" | "paperTrading" | "shadow" | "indicatorMap" | "legacyLab" | "dataFreshness" | "safety" | "logs";
 type NavItem = { id: PageId; label: string; icon: typeof Gauge; enabled: boolean; hint?: string };
 type NavGroup = { title: string; items: NavItem[] };
 type Filters = { query: string; direction: "all" | "long" | "short"; state: string; minQuality: number; onlyActionable: boolean };
@@ -645,6 +645,7 @@ const NAV_GROUPS: NavGroup[] = [
       { id: "paperTrading", label: "纸上交易", icon: Database, enabled: true },
       { id: "shadow", label: "影子交易", icon: LineChart, enabled: true },
       { id: "indicatorMap", label: "指标教程映射", icon: BookOpen, enabled: true },
+      { id: "legacyLab", label: "Legacy 对照", icon: FileWarning, enabled: true },
     ],
   },
   {
@@ -766,6 +767,8 @@ function App() {
     if (activePage === "experimentLab") {
       if (data.indicatorCoverage === null && !errors.indicatorCoverage) void loadSection("indicatorCoverage", () => fetchJson<IndicatorCoverageReport>("/signals/experiments", 16000));
       if (data.experimentEffectiveness === null && !errors.experimentEffectiveness) void loadSection("experimentEffectiveness", () => fetchJson<ExperimentEffectivenessReport>("/signals/experiment-effectiveness?horizon=4h&min_samples=5", 16000));
+    }
+    if (activePage === "legacyLab") {
       if (data.featurePaperAb === null && !errors.featurePaperAb) void loadSection("featurePaperAb", () => fetchJson<FeaturePaperAbReport>("/features/paper-ab/latest?horizon=30m", 16000));
       if (data.featureSegmentPaperAb === null && !errors.featureSegmentPaperAb) void loadSection("featureSegmentPaperAb", () => fetchJson<FeaturePaperAbReport>("/features/segment-paper-ab/latest?horizon=30m", 16000));
     }
@@ -827,6 +830,7 @@ function App() {
         {activePage === "backtest" && <BacktestPage data={data} />}
         {activePage === "paperTrading" && <PaperTradingPage stats={data.paperStats} trades={data.paperTrades} />}
         {activePage === "shadow" && <ShadowPage data={data} rows={rows} />}
+        {activePage === "legacyLab" && <LegacyLabPage data={data} />}
         {activePage === "dataFreshness" && <DataFreshnessPage data={data} errors={errors} />}
         {activePage === "safety" && <SafetyPage safety={data.safety} />}
         {activePage === "indicatorMap" && <IndicatorMapPage data={data} rows={rows} />}
@@ -1232,13 +1236,9 @@ function ExperimentLabPage({ data, rows, onNavigate }: { data: LoadState; rows: 
   const effectRows = [...(data.experimentEffectiveness?.indicators ?? [])]
     .sort((a, b) => Number(b.sample_count ?? 0) - Number(a.sample_count ?? 0))
     .slice(0, 12);
-  const featureAb = data.featurePaperAb;
-  const segmentAb = data.featureSegmentPaperAb;
-  const candidateArm = segmentAb?.arms?.candidate ?? featureAb?.arms?.candidate;
-  const controlArm = segmentAb?.arms?.matched_control ?? segmentAb?.arms?.all_control ?? featureAb?.arms?.control;
-  const selectedCount = Number(segmentAb?.selected_candidate_count ?? featureAb?.selected_candidate_count ?? 0);
-  const labeledCount = Number(segmentAb?.data_quality?.labeled_count ?? featureAb?.data_quality?.labeled_count ?? data.experimentEffectiveness?.event_count ?? 0);
+  const labeledCount = Number(data.experimentEffectiveness?.event_count ?? 0);
   const deepUsed = indicatorMapRows(data, rows).filter((item) => item.stage === "候选/影子" || item.stage === "已进评分" || item.stage === "回测覆盖").length;
+  const shadowClosed = Number(data.shadow?.unique_plan_stats?.closed_trades ?? data.shadow?.closed_trades ?? 0);
   return (
     <div className="pageStack">
       <Panel title="信号闭环说明" subtitle="指标不能只看一次回测，必须经过实验、回测、影子/纸上前向验证">
@@ -1250,26 +1250,26 @@ function ExperimentLabPage({ data, rows, onNavigate }: { data: LoadState; rows: 
         </div>
       </Panel>
       <section className="metricGrid compactMetrics">
-        <Metric title="实验样本" value={fmt(labeledCount, 0)} detail={`4h 实验事件 ${fmt(data.experimentEffectiveness?.event_count, 0)}`} tone="info" />
-        <Metric title="分段候选" value={fmt(selectedCount, 0)} detail={`30m A/B：${researchStatusText(segmentAb?.data_quality?.status ?? featureAb?.data_quality?.status)}`} tone={selectedCount > 0 ? "good" : "warn"} />
-        <Metric title="候选胜率" value={pct(candidateArm?.win_rate)} detail={`对照胜率 ${pct(controlArm?.win_rate)}`} tone="good" />
-        <Metric title="候选盈利因子" value={fmt(candidateArm?.profit_factor, 2)} detail={`对照 PF ${fmt(controlArm?.profit_factor, 2)}`} tone="good" />
+        <Metric title="暗流实验样本" value={fmt(labeledCount, 0)} detail="4h 指标有效性样本" tone="info" />
+        <Metric title="深度使用指标" value={fmt(deepUsed, 0)} detail="进入评分、回测、候选或影子" tone={deepUsed > 0 ? "good" : "warn"} />
+        <Metric title="影子前向平仓" value={fmt(shadowClosed, 0)} detail="唯一计划口径优先" tone={shadowClosed > 0 ? "good" : "warn"} />
+        <Metric title="纸上样本进度" value={pct(data.paperStats?.sample_progress)} detail={`${fmt(data.paperStats?.closed_trades, 0)} / ${fmt(data.paperStats?.minimum_sample, 0)}`} tone={data.paperStats?.sample_ready ? "good" : "warn"} />
       </section>
       <section className="twoColumn">
-        <Panel title="分段纸上 A/B" subtitle={`样本去重后的候选表现，更新时间 ${timeText(segmentAb?.generated_at)}`}>
-          <div className="abCompareGrid">
-            <ResearchArm title="候选组" stats={candidateArm} />
-            <ResearchArm title="对照组" stats={controlArm} />
+        <Panel title="主路径晋级判断" subtitle="只看暗流 v2 交易卡、教程剧本、影子前向和真实纸上">
+          <div className="auditGrid labAudit">
+            <AuditItem label="教程指标进入评分" ok={deepUsed > 0} text={`${deepUsed} 个指标进入深度链路`} />
+            <AuditItem label="交易卡候选" ok={rows.length > 0} text={`${fmt(rows.length, 0)} 张/条候选证据`} />
+            <AuditItem label="影子前向" ok={shadowClosed > 0} text={`${fmt(shadowClosed, 0)} 个唯一计划已平仓`} />
+            <AuditItem label="纸上晋级" ok={Boolean(data.paperStats?.sample_ready)} text={data.paperStats?.sample_ready ? "样本达到下限" : "样本不足，不能定结论"} />
           </div>
-          <div className="researchNote">
-            <strong>当前结论：</strong>{segmentAbConclusion(segmentAb)}
-          </div>
+          <p className="bodyText labConclusion">当前主路径只允许暗流 v2 候选继续晋级。旧版特征/分段 A/B 已移到 Legacy 对照页，仅用于历史参考，不能直接改变开仓权重。</p>
         </Panel>
         <Panel title="闭环缺口" subtitle="这些数字决定下一步该补什么">
           <div className="auditGrid labAudit">
             <AuditItem label="指标深度使用" ok={deepUsed > 0} text={`${deepUsed} 个`} />
-            <AuditItem label="候选 A/B" ok={selectedCount > 0} text={selectedCount > 0 ? "已有候选" : "暂无候选"} />
-            <AuditItem label="影子交易" ok={Number(data.shadow?.unique_plan_stats?.closed_trades ?? data.shadow?.closed_trades ?? 0) > 0} text={`${fmt(data.shadow?.unique_plan_stats?.closed_trades ?? data.shadow?.closed_trades, 0)} 唯一计划已平仓`} />
+            <AuditItem label="交易卡候选" ok={rows.length > 0} text={`${fmt(rows.length, 0)} 条候选证据`} />
+            <AuditItem label="影子交易" ok={shadowClosed > 0} text={`${fmt(shadowClosed, 0)} 唯一计划已平仓`} />
             <AuditItem label="纸上样本" ok={Boolean(data.paperStats?.sample_ready)} text={`${fmt(data.paperStats?.closed_trades, 0)} / ${fmt(data.paperStats?.minimum_sample, 0)}`} />
           </div>
           <div className="actionList compactActions">
@@ -1300,6 +1300,46 @@ function ExperimentLabPage({ data, rows, onNavigate }: { data: LoadState; rows: 
           {!effectRows.length && <StateBox type="empty" title="实验室数据未加载" text="等待 /signals/experiment-effectiveness 或 /signals/experiments 返回。" />}
         </div>
       </Panel>
+    </div>
+  );
+}
+
+function LegacyLabPage({ data }: { data: LoadState }) {
+  const featureAb = data.featurePaperAb;
+  const segmentAb = data.featureSegmentPaperAb;
+  const candidateArm = segmentAb?.arms?.candidate ?? featureAb?.arms?.candidate;
+  const controlArm = segmentAb?.arms?.matched_control ?? segmentAb?.arms?.all_control ?? featureAb?.arms?.control;
+  const selectedCount = Number(segmentAb?.selected_candidate_count ?? featureAb?.selected_candidate_count ?? 0);
+  const labeledCount = Number(segmentAb?.data_quality?.labeled_count ?? featureAb?.data_quality?.labeled_count ?? 0);
+  return (
+    <div className="pageStack">
+      <StateBox type="warning" title="Legacy/Control 对照区" text="这里展示旧版通用特征、分段候选和 A/B 对照结果。它们只用于历史参考和回归比较，不能直接驱动暗流 v2 开仓评分。" />
+      <section className="metricGrid compactMetrics">
+        <Metric title="旧版标注样本" value={fmt(labeledCount, 0)} detail="feature/segment 历史标签" tone="info" />
+        <Metric title="旧版候选" value={fmt(selectedCount, 0)} detail={`状态：${researchStatusText(segmentAb?.data_quality?.status ?? featureAb?.data_quality?.status)}`} tone={selectedCount > 0 ? "good" : "warn"} />
+        <Metric title="旧候选胜率" value={pct(candidateArm?.win_rate)} detail={`对照胜率 ${pct(controlArm?.win_rate)}`} tone="info" />
+        <Metric title="旧候选盈利因子" value={fmt(candidateArm?.profit_factor, 2)} detail={`对照 PF ${fmt(controlArm?.profit_factor, 2)}`} tone="info" />
+      </section>
+      <section className="twoColumn">
+        <Panel title="分段纸上 A/B 对照" subtitle={`样本去重后的旧候选表现，更新时间 ${timeText(segmentAb?.generated_at)}`}>
+          <div className="abCompareGrid">
+            <ResearchArm title="旧候选组" stats={candidateArm} />
+            <ResearchArm title="对照组" stats={controlArm} />
+          </div>
+          <div className="researchNote legacyWarning">
+            <strong>对照结论：</strong>{segmentAbConclusion(segmentAb)}
+          </div>
+        </Panel>
+        <Panel title="为什么降级" subtitle="避免旧链路干扰实盘级暗流纠偏">
+          <div className="auditGrid labAudit">
+            <AuditItem label="开仓权重" ok={false} text="不允许直接使用" />
+            <AuditItem label="主路径" ok={false} text="不是暗流 v2" />
+            <AuditItem label="历史参考" ok={true} text="可用于对照" />
+            <AuditItem label="迁移条件" ok={false} text="需转换成 DecisionCard" />
+          </div>
+          <p className="bodyText labConclusion">如果某个旧特征确实有稳定优势，下一步也不是直接恢复权重，而是把它改写成教程语义明确的暗流 v2 指标事件，再经过防重绘、回测、影子前向和纸上样本。</p>
+        </Panel>
+      </section>
     </div>
   );
 }
@@ -1845,6 +1885,7 @@ function relevantLoadErrors(page: PageId, errors: LoadErrors): LoadErrors {
     paperTrading: ["paperStats", "paperTrades"],
     shadow: ["shadow", "shadowTrades"],
     indicatorMap: ["rulebook", "playbooks", "indicatorCoverage"],
+    legacyLab: ["featurePaperAb", "featureSegmentPaperAb"],
     dataFreshness: ["entryStates"],
     safety: ["safety"],
     logs: [],
@@ -1910,8 +1951,8 @@ function StatusBadge({ label, tone }: { label: string; tone: string }) {
   return <span className={`statusBadge ${tone}`}>{label}</span>;
 }
 
-function StateBox({ type, title, text, action, onAction }: { type: "empty" | "loading" | "error"; title: string; text: string; action?: string; onAction?: () => void }) {
-  const Icon = type === "error" ? XCircle : type === "loading" ? RefreshCcw : SlidersHorizontal;
+function StateBox({ type, title, text, action, onAction }: { type: "empty" | "loading" | "error" | "warning"; title: string; text: string; action?: string; onAction?: () => void }) {
+  const Icon = type === "error" ? XCircle : type === "loading" ? RefreshCcw : type === "warning" ? AlertTriangle : SlidersHorizontal;
   return <div className={`stateBox ${type}`}><Icon size={20} /><div><strong>{title}</strong><span>{text}</span>{action && <button onClick={onAction}>{action}</button>}</div></div>;
 }
 

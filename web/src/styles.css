@@ -467,6 +467,7 @@ button { color: inherit; }
 }
 .stateBox.loading svg { color: var(--blue); animation: spin 1.2s linear infinite; }
 .stateBox.error { border-color: #6b2b2e; color: #fecaca; background: var(--red-soft); }
+.stateBox.warning { border-color: #715a18; color: #fde68a; background: var(--amber-soft); }
 .stateBox strong { display: block; color: var(--text); }
 .stateBox span { display: block; margin-top: 5px; line-height: 1.5; font-size: 13px; }
 .stateBox button { margin-top: 10px; }
@@ -533,6 +534,16 @@ button { color: inherit; }
   color: #cfe2ff;
   line-height: 1.6;
   font-size: 13px;
+}
+.researchNote.legacyWarning {
+  border-color: #715a18;
+  background: var(--amber-soft);
+  color: #fde68a;
+}
+.labConclusion {
+  margin-top: 12px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 12px;
 }
 .labAudit { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .labIndicator { grid-template-columns: minmax(170px, 0.7fr) auto minmax(260px, 1.2fr) minmax(260px, 1fr); }
