@@ -8,8 +8,10 @@ from typing import Any
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import DarkflowInteraction, ExperimentRun, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TradeCandidate, utc_now
-from app.services.darkflow_decision_cards import (
+from app.domain.trade_candidates.lifecycle import (
+    CandidateLifecycleEvidence,
+    AntiRepaintEvidence,
+    ShadowForwardEvidence,
     PROMOTION_BLOCKER_ANTI_REPAINT_FAILED,
     PROMOTION_BLOCKER_ANTI_REPAINT_MISSING,
     PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN,
@@ -17,6 +19,19 @@ from app.services.darkflow_decision_cards import (
     PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING,
     PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED,
     PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING,
+    PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED,
+    candidate_promotion_status,
+    decide_candidate_lifecycle,
+    ordered_promotion_blockers,
+)
+from app.domain.trade_candidates import entry_plan as entry_plan_rules
+from app.domain.trade_candidates.promotion_gate import (
+    PromotionGateEvidence,
+    decide_promotion_gate,
+    promotion_gate_policy,
+)
+from app.models import DarkflowInteraction, ExperimentRun, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TradeCandidate, utc_now
+from app.services.darkflow_decision_cards import (
     decision_card_from_interaction,
     materialize_darkflow_trade_candidates,
 )
@@ -42,7 +57,6 @@ SHADOW_MARKET_PAUSE_MAX_WIN_RATE = 0.35
 SHADOW_MARKET_PAUSE_MAX_PROFIT_FACTOR = 0.8
 SHADOW_MARKET_PRIORITY_MIN_WIN_RATE = 0.55
 SHADOW_MARKET_PRIORITY_MIN_PROFIT_FACTOR = 1.15
-PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED = "shadow_market_performance_paused"
 _TERMINAL_PLAN_CHECK_REASONS = {
     "unsupported_direction",
     "invalid_plan_prices",
@@ -307,16 +321,33 @@ async def darkflow_candidate_promotion_report(
     limit: int = DEFAULT_PROMOTION_LIMIT,
 ) -> dict[str, Any]:
     rows = await _candidate_rows(session, limit=limit, include_blocked=True)
+    now = utc_now()
+    latest_prices = await _latest_prices(session, sorted({candidate.symbol for candidate in rows}))
+    stats_by_candidate = await _shadow_stats_by_candidate(session, [candidate.candidate_key for candidate in rows])
     counts: dict[str, int] = {}
     anti_counts: dict[str, int] = {}
     shadow_counts: dict[str, int] = {}
+    gate_counts: dict[str, int] = {}
     samples: list[dict[str, Any]] = []
+    gate_samples: list[dict[str, Any]] = []
     for candidate in rows:
         counts[candidate.promotion_status] = counts.get(candidate.promotion_status, 0) + 1
         anti_counts[candidate.anti_repaint_status] = anti_counts.get(candidate.anti_repaint_status, 0) + 1
         shadow_counts[candidate.shadow_status] = shadow_counts.get(candidate.shadow_status, 0) + 1
+        stats = _candidate_stats(stats_by_candidate, candidate)
+        price = latest_prices.get(candidate.symbol)
+        if price is None or price <= 0:
+            entry_plan_state = _missing_price_entry_plan_state(candidate, now=now)
+        else:
+            entry_plan_state = _candidate_entry_plan_state(
+                candidate,
+                mark_price=price,
+                now=now,
+                entry_tolerance_pct=DEFAULT_ENTRY_TOLERANCE_PCT,
+            )
+        gate = _promotion_gate_report_row(candidate, entry_plan_state=entry_plan_state, shadow_stats=stats)
+        gate_counts[gate["gate_status"]] = gate_counts.get(gate["gate_status"], 0) + 1
         if len(samples) < 25:
-            stats = await _shadow_stats(session, candidate.candidate_key)
             samples.append(
                 {
                     "candidate_key": candidate.candidate_key,
@@ -327,18 +358,62 @@ async def darkflow_candidate_promotion_report(
                     "anti_repaint_status": candidate.anti_repaint_status,
                     "shadow_status": candidate.shadow_status,
                     "promotion_blockers": candidate.promotion_blockers,
+                    "entry_plan_state": entry_plan_state,
                     "shadow_stats": stats,
+                    "gate_status": gate["gate_status"],
+                    "primary_gate_blocker": gate["primary_blocker"],
+                    "promotion_gate": gate,
                 }
             )
+        if len(gate_samples) < 25:
+            gate_samples.append(gate)
     return {
         "strategy_name": DARKFLOW_V2_SHADOW_STRATEGY_NAME,
         "candidate_count": len(rows),
         "promotion_status_counts": counts,
         "anti_repaint_status_counts": anti_counts,
         "shadow_status_counts": shadow_counts,
+        "gate_status_counts": gate_counts,
         "samples": samples,
+        "gate_samples": gate_samples,
         "criteria": _shadow_criteria(),
-        "policy": _policy(),
+        "policy": _policy() | promotion_gate_policy(),
+    }
+
+
+def _promotion_gate_report_row(
+    candidate: TradeCandidate,
+    *,
+    entry_plan_state: dict[str, Any],
+    shadow_stats: dict[str, Any],
+) -> dict[str, Any]:
+    decision = decide_promotion_gate(
+        PromotionGateEvidence(
+            candidate_key=candidate.candidate_key,
+            lineage=candidate.lineage,
+            status=candidate.status,
+            promotion_status=candidate.promotion_status,
+            anti_repaint_status=candidate.anti_repaint_status,
+            shadow_status=candidate.shadow_status,
+            promotion_blockers=tuple(str(item) for item in (candidate.promotion_blockers or [])),
+            entry_plan_state=entry_plan_state,
+            shadow_stats=shadow_stats,
+        )
+    )
+    return {
+        "candidate_key": decision.candidate_key,
+        "symbol": candidate.symbol,
+        "direction": candidate.direction,
+        "status": candidate.status,
+        "promotion_status": candidate.promotion_status,
+        "anti_repaint_status": candidate.anti_repaint_status,
+        "shadow_status": candidate.shadow_status,
+        "gate_status": decision.gate_status,
+        "primary_blocker": decision.primary_blocker,
+        "next_action": decision.next_action,
+        "blocker_groups": decision.blocker_groups,
+        "raw_blockers": decision.raw_blockers,
+        "evidence_summary": decision.evidence_summary,
     }
 
 
@@ -1112,25 +1187,23 @@ def _shadow_stats_pass(stats: dict[str, Any]) -> bool:
 
 
 def _candidate_plan_openable(candidate: TradeCandidate, *, now: datetime, max_candidate_age_hours: float) -> str | None:
-    if candidate.direction not in {"long", "short"}:
-        return "unsupported_direction"
-    if candidate.entry_price <= 0 or candidate.stop_price <= 0 or candidate.target_price <= 0:
-        return "invalid_plan_prices"
-    if candidate.direction == "long" and not (candidate.stop_price < candidate.entry_price < candidate.target_price):
-        return "invalid_long_reward_shape"
-    if candidate.direction == "short" and not (candidate.target_price < candidate.entry_price < candidate.stop_price):
-        return "invalid_short_reward_shape"
-    setup_time = _aware(candidate.setup_time) if candidate.setup_time else None
-    if setup_time and max_candidate_age_hours > 0:
-        if now - setup_time > timedelta(hours=float(max_candidate_age_hours)):
-            return "stale_candidate"
-    return None
+    return entry_plan_rules.candidate_plan_openable(
+        direction=candidate.direction,
+        entry_price=candidate.entry_price,
+        stop_price=candidate.stop_price,
+        target_price=candidate.target_price,
+        setup_time=candidate.setup_time,
+        now=now,
+        max_candidate_age_hours=max_candidate_age_hours,
+    )
 
 
 def _within_entry_tolerance(price: float, planned_entry: float, *, entry_tolerance_pct: float) -> bool:
-    if planned_entry <= 0:
-        return False
-    return abs(price - planned_entry) / planned_entry <= max(0.0, float(entry_tolerance_pct))
+    return entry_plan_rules.within_entry_tolerance(
+        price,
+        planned_entry,
+        entry_tolerance_pct=entry_tolerance_pct,
+    )
 
 
 def _candidate_entry_plan_state(
@@ -1140,90 +1213,28 @@ def _candidate_entry_plan_state(
     now: datetime,
     entry_tolerance_pct: float,
 ) -> dict[str, Any]:
-    plan = _entry_plan(candidate)
-    planned_entry = _float(plan.get("planned_entry")) or float(candidate.entry_price)
-    planned_stop = _float(plan.get("planned_stop")) or float(candidate.stop_price)
-    target = _target_price_from_plan(plan) or float(candidate.target_price)
-    invalidation = _float(plan.get("invalidation_price")) or planned_stop
-    lower, upper, range_source = _entry_range(
-        plan,
+    return entry_plan_rules.entry_plan_state(
+        plan=_entry_plan(candidate),
         direction=candidate.direction,
-        planned_entry=planned_entry,
-        planned_stop=planned_stop,
-        target_price=target,
+        fallback_entry=candidate.entry_price,
+        fallback_stop=candidate.stop_price,
+        fallback_target=candidate.target_price,
+        mark_price=mark_price,
+        now=now,
         entry_tolerance_pct=entry_tolerance_pct,
     )
-    valid_until = _parse_iso_datetime(plan.get("valid_until"))
-    state = {
-        "state": "waiting",
-        "reason": "awaiting_frozen_entry_range",
-        "plan_type": str(plan.get("plan_type") or "legacy_entry_plan"),
-        "evaluated_at": _iso(now),
-        "mark_price": float(mark_price),
-        "planned_entry": planned_entry,
-        "planned_stop": planned_stop,
-        "target_price": target,
-        "invalidation_price": invalidation,
-        "entry_range": {"lower": lower, "upper": upper, "source": range_source},
-        "valid_until": _iso(valid_until),
-    }
-    if valid_until is not None and _aware(now) > valid_until:
-        state.update({"state": "expired", "reason": "valid_until_passed"})
-        return state
-    shape_error = _entry_plan_shape_error(
-        candidate.direction,
-        entry=planned_entry,
-        stop=planned_stop,
-        target=target,
-        lower=lower,
-        upper=upper,
-    )
-    if shape_error:
-        state.update({"state": "invalid_shape", "reason": shape_error})
-        return state
-    if _price_invalidated(candidate.direction, mark_price=mark_price, invalidation=invalidation, stop=planned_stop):
-        state.update({"state": "invalidated", "reason": "price_crosses_invalidation"})
-        return state
-    if lower <= mark_price <= upper:
-        state.update({"state": "triggered", "reason": "mark_price_inside_frozen_entry_range"})
-        return state
-    if _entry_range_missed(candidate.direction, mark_price=mark_price, lower=lower, upper=upper):
-        state.update({"state": "missed", "reason": "entry_range_missed"})
-        return state
-    return state
 
 
 def _missing_price_entry_plan_state(candidate: TradeCandidate, *, now: datetime) -> dict[str, Any]:
-    plan = _entry_plan(candidate)
-    planned_entry = _float(plan.get("planned_entry")) or float(candidate.entry_price)
-    planned_stop = _float(plan.get("planned_stop")) or float(candidate.stop_price)
-    target = _target_price_from_plan(plan) or float(candidate.target_price)
-    invalidation = _float(plan.get("invalidation_price")) or planned_stop
-    lower, upper, range_source = _entry_range(
-        plan,
+    return entry_plan_rules.missing_price_entry_plan_state(
+        plan=_entry_plan(candidate),
         direction=candidate.direction,
-        planned_entry=planned_entry,
-        planned_stop=planned_stop,
-        target_price=target,
+        fallback_entry=candidate.entry_price,
+        fallback_stop=candidate.stop_price,
+        fallback_target=candidate.target_price,
+        now=now,
         entry_tolerance_pct=DEFAULT_ENTRY_TOLERANCE_PCT,
     )
-    valid_until = _parse_iso_datetime(plan.get("valid_until"))
-    state = {
-        "state": "missing_price",
-        "reason": "missing_latest_price",
-        "plan_type": str(plan.get("plan_type") or "legacy_entry_plan"),
-        "evaluated_at": _iso(now),
-        "mark_price": None,
-        "planned_entry": planned_entry,
-        "planned_stop": planned_stop,
-        "target_price": target,
-        "invalidation_price": invalidation,
-        "entry_range": {"lower": lower, "upper": upper, "source": range_source},
-        "valid_until": _iso(valid_until),
-    }
-    if valid_until is not None and _aware(now) > valid_until:
-        state.update({"state": "expired", "reason": "valid_until_passed"})
-    return state
 
 
 def _entry_plan(candidate: TradeCandidate) -> dict[str, Any]:
@@ -1241,23 +1252,14 @@ def _entry_range(
     target_price: float,
     entry_tolerance_pct: float,
 ) -> tuple[float, float, str]:
-    raw = plan.get("entry_range") if isinstance(plan.get("entry_range"), dict) else {}
-    lower = _float(raw.get("lower"))
-    upper = _float(raw.get("upper"))
-    if lower is not None and upper is not None and lower > 0 and upper > 0 and lower < upper:
-        return float(lower), float(upper), str(raw.get("source") or "frozen_entry_range")
-    tolerance = max(0.0, float(entry_tolerance_pct))
-    width = planned_entry * tolerance
-    lower = planned_entry - width
-    upper = planned_entry + width
-    epsilon = max(abs(planned_entry) * 1e-9, 1e-9)
-    if direction == "long":
-        lower = max(lower, planned_stop + epsilon)
-        upper = min(upper, target_price - epsilon)
-    elif direction == "short":
-        lower = max(lower, target_price + epsilon)
-        upper = min(upper, planned_stop - epsilon)
-    return lower, upper, "runtime_entry_tolerance_fallback"
+    return entry_plan_rules.entry_range(
+        plan,
+        direction=direction,
+        planned_entry=planned_entry,
+        planned_stop=planned_stop,
+        target_price=target_price,
+        entry_tolerance_pct=entry_tolerance_pct,
+    )
 
 
 def _entry_plan_shape_error(
@@ -1269,50 +1271,26 @@ def _entry_plan_shape_error(
     lower: float,
     upper: float,
 ) -> str | None:
-    epsilon = max(abs(entry) * 1e-8, 1e-8)
-    if direction not in {"long", "short"}:
-        return "unsupported_direction"
-    if min(entry, stop, target, lower, upper) <= 0 or lower >= upper:
-        return "invalid_plan_prices"
-    if direction == "long" and not (
-        stop < lower
-        and lower - epsilon <= entry <= upper + epsilon
-        and upper < target
-    ):
-        return "invalid_long_frozen_entry_range"
-    if direction == "short" and not (
-        target < lower
-        and lower - epsilon <= entry <= upper + epsilon
-        and upper < stop
-    ):
-        return "invalid_short_frozen_entry_range"
-    return None
+    return entry_plan_rules.entry_plan_shape_error(
+        direction,
+        entry=entry,
+        stop=stop,
+        target=target,
+        lower=lower,
+        upper=upper,
+    )
 
 
 def _price_invalidated(direction: str, *, mark_price: float, invalidation: float, stop: float) -> bool:
-    boundary = invalidation if invalidation > 0 else stop
-    if direction == "long":
-        return mark_price <= boundary or mark_price <= stop
-    if direction == "short":
-        return mark_price >= boundary or mark_price >= stop
-    return True
+    return entry_plan_rules.price_invalidated(direction, mark_price=mark_price, invalidation=invalidation, stop=stop)
 
 
 def _entry_range_missed(direction: str, *, mark_price: float, lower: float, upper: float) -> bool:
-    if direction == "long":
-        return mark_price > upper
-    if direction == "short":
-        return mark_price < lower
-    return False
+    return entry_plan_rules.entry_range_missed(direction, mark_price=mark_price, lower=lower, upper=upper)
 
 
 def _target_price_from_plan(plan: dict[str, Any]) -> float | None:
-    levels = plan.get("take_profit_levels")
-    if isinstance(levels, list) and levels:
-        first = levels[0]
-        if isinstance(first, dict):
-            return _float(first.get("price"))
-    return None
+    return entry_plan_rules.target_price_from_plan(plan)
 
 
 def _shadow_trade_from_candidate(
@@ -1367,85 +1345,31 @@ def _shadow_trade_from_candidate(
 
 
 def _apply_lifecycle(candidate: TradeCandidate) -> None:
-    blockers = set(str(item) for item in (candidate.promotion_blockers or []))
-    blockers.discard("persistent_trade_candidate_table_missing")
-    if candidate.anti_repaint_status == "passed":
-        blockers.discard(PROMOTION_BLOCKER_ANTI_REPAINT_MISSING)
-        blockers.discard(PROMOTION_BLOCKER_ANTI_REPAINT_FAILED)
-    elif candidate.anti_repaint_status == "failed":
-        blockers.discard(PROMOTION_BLOCKER_ANTI_REPAINT_MISSING)
-        blockers.add(PROMOTION_BLOCKER_ANTI_REPAINT_FAILED)
-    else:
-        blockers.add(PROMOTION_BLOCKER_ANTI_REPAINT_MISSING)
-    if candidate.shadow_status == "passed":
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
-        blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
-        blockers.discard(PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN)
-    elif candidate.shadow_status == "collecting":
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
-        blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
-        blockers.discard(PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN)
-        blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
-    elif candidate.shadow_status == "failed":
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
-        blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
-    elif candidate.shadow_status == "retired":
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
-        if PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN in blockers or PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED in blockers:
-            blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
-        else:
-            blockers.add(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
-    else:
-        blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
-        blockers.discard(PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN)
-        blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
-    candidate.promotion_blockers = _ordered_blockers(blockers)
-    candidate.paper_eligible = False
-    candidate.live_eligible = False
-    candidate.promotion_status = _promotion_status(candidate)
+    decision = decide_candidate_lifecycle(
+        CandidateLifecycleEvidence(
+            status=candidate.status,
+            anti_repaint=AntiRepaintEvidence(candidate.anti_repaint_status),
+            shadow=ShadowForwardEvidence(candidate.shadow_status),
+            promotion_blockers=tuple(str(item) for item in (candidate.promotion_blockers or [])),
+        )
+    )
+    candidate.promotion_blockers = decision.promotion_blockers
+    candidate.paper_eligible = decision.paper_eligible
+    candidate.live_eligible = decision.live_eligible
+    candidate.promotion_status = decision.promotion_status
 
 
 def _promotion_status(candidate: TradeCandidate) -> str:
-    blockers = set(candidate.promotion_blockers or [])
-    if PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED in blockers:
-        return "shadow_market_paused"
-    if PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN in blockers:
-        return "duplicate_shadow_plan"
-    if candidate.shadow_status == "retired" or PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED in blockers:
-        return "entry_plan_retired"
-    if candidate.status != "shadow_candidate":
-        return "blocked"
-    if candidate.anti_repaint_status == "failed" or PROMOTION_BLOCKER_ANTI_REPAINT_FAILED in blockers:
-        return "anti_repaint_failed"
-    if candidate.anti_repaint_status != "passed":
-        return "anti_repaint_pending"
-    if candidate.shadow_status == "failed" or PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED in blockers:
-        return "shadow_forward_failed"
-    if candidate.shadow_status == "collecting" or PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING in blockers:
-        return "shadow_forward_collecting"
-    if candidate.shadow_status != "passed":
-        return "shadow_forward_pending"
-    return "paper_review_ready"
+    return candidate_promotion_status(
+        status=candidate.status,
+        anti_repaint_status=candidate.anti_repaint_status,
+        shadow_status=candidate.shadow_status,
+        promotion_blockers=candidate.promotion_blockers or [],
+    )
 
 
 def _ordered_blockers(blockers: set[str]) -> list[str]:
-    ordered = [
-        PROMOTION_BLOCKER_ANTI_REPAINT_MISSING,
-        PROMOTION_BLOCKER_ANTI_REPAINT_FAILED,
-        PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING,
-        PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING,
-        PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED,
-        PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED,
-        PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN,
-        PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED,
-    ]
-    return [item for item in ordered if item in blockers] + sorted(blockers - set(ordered))
+    return ordered_promotion_blockers(blockers)
 
 
 def _shadow_forward_signal_key(candidate: TradeCandidate, *, opened_at: datetime) -> str:

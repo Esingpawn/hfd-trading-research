@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.task_catalog import task_spec
 from app.infrastructure.queue import build_queue
 from app.models import TaskRun
 from app.services.data_quality import data_quality_report
@@ -183,6 +184,14 @@ async def run_task_record(session: AsyncSession, item: TaskRun) -> dict[str, Any
     if stored is None:
         raise ValueError(f"task_run not found after execution: {item_id}")
     stored_result = _json_safe({**initial_result, "execution": result})
+    spec = task_spec(task_name)
+    if spec is not None:
+        stored_result["task_catalog"] = {
+            "canonical_name": spec.canonical_name,
+            "lineage": spec.lineage,
+            "production_allowed": spec.production_allowed,
+            "heavy": spec.heavy,
+        }
     finished_at = _utc_now()
     stored.status = "completed"
     stored.result = stored_result

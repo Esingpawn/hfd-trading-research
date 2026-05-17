@@ -6,6 +6,19 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.trade_candidates.lifecycle import (
+    PROMOTION_BLOCKER_ANTI_REPAINT_FAILED,
+    PROMOTION_BLOCKER_ANTI_REPAINT_MISSING,
+    PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN,
+    PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED,
+    PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING,
+    PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED,
+    PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING,
+    candidate_promotion_status,
+    lifecycle_blockers,
+    normalized_promotion_blockers,
+)
+from app.domain.trade_candidates import entry_plan as entry_plan_rules
 from app.models import DarkflowInteraction, TradeCandidate, utc_now
 from app.services.darkflow_interactions import DARKFLOW_INTERACTION_SCHEMA
 from app.services.darkflow_playbooks import PLAYBOOKS
@@ -17,18 +30,10 @@ DEFAULT_MIN_DECISION_CARD_QUALITY = 55.0
 DEFAULT_MIN_RR_RATIO = 1.5
 DEFAULT_TRADE_CANDIDATE_LIMIT = 100
 DEFAULT_TRADE_CANDIDATE_FETCH_MULTIPLIER = 3
-FROZEN_ENTRY_PLAN_TYPE = "frozen_darkflow_v2_entry_plan"
-DEFAULT_ENTRY_PLAN_VALID_BARS = 12
-DEFAULT_ENTRY_PLAN_TOLERANCE_PCT = 0.006
-DEFAULT_ENTRY_PLAN_DRIFT_LIMIT_PCT = 0.003
-PROMOTION_BLOCKER_ANTI_REPAINT_MISSING = "anti_repaint_audit_missing"
-PROMOTION_BLOCKER_ANTI_REPAINT_FAILED = "anti_repaint_audit_failed"
-PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING = "isolated_v2_shadow_forward_sample_missing"
-PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING = "isolated_v2_shadow_forward_sample_collecting"
-PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED = "isolated_v2_shadow_forward_sample_failed"
-PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED = "entry_plan_retired"
-PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN = "duplicate_shadow_forward_plan"
-PROMOTION_BLOCKER_PERSISTENT_TABLE_MISSING = "persistent_trade_candidate_table_missing"
+FROZEN_ENTRY_PLAN_TYPE = entry_plan_rules.FROZEN_ENTRY_PLAN_TYPE
+DEFAULT_ENTRY_PLAN_VALID_BARS = entry_plan_rules.DEFAULT_ENTRY_PLAN_VALID_BARS
+DEFAULT_ENTRY_PLAN_TOLERANCE_PCT = entry_plan_rules.DEFAULT_ENTRY_PLAN_TOLERANCE_PCT
+DEFAULT_ENTRY_PLAN_DRIFT_LIMIT_PCT = entry_plan_rules.DEFAULT_ENTRY_PLAN_DRIFT_LIMIT_PCT
 _HARD_QUALITY_BLOCKERS = {
     "body_break_invalidation",
     "official_rule_unmapped",
@@ -319,46 +324,21 @@ def _gate_blockers(
 
 
 def _take_profit_levels(item: DarkflowInteraction, target: float) -> list[dict[str, Any]]:
-    target_plan = (item.context or {}).get("target_plan") or {}
-    return [
-        {
-            "label": "TP1",
-            "price": target,
-            "source": target_plan.get("model") or (item.context or {}).get("target_model") or "interaction_target",
-        }
-    ]
+    return entry_plan_rules.take_profit_levels(context=item.context or {}, target=target)
 
 
 def _frozen_entry_plan(item: DarkflowInteraction, *, entry: float, stop: float, target: float) -> dict[str, Any]:
-    context = item.context or {}
-    hold_bars = int(context.get("hold_bars") or 0)
-    entry_range = _entry_range_from_context(item, entry=entry, stop=stop, target=target)
-    valid_until = _entry_plan_valid_until(item, max_hold_bars=hold_bars)
-    invalidation_price = float(item.invalidation_price) if isinstance(item.invalidation_price, (int, float)) else stop
-    return {
-        "plan_type": FROZEN_ENTRY_PLAN_TYPE,
-        "status": "frozen",
-        "state": "frozen",
-        "trigger": _entry_trigger(item),
-        "planned_entry": entry,
-        "planned_stop": stop,
-        "take_profit_levels": _take_profit_levels(item, target),
-        "invalidation_price": invalidation_price,
-        "max_hold_bars": hold_bars,
-        "frozen_at": _iso(item.event_ts),
-        "valid_until": _iso(valid_until),
-        "entry_reference_price": entry,
-        "entry_range": entry_range,
-        "entry_tolerance_pct": DEFAULT_ENTRY_PLAN_TOLERANCE_PCT,
-        "drift_limit_pct": DEFAULT_ENTRY_PLAN_DRIFT_LIMIT_PCT,
-        "invalidation_rules": [
-            "price_crosses_invalidation",
-            "valid_until_passed",
-            "entry_range_missed",
-            "reward_shape_changed",
-        ],
-        "used_for_outcome_tracking": True,
-    }
+    return entry_plan_rules.build_frozen_entry_plan(
+        direction=item.direction,
+        interaction_type=item.interaction_type,
+        interval=item.interval,
+        event_ts=item.event_ts,
+        context=item.context or {},
+        entry=entry,
+        stop=stop,
+        target=target,
+        invalidation_price=item.invalidation_price,
+    )
 
 
 def _entry_range_from_context(
@@ -368,42 +348,13 @@ def _entry_range_from_context(
     stop: float,
     target: float,
 ) -> dict[str, Any]:
-    context = item.context or {}
-    zone = context.get("zone") if isinstance(context.get("zone"), dict) else {}
-    lower = _float(zone.get("lower_price")) if isinstance(zone, dict) else None
-    upper = _float(zone.get("upper_price")) if isinstance(zone, dict) else None
-    if lower is not None and upper is not None:
-        source = "source_darkflow_zone"
-        lower_value, upper_value = sorted((float(lower), float(upper)))
-    else:
-        source = "entry_reference_tolerance"
-        width = abs(entry) * DEFAULT_ENTRY_PLAN_TOLERANCE_PCT
-        lower_value = entry - width
-        upper_value = entry + width
-    clipped = _clip_entry_range(
-        item.direction,
-        lower=lower_value,
-        upper=upper_value,
+    return entry_plan_rules.entry_range_from_context(
+        direction=item.direction,
+        context=item.context or {},
         entry=entry,
         stop=stop,
         target=target,
     )
-    if clipped is None:
-        width = abs(entry) * DEFAULT_ENTRY_PLAN_TOLERANCE_PCT
-        clipped = _clip_entry_range(
-            item.direction,
-            lower=entry - width,
-            upper=entry + width,
-            entry=entry,
-            stop=stop,
-            target=target,
-        ) or (entry - width, entry + width)
-        source = "entry_reference_tolerance"
-    return {
-        "lower": round(float(clipped[0]), 10),
-        "upper": round(float(clipped[1]), 10),
-        "source": source,
-    }
 
 
 def _clip_entry_range(
@@ -415,53 +366,23 @@ def _clip_entry_range(
     stop: float,
     target: float,
 ) -> tuple[float, float] | None:
-    if lower <= 0 or upper <= 0 or lower >= upper:
-        return None
-    epsilon = max(abs(entry) * 1e-9, 1e-9)
-    if direction == "long":
-        lower = max(lower, stop + epsilon)
-        upper = min(upper, target - epsilon)
-    elif direction == "short":
-        lower = max(lower, target + epsilon)
-        upper = min(upper, stop - epsilon)
-    else:
-        return None
-    if lower >= upper or not (lower <= entry <= upper):
-        return None
-    return lower, upper
+    return entry_plan_rules.clip_entry_range(direction, lower=lower, upper=upper, entry=entry, stop=stop, target=target)
 
 
 def _entry_plan_valid_until(item: DarkflowInteraction, *, max_hold_bars: int) -> datetime:
-    start = _aware(item.event_ts)
-    bars = max(1, int(max_hold_bars or DEFAULT_ENTRY_PLAN_VALID_BARS))
-    validity = _interval_delta(item.interval) * bars
-    validity = max(validity, timedelta(hours=2))
-    validity = min(validity, timedelta(hours=72))
-    return start + validity
+    return entry_plan_rules.entry_plan_valid_until(
+        event_ts=item.event_ts,
+        interval=item.interval,
+        max_hold_bars=max_hold_bars,
+    )
 
 
 def _interval_delta(interval: str | None) -> timedelta:
-    raw = str(interval or "").strip().lower()
-    if len(raw) >= 2 and raw[:-1].isdigit():
-        count = int(raw[:-1])
-        unit = raw[-1]
-        if unit == "m":
-            return timedelta(minutes=count)
-        if unit == "h":
-            return timedelta(hours=count)
-        if unit == "d":
-            return timedelta(days=count)
-    return timedelta(minutes=30)
+    return entry_plan_rules.interval_delta(interval)
 
 
 def _entry_trigger(item: DarkflowInteraction) -> str:
-    if item.interaction_type == "wick_pierce_reclaim":
-        return "wick_pierce_reclaim_confirmed"
-    if item.interaction_type == "first_touch":
-        return "first_touch_zone_reaction"
-    if item.interaction_type == "body_break":
-        return "body_break_confirmation"
-    return item.interaction_type
+    return entry_plan_rules.entry_trigger(item.interaction_type)
 
 
 def _market_state(playbook: str, interaction_type: str) -> str:
@@ -689,9 +610,7 @@ def _preserve_candidate_lifecycle(existing: TradeCandidate, payload: dict[str, A
 
 
 def _normalized_promotion_blockers(values: list[Any]) -> list[str]:
-    obsolete = {PROMOTION_BLOCKER_PERSISTENT_TABLE_MISSING}
-    blockers = [str(value) for value in values if str(value) not in obsolete]
-    return list(dict.fromkeys(blockers))
+    return normalized_promotion_blockers(values)
 
 
 def _merge_lifecycle_blockers(
@@ -703,49 +622,11 @@ def _merge_lifecycle_blockers(
 ) -> list[str]:
     blockers = set(_normalized_promotion_blockers(payload_blockers))
     blockers.update(_normalized_promotion_blockers(existing_blockers))
-    if anti_repaint_status == "passed":
-        blockers.discard(PROMOTION_BLOCKER_ANTI_REPAINT_MISSING)
-        blockers.discard(PROMOTION_BLOCKER_ANTI_REPAINT_FAILED)
-    elif anti_repaint_status == "failed":
-        blockers.discard(PROMOTION_BLOCKER_ANTI_REPAINT_MISSING)
-        blockers.add(PROMOTION_BLOCKER_ANTI_REPAINT_FAILED)
-    else:
-        blockers.add(PROMOTION_BLOCKER_ANTI_REPAINT_MISSING)
-    if shadow_status == "passed":
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
-        blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
-    elif shadow_status == "collecting":
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
-        blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
-        blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
-    elif shadow_status == "failed":
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
-        blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
-    elif shadow_status == "retired":
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
-        blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED)
-        if PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN in blockers:
-            blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
-        else:
-            blockers.add(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
-    else:
-        blockers.discard(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
-        blockers.add(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
-    ordered = [
-        PROMOTION_BLOCKER_ANTI_REPAINT_MISSING,
-        PROMOTION_BLOCKER_ANTI_REPAINT_FAILED,
-        PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING,
-        PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING,
-        PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED,
-        PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED,
-        PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN,
-    ]
-    return [item for item in ordered if item in blockers] + sorted(blockers - set(ordered))
+    return lifecycle_blockers(
+        blockers,
+        anti_repaint_status=anti_repaint_status,
+        shadow_status=shadow_status,
+    )
 
 
 def _promotion_status(
@@ -755,24 +636,12 @@ def _promotion_status(
     shadow_status: str,
     promotion_blockers: list[str],
 ) -> str:
-    blockers = set(promotion_blockers)
-    if PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN in blockers:
-        return "duplicate_shadow_plan"
-    if shadow_status == "retired" or PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED in blockers:
-        return "entry_plan_retired"
-    if status != "shadow_candidate":
-        return "blocked"
-    if anti_repaint_status == "failed" or PROMOTION_BLOCKER_ANTI_REPAINT_FAILED in blockers:
-        return "anti_repaint_failed"
-    if anti_repaint_status != "passed":
-        return "anti_repaint_pending"
-    if shadow_status == "failed" or PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED in blockers:
-        return "shadow_forward_failed"
-    if shadow_status == "collecting" or PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING in blockers:
-        return "shadow_forward_collecting"
-    if shadow_status != "passed":
-        return "shadow_forward_pending"
-    return "paper_review_ready"
+    return candidate_promotion_status(
+        status=status,
+        anti_repaint_status=anti_repaint_status,
+        shadow_status=shadow_status,
+        promotion_blockers=promotion_blockers,
+    )
 
 
 def _materialized_candidate_payload(item: TradeCandidate) -> dict[str, Any]:

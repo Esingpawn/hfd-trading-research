@@ -13,6 +13,7 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.darkflow import interactions as darkflow_interaction_rules
 from app.models import DarkflowInteraction, DarkflowZone, ExperimentRun, ShadowPaperTrade, SignalSnapshot, utc_now
 from app.services.darkflow_playbooks import DEFAULT_MIN_SAMPLES, PLAYBOOKS
 from app.services.darkflow_rules import official_rule_for_internal_indicator
@@ -40,13 +41,7 @@ DARKFLOW_INTERACTION_LEGACY_SCHEMA = "legacy"
 DARKFLOW_INTERACTION_STRATEGY = "darkflow_interaction_quality_v2"
 
 
-@dataclass(frozen=True)
-class Candle:
-    ts: datetime
-    open: float
-    high: float
-    low: float
-    close: float
+Candle = darkflow_interaction_rules.Candle
 
 
 @dataclass(frozen=True)
@@ -669,35 +664,11 @@ async def _trend_context_for_snapshot(session: AsyncSession, snapshot: SignalSna
 
 
 def normalize_klines(raw_klines: list[Any]) -> list[Candle]:
-    rows: list[Candle] = []
-    for raw in raw_klines:
-        candle = _parse_candle(raw)
-        if candle is not None:
-            rows.append(candle)
-    rows.sort(key=lambda item: item.ts)
-    return rows
+    return darkflow_interaction_rules.normalize_klines(raw_klines)
 
 
 def _parse_candle(raw: Any) -> Candle | None:
-    if isinstance(raw, dict):
-        ts = _parse_timestamp(raw.get("timestamp") or raw.get("ts") or raw.get("time") or raw.get("open_time"))
-        open_price = _float(raw.get("open") or raw.get("o"))
-        close = _float(raw.get("close") or raw.get("c"))
-        high = _float(raw.get("high") or raw.get("h"))
-        low = _float(raw.get("low") or raw.get("l"))
-    elif isinstance(raw, (list, tuple)) and len(raw) >= 5:
-        ts = _parse_timestamp(raw[0])
-        open_price = _float(raw[1])
-        close = _float(raw[2])
-        low = _float(raw[3])
-        high = _float(raw[4])
-    else:
-        return None
-    if ts is None or None in (open_price, close, high, low):
-        return None
-    high_value = max(float(high), float(low), float(open_price), float(close))
-    low_value = min(float(high), float(low), float(open_price), float(close))
-    return Candle(ts=ts, open=float(open_price), high=high_value, low=low_value, close=float(close))
+    return darkflow_interaction_rules.parse_candle(raw)
 
 
 def _zone_from_item(
@@ -1771,36 +1742,15 @@ def _latest_interactions(items: list[DarkflowInteraction]) -> list[dict[str, Any
 
 
 def _playbook_for_zone(zone: dict[str, Any], interaction_type: str) -> str:
-    indicator = str(zone["indicator"])
-    family = str(zone["family"])
-    if interaction_type == "wick_pierce_reclaim" and family == "liquidity":
-        return "liquidity_sweep_reversal"
-    if family in {"cost_structure", "volume_profile"}:
-        return "pullback_to_cost"
-    if family in {"structure_break", "orderflow"}:
-        return "breakout_confirmation"
-    if family == "vacuum":
-        return "vacuum_acceleration"
-    if family == "lifecycle":
-        return "exhaustion_exit_filter"
-    for playbook in PLAYBOOKS:
-        if indicator in playbook.entry_indicators:
-            return playbook.key
-    return "darkflow_zone_reaction"
+    return darkflow_interaction_rules.playbook_for_zone(zone, interaction_type, playbooks=PLAYBOOKS)
 
 
 def _playbook_display_name(key: str) -> str:
-    for playbook in PLAYBOOKS:
-        if playbook.key == key:
-            return playbook.display_name
-    return key
+    return darkflow_interaction_rules.playbook_display_name(key, playbooks=PLAYBOOKS)
 
 
 def _playbook_blockers(key: str) -> tuple[str, ...]:
-    for playbook in PLAYBOOKS:
-        if playbook.key == key:
-            return playbook.blocker_indicators
-    return ()
+    return darkflow_interaction_rules.playbook_blockers(key, playbooks=PLAYBOOKS)
 
 
 def _indicator_aliases(indicator: str) -> set[str]:
@@ -1883,13 +1833,7 @@ def _profitable_target(direction: str, entry_price: float, target_price: float) 
 
 
 def _quality_grade(score: float) -> str:
-    if score >= 75:
-        return "A"
-    if score >= 60:
-        return "B"
-    if score >= 45:
-        return "C"
-    return "D"
+    return darkflow_interaction_rules.quality_grade(score)
 
 
 def _family(indicator: str) -> str:
@@ -1921,13 +1865,16 @@ def _zone_width(price: float, *, bps: float = DEFAULT_ZONE_WIDTH_BPS) -> float:
 
 
 def _zone_key(**payload: Any) -> str:
-    raw = json.dumps(_json_safe(payload), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return darkflow_interaction_rules.zone_key(**payload)
 
 
 def _interaction_key(zone_key: str, interaction_type: str, event_ts: datetime) -> str:
-    raw = f"{DARKFLOW_INTERACTION_SCHEMA}:{zone_key}:{interaction_type}:{_aware(event_ts).isoformat()}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return darkflow_interaction_rules.interaction_key(
+        zone_key,
+        interaction_type,
+        event_ts,
+        schema=DARKFLOW_INTERACTION_SCHEMA,
+    )
 
 
 def _feature_ts(item: Any) -> datetime | None:

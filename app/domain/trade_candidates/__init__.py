@@ -1,0 +1,2 @@
+"""Trade candidate domain rules."""
+

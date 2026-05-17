@@ -21,3 +21,5 @@ hfd-deploy.zip
 web/node_modules/
 web/dist/
 web/tsconfig.tsbuildinfo
+.agents/
+skills-lock.json

@@ -378,6 +378,18 @@ button { color: inherit; }
   font-size: 13px;
   line-height: 1.5;
 }
+.gateNotice {
+  margin: 0 0 12px;
+  border: 1px solid #2d4663;
+  background: #0d1a2e;
+  border-radius: 7px;
+  padding: 10px;
+  color: #cfe2ff;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.gateNotice strong, .gateNotice span { display: block; }
+.gateNotice span { margin-top: 4px; color: #9fb7d5; }
 .detailSection.twoPane { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 14px; }
 .auditGrid, .safetyGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .safetyGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); }

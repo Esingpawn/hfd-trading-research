@@ -67,6 +67,36 @@ type TradeCandidateReport = {
   policy: Policy;
 };
 
+type PromotionGateReport = {
+  candidate_count: number;
+  promotion_status_counts: Record<string, number>;
+  gate_status_counts: Record<string, number>;
+  gate_samples: PromotionGateSample[];
+  policy: Policy & { report_only?: boolean; max_gate_status?: string };
+};
+
+type PromotionGateSample = {
+  candidate_key: string;
+  symbol: string;
+  direction: "long" | "short" | string;
+  status: string;
+  promotion_status: string;
+  anti_repaint_status: string;
+  shadow_status: string;
+  gate_status: string;
+  primary_blocker?: string | null;
+  next_action?: string;
+  blocker_groups?: Record<string, PromotionGateBlocker[]>;
+  raw_blockers?: string[];
+  evidence_summary?: Record<string, unknown>;
+};
+
+type PromotionGateBlocker = {
+  code: string;
+  severity: string;
+  message: string;
+};
+
 type EntryPlanStateReport = {
   candidate_count: number;
   generated_at?: string | null;
@@ -572,6 +602,7 @@ type LoadState = {
   quality: DataQuality | null;
   cards: DecisionCardReport | null;
   candidates: TradeCandidateReport | null;
+  promotionGate: PromotionGateReport | null;
   entryStates: EntryPlanStateReport | null;
   darkflow: DarkflowBacktest | null;
   backtestsLatest: BacktestsLatestReport | null;
@@ -601,6 +632,7 @@ const EMPTY_STATE: LoadState = {
   quality: null,
   cards: null,
   candidates: null,
+  promotionGate: null,
   entryStates: null,
   darkflow: null,
   backtestsLatest: null,
@@ -620,6 +652,7 @@ const EMPTY_STATE: LoadState = {
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50];
 const QUICK_PAGES: PageId[] = ["overview", "tradeCards", "backtest", "paperTrading"];
+const PROMOTION_GATE_STATES = ["blocked", "collecting", "watching_entry", "review_ready", "retired"];
 
 const NAV_GROUPS: NavGroup[] = [
   {
@@ -711,6 +744,7 @@ function App() {
       loadSection("quality", () => fetchJson<DataQuality>("/data/quality-report")),
       loadSection("cards", () => fetchFirstJson<DecisionCardReport>(["/darkflow/decision-cards?limit=60", "/darkflow/decision-cards?limit=30"], 45000)),
       loadSection("candidates", () => fetchFirstJson<TradeCandidateReport>(["/darkflow/trade-candidates?limit=100", "/darkflow/trade-candidates?limit=50", "/darkflow/trade-candidates?limit=20"], 45000)),
+      loadSection("promotionGate", () => fetchJson<PromotionGateReport>("/darkflow/trade-candidates/promotion?limit=250", 45000)),
       loadSection("entryStates", () => fetchFirstJson<EntryPlanStateReport>(["/darkflow/trade-candidates/entry-plan-states?limit=250", "/darkflow/trade-candidates/entry-plan-states?limit=100"], 45000)),
       loadSection("darkflow", () => fetchJson<DarkflowBacktest>("/darkflow/interactions/backtest/latest")),
       loadSection("safety", () => fetchJson<TradingSafety>("/trading/safety")),
@@ -824,7 +858,7 @@ function App() {
             onNavigate={navigate}
           />
         )}
-        {activePage === "candidates" && <CandidatePoolPage rows={tradeRows} onSelect={(key) => { setSelectedKey(key); navigate("tradeCards"); }} />}
+        {activePage === "candidates" && <CandidatePoolPage rows={tradeRows} promotionGate={data.promotionGate} onSelect={(key) => { setSelectedKey(key); navigate("tradeCards"); }} />}
         {activePage === "entryPlans" && <EntryPlansPage report={data.entryStates} rows={rows} onSelect={(key) => { setSelectedKey(key); navigate("tradeCards"); }} />}
         {activePage === "experimentLab" && <ExperimentLabPage data={data} rows={rows} onNavigate={navigate} />}
         {activePage === "backtest" && <BacktestPage data={data} />}
@@ -1043,6 +1077,7 @@ function TradeCardItem({ row, active, onClick }: { row: CardRow; active: boolean
         </div>
         <div className="cardBadges">
           {row.duplicateCount > 1 && <span className="mergeBadge">合并 {row.duplicateCount}</span>}
+          {row.gateStatus && <StatusBadge tone={gateTone(row.gateStatus)} label={gateStatusText(row.gateStatus)} />}
           <StatusBadge tone={stateTone(row.state)} label={entryStateText(row.state)} />
         </div>
       </div>
@@ -1080,6 +1115,7 @@ function TradeDetailPane({ row }: { row: CardRow | null }) {
       <section className="detailSection conclusion">
         <h3>交易结论</h3>
         <p>{tradeConclusion(row)}</p>
+        {row.gateStatus && <div className="gateNotice"><strong>晋级闸门：{gateStatusText(row.gateStatus)}</strong><span>下一步：{gateNextActionText(row.gateNextAction)}</span></div>}
         {row.duplicateCount > 1 && <div className="mergeNotice"><strong>同计划已折叠：</strong>{row.variantSummary}</div>}
         <div className="auditGrid">
           <AuditItem label="纸上交易" ok={row.paperEligible} text={row.paperEligible ? "允许" : "未允许"} />
@@ -1105,6 +1141,7 @@ function TradeDetailPane({ row }: { row: CardRow | null }) {
         <div>
           <h3>信号理由</h3>
           <ReasonList title="支持理由" items={row.supportingSignals.map(signalDetail)} empty="暂无支持信号，等待更多确认。" />
+          <ReasonList title="晋级闸门阻塞" items={row.gateBlockers.map(gateBlockerDetail)} empty="当前闸门没有阻塞项，等待人工复核。" warn />
           <ReasonList title="阻断风险" items={[...row.blockers, ...row.promotionBlockers].map(blockerDetail)} empty="暂无阻断风险。" warn />
         </div>
         <div>
@@ -1127,10 +1164,11 @@ function TradeDetailPane({ row }: { row: CardRow | null }) {
   );
 }
 
-function CandidatePoolPage({ rows, onSelect }: { rows: CardRow[]; onSelect: (key: string) => void }) {
+function CandidatePoolPage({ rows, promotionGate, onSelect }: { rows: CardRow[]; promotionGate: PromotionGateReport | null; onSelect: (key: string) => void }) {
   const grouped = countBy(rows, (row) => row.status);
   const groups = candidateGroups(rows);
   const duplicatePlans = groups.reduce((total, group) => total + Math.max(0, group.rows.reduce((sum, row) => sum + row.duplicateCount, 0) - group.rows.length), 0);
+  const gateCounts = promotionGate?.gate_status_counts ?? {};
   return (
     <div className="pageStack">
       <section className="metricGrid compactMetrics">
@@ -1138,6 +1176,9 @@ function CandidatePoolPage({ rows, onSelect }: { rows: CardRow[]; onSelect: (key
         <Metric title="影子候选" value={fmt(grouped.shadow_candidate ?? 0, 0)} detail="仍需影子样本积累" tone="good" />
         <Metric title="研究阻断" value={fmt(grouped.research_blocked ?? 0, 0)} detail="防重绘或样本未通过" tone="warn" />
         <Metric title="已折叠重复" value={fmt(duplicatePlans, 0)} detail="同入场/止损/目标计划不再刷屏" tone="info" />
+      </section>
+      <section className="stateBuckets wide" aria-label="晋级闸门分布">
+        {PROMOTION_GATE_STATES.map((status) => <div className={`stateBucket ${gateTone(status)}`} key={status}><span>{gateStatusText(status)}</span><strong>{fmt(gateCounts[status] ?? 0, 0)}</strong><small>{gateStatusHint(status)}</small></div>)}
       </section>
       <Panel title="候选池深度" subtitle="按币种、方向、策略聚合，先看哪一类候选最值得研究">
         <div className="candidateGroupList">
@@ -1604,6 +1645,10 @@ type CardRow = {
   reasonRaw: string;
   status: string;
   promotionStatus: string;
+  gateStatus?: string;
+  gatePrimaryBlocker?: string | null;
+  gateNextAction?: string;
+  gateBlockers: PromotionGateBlocker[];
   auditStatus: string;
   shadowStatus: string;
   paperEligible: boolean;
@@ -1627,6 +1672,7 @@ type CardRow = {
   secondaryReason: string;
   decisionCard?: DecisionCard;
   candidate?: TradeCandidate;
+  promotionGate?: PromotionGateSample;
   entrySample?: EntryPlanSample;
 };
 
@@ -1647,6 +1693,11 @@ function buildRows(data: LoadState): CardRow[] {
     const key = candidate.candidate_key;
     const existing = byKey.get(key);
     byKey.set(key, mergeRows(existing, rowFromCandidate(candidate)));
+  }
+  for (const sample of data.promotionGate?.gate_samples ?? []) {
+    const key = sample.candidate_key;
+    const existing = byKey.get(key);
+    byKey.set(key, mergeRows(existing, rowFromPromotionGate(sample)));
   }
   for (const sample of data.entryStates?.samples ?? []) {
     const key = sample.candidate_key;
@@ -1674,6 +1725,7 @@ function rowFromCard(card: DecisionCard): CardRow {
     reasonRaw: card.risk_gate.blockers[0] ?? "waiting_for_entry_plan_state",
     status: card.risk_gate.status,
     promotionStatus: card.risk_gate.status,
+    gateBlockers: [],
     auditStatus: card.risk_gate.promotion_blockers.includes("anti_repaint_audit_missing") ? "missing" : "passed",
     shadowStatus: "not_started",
     paperEligible: card.risk_gate.paper_eligible,
@@ -1716,6 +1768,7 @@ function rowFromCandidate(candidate: TradeCandidate): CardRow {
     reasonRaw: candidate.promotion_blockers[0] ?? candidate.blockers[0] ?? "candidate_materialized",
     status: candidate.status,
     promotionStatus: candidate.promotion_status,
+    gateBlockers: [],
     auditStatus: candidate.anti_repaint_status,
     shadowStatus: candidate.shadow_status,
     paperEligible: candidate.paper_eligible,
@@ -1758,6 +1811,7 @@ function rowFromEntrySample(sample: EntryPlanSample): CardRow {
     reasonRaw: sample.entry_plan_state.reason,
     status: sample.status,
     promotionStatus: sample.promotion_status,
+    gateBlockers: [],
     auditStatus: sample.anti_repaint_status,
     shadowStatus: sample.shadow_status,
     paperEligible: false,
@@ -1783,6 +1837,51 @@ function rowFromEntrySample(sample: EntryPlanSample): CardRow {
   };
 }
 
+function rowFromPromotionGate(sample: PromotionGateSample): CardRow {
+  const blockers = gateBlockerItems(sample);
+  const primary = sample.primary_blocker || blockers[0]?.code || "promotion_gate_waiting";
+  return {
+    key: sample.candidate_key,
+    duplicateCount: 1,
+    duplicateKeys: [sample.candidate_key],
+    variantSummary: "单一来源",
+    source: "candidate",
+    symbol: sample.symbol,
+    direction: sample.direction,
+    interval: "30m",
+    strategyId: "darkflow_entry_plan",
+    setupType: "promotion_gate",
+    state: normalizeGateState(sample.gate_status, sample.status),
+    stateRaw: sample.gate_status,
+    reasonRaw: primary,
+    status: sample.status,
+    promotionStatus: sample.promotion_status,
+    gateStatus: sample.gate_status,
+    gatePrimaryBlocker: sample.primary_blocker,
+    gateNextAction: sample.next_action,
+    gateBlockers: blockers,
+    auditStatus: sample.anti_repaint_status,
+    shadowStatus: sample.shadow_status,
+    paperEligible: false,
+    liveEligible: false,
+    qualityScore: 0,
+    rrRatio: 0,
+    ruleScore: 0,
+    modelWinProb: null,
+    expectedR: null,
+    entryPrice: 0,
+    stopPrice: 0,
+    targetPrice: 0,
+    entryRangeText: "--",
+    supportingSignals: [],
+    blockers: [],
+    promotionBlockers: sample.raw_blockers ?? [],
+    primaryReason: primary ? `主要阻塞：${blockerText(primary)}` : gateStatusText(sample.gate_status),
+    secondaryReason: `晋级闸门：${gateStatusText(sample.gate_status)} · 下一步：${gateNextActionText(sample.next_action)}`,
+    promotionGate: sample,
+  };
+}
+
 function mergeRows(base: CardRow | undefined, next: CardRow): CardRow {
   if (!base) return next;
   return {
@@ -1791,10 +1890,15 @@ function mergeRows(base: CardRow | undefined, next: CardRow): CardRow {
     source: base.source === "card" ? base.source : next.source,
     decisionCard: base.decisionCard ?? next.decisionCard,
     candidate: base.candidate ?? next.candidate,
+    promotionGate: base.promotionGate ?? next.promotionGate,
     entrySample: base.entrySample ?? next.entrySample,
     supportingSignals: unique([...base.supportingSignals, ...next.supportingSignals]),
     blockers: unique([...base.blockers, ...next.blockers]),
     promotionBlockers: unique([...base.promotionBlockers, ...next.promotionBlockers]),
+    gateBlockers: uniqueGateBlockers([...base.gateBlockers, ...next.gateBlockers]),
+    gateStatus: next.gateStatus ?? base.gateStatus,
+    gatePrimaryBlocker: next.gatePrimaryBlocker ?? base.gatePrimaryBlocker,
+    gateNextAction: next.gateNextAction ?? base.gateNextAction,
     state: next.entrySample ? next.state : base.state,
     stateRaw: next.entrySample ? next.stateRaw : base.stateRaw,
     reasonRaw: next.entrySample ? next.reasonRaw : base.reasonRaw,
@@ -1826,6 +1930,10 @@ function mergeDuplicateRows(items: CardRow[]): CardRow {
     supportingSignals: unique(items.flatMap((item) => item.supportingSignals)),
     blockers: unique(items.flatMap((item) => item.blockers)),
     promotionBlockers: unique(items.flatMap((item) => item.promotionBlockers)),
+    gateBlockers: uniqueGateBlockers(items.flatMap((item) => item.gateBlockers)),
+    gateStatus: best.gateStatus,
+    gatePrimaryBlocker: best.gatePrimaryBlocker,
+    gateNextAction: best.gateNextAction,
     validUntil: validUntil ?? best.validUntil,
     primaryReason: primaryReason(unique(items.flatMap((item) => item.blockers)), unique(items.flatMap((item) => item.supportingSignals))),
     secondaryReason: duplicateKeys.length > 1
@@ -1870,15 +1978,15 @@ function filterRows(rows: CardRow[], filters: Filters): CardRow[] {
 }
 
 function hasTradeEvidence(row: CardRow) {
-  return Boolean(row.candidate || row.decisionCard || row.supportingSignals.length || row.blockers.length);
+  return Boolean(row.candidate || row.decisionCard || row.promotionGate || row.supportingSignals.length || row.blockers.length);
 }
 
 function relevantLoadErrors(page: PageId, errors: LoadErrors): LoadErrors {
   const shared: SectionKey[] = [];
   const byPage: Record<PageId, SectionKey[]> = {
-    overview: ["summary", "quality", "candidates", "entryStates", "darkflow", "safety"],
-    tradeCards: ["cards", "candidates", "entryStates"],
-    candidates: ["candidates"],
+    overview: ["summary", "quality", "candidates", "promotionGate", "entryStates", "darkflow", "safety"],
+    tradeCards: ["cards", "candidates", "promotionGate", "entryStates"],
+    candidates: ["candidates", "promotionGate"],
     entryPlans: ["entryStates"],
     experimentLab: ["indicatorCoverage", "experimentEffectiveness", "featurePaperAb", "featureSegmentPaperAb"],
     backtest: ["darkflow", "backtestsLatest", "playbookBacktest"],
@@ -2059,12 +2167,21 @@ function blockerDetail(value: string): ReasonItem {
     blocker_indicators_nearby: { group: "阻断", title: "附近有阻断类指标", text: "入场区域附近出现耗尽、反向大单或结构破坏信号，需要暂停追踪。", tone: "warn" },
   } as Record<string, ReasonItem>)[value] ?? { title: readableCode(value), text: "系统返回了新的阻断码，当前先按原始含义展示，后续可补充风控解释。", tone: "warn" };
 }
+function gateStatusText(value: string) { return ({ blocked: "晋级阻断", collecting: "继续积累影子样本", watching_entry: "观察入场区间", review_ready: "待人工复核", retired: "候选已退休" } as Record<string, string>)[value] ?? readableCode(value); }
+function gateTone(value: string) { return ({ review_ready: "good", collecting: "info", watching_entry: "info", retired: "warn", blocked: "bad" } as Record<string, string>)[value] ?? "warn"; }
+function gateStatusHint(value: string) { return ({ blocked: "先处理主要阻塞", collecting: "等待更多前向样本", watching_entry: "等价格进入冻结区间", review_ready: "证据齐，人工看", retired: "不再推进" } as Record<string, string>)[value] ?? "等待刷新"; }
+function gateNextActionText(value?: string) { return value || "等待 Promotion Gate 刷新下一步动作。"; }
+function gateBlockerDetail(item: PromotionGateBlocker): ReasonItem { return { group: gateBlockerGroupText(item), title: blockerText(item.code), text: item.message || blockerDetail(item.code).text, tone: item.severity === "blocker" ? "warn" : "normal" }; }
+function gateBlockerItems(sample: PromotionGateSample): PromotionGateBlocker[] { return Object.values(sample.blocker_groups ?? {}).flat(); }
+function gateBlockerGroupText(item: PromotionGateBlocker) { return ({ anti_repaint: "防重绘", shadow_forward: "影子前向", entry_plan: "入场计划", lineage: "主路径", market_quality: "市场质量", dedupe: "重复计划", risk_shape: "风险形态", data_freshness: "数据新鲜度" } as Record<string, string>)[item.code.split("_")[0]] ?? "晋级闸门"; }
+function uniqueGateBlockers(items: PromotionGateBlocker[]) { const seen = new Set<string>(); return items.filter((item) => { const key = item.code; if (seen.has(key)) return false; seen.add(key); return true; }); }
+function normalizeGateState(gateStatus: string, fallbackStatus: string) { if (gateStatus === "watching_entry") return "waiting"; if (gateStatus === "review_ready") return "triggered"; if (gateStatus === "retired") return "expired"; if (gateStatus === "blocked") return "blocked"; return normalizeCardState(fallbackStatus); }
 function promotionText(value: string) { return ({ blocked: "研究阻断", shadow_ready_pending_audit: "待防重绘审计", shadow_forward_pending: "待影子入场", shadow_forward_collecting: "影子样本采集中", shadow_forward_failed: "影子样本未达标", entry_plan_retired: "入场计划已退休", duplicate_shadow_plan: "重复影子计划", shadow_market_paused: "弱势方向暂停", shadow_running: "影子运行中", paper_review_ready: "待人工复核" } as Record<string, string>)[value] ?? value.replace(/_/g, " "); }
 function auditText(value: string) { return ({ missing: "缺失", passed: "通过", failed: "失败" } as Record<string, string>)[value] ?? value; }
 function shadowText(value: string) { return ({ not_started: "未开始", collecting: "采集中", retired: "已退休", failed: "未达标", passed: "已达标", closed: "已结束" } as Record<string, string>)[value] ?? value; }
 function entryStateText(value: string) { return ({ triggered: "已触发", waiting: "等待入场", missed: "已错过", expired: "时间过期", invalidated: "条件作废", missing_price: "缺少价格", invalid_shape: "形态异常", entry_plan_retired: "入场计划已退休", blocked: "研究阻断", shadow_candidate: "影子候选" } as Record<string, string>)[value] ?? value.replace(/_/g, " "); }
 function stateReasonText(value: string) { return ({ mark_price_inside_frozen_entry_range: "价格进入冻结入场区间", awaiting_frozen_entry_range: "尚未进入冻结入场区间", entry_range_missed: "价格已越过入场区间", valid_until_passed: "超过有效期", price_crosses_invalidation: "触发失效价", missing_latest_price: "缺少最新价格", invalid_long_frozen_entry_range: "多头入场区间异常", invalid_short_frozen_entry_range: "空头入场区间异常" } as Record<string, string>)[value] ?? blockerText(value); }
-function sectionLabel(key: SectionKey) { return ({ summary: "系统摘要", quality: "数据质量", cards: "交易卡片", candidates: "候选池", entryStates: "入场计划", darkflow: "暗流交互回测", backtestsLatest: "批量回测", playbookBacktest: "剧本回测", paperStats: "纸上统计", paperTrades: "纸上交易明细", shadow: "影子纸上", shadowTrades: "影子交易明细", rulebook: "教程规则", playbooks: "策略剧本", indicatorCoverage: "指标覆盖", experimentEffectiveness: "实验有效性", featurePaperAb: "特征纸上 A/B", featureSegmentPaperAb: "分段纸上 A/B", safety: "安全开关" } as Record<SectionKey, string>)[key]; }
+function sectionLabel(key: SectionKey) { return ({ summary: "系统摘要", quality: "数据质量", cards: "交易卡片", candidates: "候选池", promotionGate: "晋级闸门", entryStates: "入场计划", darkflow: "暗流交互回测", backtestsLatest: "批量回测", playbookBacktest: "剧本回测", paperStats: "纸上统计", paperTrades: "纸上交易明细", shadow: "影子纸上", shadowTrades: "影子交易明细", rulebook: "教程规则", playbooks: "策略剧本", indicatorCoverage: "指标覆盖", experimentEffectiveness: "实验有效性", featurePaperAb: "特征纸上 A/B", featureSegmentPaperAb: "分段纸上 A/B", safety: "安全开关" } as Record<SectionKey, string>)[key]; }
 function pageLabel(page: PageId) { return NAV_GROUPS.flatMap((group) => group.items).find((item) => item.id === page)?.label ?? page; }
 function pageTitleFromHash() { return pageLabel(pageFromHash()); }
 function pageFromHash(): PageId { const raw = window.location.hash.replace("#", ""); return NAV_GROUPS.flatMap((group) => group.items).some((item) => item.id === raw) ? raw as PageId : "overview"; }
