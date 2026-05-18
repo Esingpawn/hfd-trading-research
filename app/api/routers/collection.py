@@ -57,6 +57,26 @@ async def collect_scoring_core(
         await collector.close()
 
 
+@router.post("/collect/prices")
+async def collect_prices_only(
+    session: SessionDep,
+    dry_run: bool = True,
+    coins: list[str] | None = Query(default=None),
+) -> dict[str, object]:
+    collector = SnapshotCollector(session)
+    try:
+        result = await collector.collect_prices_only(
+            assets=coins,
+            dry_run=dry_run,
+        )
+        if not dry_run:
+            _market_cache_clear()
+            _completeness_cache_clear()
+        return vars(result)
+    finally:
+        await collector.close()
+
+
 @router.post("/collect/experiments")
 async def collect_experiments(
     session: SessionDep,

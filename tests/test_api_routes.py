@@ -30,6 +30,7 @@ def test_expected_api_routes_are_registered() -> None:
         ("GET", "/data/quality-report"),
         ("GET", "/market/overview"),
         ("POST", "/collect/run"),
+        ("POST", "/collect/prices"),
         ("POST", "/paper/scan"),
         ("GET", "/paper/trades"),
         ("POST", "/shadow-paper/scan"),

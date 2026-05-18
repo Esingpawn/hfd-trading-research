@@ -23,6 +23,7 @@ class TaskSpec:
 
 TASK_SPECS: tuple[TaskSpec, ...] = (
     TaskSpec("collect.run", ("collect",), INFRASTRUCTURE_ONLY, True),
+    TaskSpec("collect.prices", ("collect-prices",), INFRASTRUCTURE_ONLY, True),
     TaskSpec("collect.scoring_core", ("collect-scoring-core",), INFRASTRUCTURE_ONLY, True),
     TaskSpec("paper.scan", ("paper-scan",), INFRASTRUCTURE_ONLY, True),
     TaskSpec("paper.mark", ("paper-mark",), INFRASTRUCTURE_ONLY, True),

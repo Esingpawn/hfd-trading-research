@@ -251,6 +251,21 @@ async def test_run_task_by_id_executes_feature_backfill(session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_task_by_id_executes_price_collection(session) -> None:
+    item = TaskRun(task_name="collect.prices", payload={"coins": ["BTC", "ETH"]}, result={})
+    session.add(item)
+    await session.commit()
+
+    result = await run_task_by_id(session, item.id)
+    prices = await session.execute(select(PriceSnapshot))
+
+    assert result["status"] == "completed"
+    assert result["result"]["execution"]["prices_written"] == 2
+    assert result["result"]["execution"]["snapshots_written"] == 0
+    assert len(prices.scalars().all()) == 2
+
+
+@pytest.mark.asyncio
 async def test_run_task_by_id_executes_feature_reset(session) -> None:
     rows = [
         [1_700_000_000_000, 100, 101, 99, 102, 10],

@@ -149,6 +149,52 @@ class SnapshotCollector:
             await self.session.commit()
         return result
 
+    async def collect_prices_only(
+        self,
+        assets: Iterable[str] | None = None,
+        dry_run: bool = False,
+    ) -> CollectionResult:
+        selected_assets = normalize_assets(assets)
+        run = CollectionRun(
+            status="running",
+            dry_run=dry_run,
+            requested_assets=selected_assets,
+            requested_timeframes=[],
+            requested_indicators=[],
+            errors=[],
+        )
+        result = CollectionResult(
+            run_id=None,
+            status="running",
+            dry_run=dry_run,
+            assets=selected_assets,
+            timeframes=[],
+            indicators=[],
+        )
+
+        collected_at = datetime.now(timezone.utc)
+        prices: list[CollectedPrice] = []
+        for coin in selected_assets:
+            price = await self._fetch_price(coin, result)
+            if price is not None:
+                prices.append(price)
+
+        if dry_run:
+            result.status = "completed" if not result.errors else "completed_with_errors"
+        else:
+            self.session.add(run)
+            await self.session.flush()
+            result.run_id = run.id
+            self._store_prices(prices, collected_at, result)
+            result.status = "completed" if not result.errors else "completed_with_errors"
+            run.status = result.status
+            run.snapshots_written = 0
+            run.prices_written = result.prices_written
+            run.errors = result.errors
+            run.finished_at = datetime.now(timezone.utc)
+            await self.session.commit()
+        return result
+
     async def _fetch_price(
         self,
         coin: str,

@@ -224,6 +224,16 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
         finally:
             await collector.close()
         return result.__dict__
+    if task_name in {"collect.prices", "collect-prices"}:
+        collector = SnapshotCollector(session)
+        try:
+            result = await collector.collect_prices_only(
+                assets=payload.get("coins") or payload.get("assets"),
+                dry_run=bool(payload.get("dry_run", False)),
+            )
+        finally:
+            await collector.close()
+        return result.__dict__
     if task_name in {"collect.scoring_core", "collect-scoring-core"}:
         from app.constants import REQUIRED_SCORING_INDICATORS
 

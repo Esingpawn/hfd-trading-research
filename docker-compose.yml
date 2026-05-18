@@ -71,7 +71,7 @@ services:
       - mid
       - long
       - --core-interval-seconds
-      - "1800"
+      - "60"
       - --research-short-interval-seconds
       - "1800"
       - --research-mid-interval-seconds

@@ -121,6 +121,37 @@ async def test_collector_records_store_errors_in_collection_run() -> None:
 
 
 @pytest.mark.asyncio
+async def test_collector_can_collect_prices_only() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            collector = SnapshotCollector(session, client=FakeHfdClient())
+
+            result = await collector.collect_prices_only(
+                assets=["BTC", "ETH"],
+                dry_run=False,
+            )
+
+            runs = await session.execute(select(CollectionRun))
+            prices = await session.execute(select(PriceSnapshot))
+            snapshots = await session.execute(select(SignalSnapshot))
+
+        run = runs.scalar_one()
+        assert result.status == "completed"
+        assert result.prices_written == 2
+        assert result.snapshots_written == 0
+        assert run.prices_written == 2
+        assert run.snapshots_written == 0
+        assert len(prices.scalars().all()) == 2
+        assert snapshots.scalars().all() == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_collector_externalizes_raw_payloads_before_db_write(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("EXTERNALIZE_RAW_PAYLOADS", "true")
     monkeypatch.setenv("RAW_PAYLOAD_DIR", str(tmp_path / "raw"))
