@@ -168,7 +168,7 @@ async def open_darkflow_shadow_forward_samples(
                 )
                 continue
         market_gate = _shadow_market_gate_from_stats(candidate, market_stats)
-        if market_gate["decision"] == "paused":
+        if market_gate["decision"] == "paused" and alpha_exploration_group_key is None:
             if _pause_shadow_candidate_for_market(candidate, gate=market_gate, now=now):
                 updated.append(_candidate_update_row(candidate, _candidate_stats(stats_by_candidate, candidate), reason="shadow_market_performance_paused"))
             skipped.append(
@@ -911,20 +911,20 @@ async def _shadow_market_performance_gate(session: AsyncSession, candidate: Trad
     return _shadow_market_gate_from_stats(candidate, await _shadow_market_performance_stats(session))
 
 
-async def _shadow_market_performance_stats(session: AsyncSession) -> dict[tuple[str, str], dict[str, Any]]:
+async def _shadow_market_performance_stats(session: AsyncSession) -> dict[tuple[str, str, str], dict[str, Any]]:
     rows = await session.scalars(
         select(ShadowPaperTrade)
         .where(ShadowPaperTrade.strategy_name == DARKFLOW_V2_SHADOW_STRATEGY_NAME)
         .order_by(ShadowPaperTrade.opened_at)
     )
-    buckets: dict[tuple[str, str], list[ShadowPaperTrade]] = {}
+    buckets: dict[tuple[str, str, str], list[ShadowPaperTrade]] = {}
     for trade in rows.all():
-        buckets.setdefault((trade.symbol, trade.direction), []).append(trade)
+        buckets.setdefault((trade.symbol, trade.direction, _shadow_trade_strategy_id(trade) or "unknown"), []).append(trade)
     return {key: _market_trade_stats(_unique_market_plan_trades(items)) for key, items in buckets.items()}
 
 
-def _shadow_market_gate_from_stats(candidate: TradeCandidate, stats_by_market: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any]:
-    stats = stats_by_market.get((candidate.symbol, candidate.direction)) or _empty_market_stats()
+def _shadow_market_gate_from_stats(candidate: TradeCandidate, stats_by_market: dict[tuple[str, str, str], dict[str, Any]]) -> dict[str, Any]:
+    stats = stats_by_market.get((candidate.symbol, candidate.direction, candidate.strategy_id)) or _empty_market_stats()
     closed = int(stats.get("closed_trades") or 0)
     win_rate = stats.get("win_rate")
     profit_factor = stats.get("profit_factor")
@@ -936,7 +936,7 @@ def _shadow_market_gate_from_stats(candidate: TradeCandidate, stats_by_market: d
         and float(profit_factor) <= SHADOW_MARKET_PAUSE_MAX_PROFIT_FACTOR
     ):
         decision = "paused"
-        reason = "weak_symbol_direction_shadow_performance"
+        reason = "weak_symbol_direction_strategy_shadow_performance"
     elif (
         closed >= SHADOW_MARKET_MIN_CLOSED_TRADES
         and isinstance(win_rate, (int, float))
@@ -945,15 +945,16 @@ def _shadow_market_gate_from_stats(candidate: TradeCandidate, stats_by_market: d
         and float(profit_factor) >= SHADOW_MARKET_PRIORITY_MIN_PROFIT_FACTOR
     ):
         decision = "priority"
-        reason = "strong_symbol_direction_shadow_performance"
+        reason = "strong_symbol_direction_strategy_shadow_performance"
     else:
         decision = "neutral"
-        reason = "insufficient_or_mixed_symbol_direction_shadow_performance"
+        reason = "insufficient_or_mixed_symbol_direction_strategy_shadow_performance"
     return {
         "decision": decision,
         "reason": reason,
         "symbol": candidate.symbol,
         "direction": candidate.direction,
+        "strategy_id": candidate.strategy_id,
         "closed_trades": closed,
         "win_rate": win_rate,
         "profit_factor": profit_factor,
