@@ -753,6 +753,87 @@ async def test_trade_candidates_do_not_materialize_exit_filter_playbooks_as_open
 
 
 @pytest.mark.asyncio
+async def test_trade_candidate_materialize_prefers_opening_playbooks_when_exit_filters_are_newer(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(40):
+        session.add(
+            DarkflowInteraction(
+                interaction_key=f"candidate-newer-exit-filter-{index}",
+                zone_key=f"zone-newer-exit-filter-{index}",
+                source_snapshot_id=f"snapshot-newer-exit-filter-{index}",
+                symbol="BTCUSDT",
+                timeframe="short",
+                interval="30m",
+                indicator="trend_exhaustion",
+                playbook="exhaustion_exit_filter",
+                direction="long",
+                interaction_type="first_touch",
+                event_ts=base + timedelta(minutes=index + 1),
+                entry_price=100.0,
+                stop_price=99.0,
+                target_price=102.0,
+                invalidation_price=99.0,
+                exit_price=102.0,
+                exit_ts=base + timedelta(minutes=30 + index),
+                exit_reason="target_hit",
+                pnl_pct=0.02,
+                r_multiple=2.0,
+                mfe=0.025,
+                mae=-0.004,
+                status="backtested",
+                context={
+                    "interaction_schema": "v2",
+                    "quality": {"score": 95.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+                },
+            )
+        )
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-older-opening-playbook",
+            zone_key="zone-older-opening-playbook",
+            source_snapshot_id="snapshot-older-opening-playbook",
+            symbol="ETHUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            playbook="pullback_to_cost",
+            direction="long",
+            interaction_type="wick_pierce_reclaim",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+            },
+        )
+    )
+    await session.commit()
+
+    result = await materialize_darkflow_trade_candidates(session, limit=1)
+    candidates = (await session.execute(select(TradeCandidate))).scalars().all()
+
+    assert result["requested_limit"] == 1
+    assert result["opening_card_count"] == 1
+    assert result["opening_card_fetch_limit"] > result["requested_limit"]
+    assert result["skipped_non_opening_count"] > 0
+    assert result["inserted"] == 1
+    assert len(candidates) == 1
+    assert candidates[0].candidate_key.endswith("candidate-older-opening-playbook")
+    assert candidates[0].status == "shadow_candidate"
+
+
+@pytest.mark.asyncio
 async def test_trade_candidates_retire_existing_exit_filter_opening_candidates(session) -> None:
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
     session.add(

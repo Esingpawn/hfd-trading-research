@@ -31,6 +31,8 @@ DEFAULT_MIN_SHADOW_RESEARCH_QUALITY = 50.0
 DEFAULT_MIN_RR_RATIO = 1.5
 DEFAULT_TRADE_CANDIDATE_LIMIT = 100
 DEFAULT_TRADE_CANDIDATE_FETCH_MULTIPLIER = 3
+DEFAULT_TRADE_CANDIDATE_OPENING_FETCH_MULTIPLIER = 10
+DEFAULT_TRADE_CANDIDATE_NON_OPENING_FETCH_MULTIPLIER = 2
 NON_OPENING_PLAYBOOK_POLICIES = {"research_only_exit_filter_not_opening"}
 FROZEN_ENTRY_PLAN_TYPE = entry_plan_rules.FROZEN_ENTRY_PLAN_TYPE
 DEFAULT_ENTRY_PLAN_VALID_BARS = entry_plan_rules.DEFAULT_ENTRY_PLAN_VALID_BARS
@@ -93,6 +95,90 @@ async def latest_darkflow_decision_cards(
     }
 
 
+async def _latest_materialization_decision_cards(
+    session: AsyncSession,
+    *,
+    limit: int,
+    min_quality_score: float,
+    min_rr_ratio: float,
+) -> dict[str, Any]:
+    requested_limit = max(1, int(limit))
+    opening_fetch_limit = _materialize_opening_card_fetch_limit(requested_limit)
+    non_opening_fetch_limit = _materialize_non_opening_card_fetch_limit(requested_limit)
+    opening_cards, opening_scanned, opening_skipped = await _decision_cards_from_interactions(
+        session,
+        limit=opening_fetch_limit,
+        min_quality_score=min_quality_score,
+        min_rr_ratio=min_rr_ratio,
+        playbooks=_opening_playbook_keys(),
+    )
+    non_opening_cards, non_opening_scanned, non_opening_skipped = await _decision_cards_from_interactions(
+        session,
+        limit=non_opening_fetch_limit,
+        min_quality_score=min_quality_score,
+        min_rr_ratio=min_rr_ratio,
+        playbooks=_non_opening_playbook_keys(),
+    )
+    return {
+        "strategy_family": "darkflow_trade_decision_cards_v1",
+        "interaction_schema": DARKFLOW_INTERACTION_SCHEMA,
+        "requested_limit": requested_limit,
+        "card_count": len(opening_cards) + len(non_opening_cards),
+        "opening_card_count": len(opening_cards),
+        "non_opening_card_count": len(non_opening_cards),
+        "opening_card_fetch_limit": opening_fetch_limit,
+        "non_opening_card_fetch_limit": non_opening_fetch_limit,
+        "scanned_interactions": opening_scanned + non_opening_scanned,
+        "opening_scanned_interactions": opening_scanned,
+        "non_opening_scanned_interactions": non_opening_scanned,
+        "cards": opening_cards + non_opening_cards,
+        "skipped": (opening_skipped + non_opening_skipped)[:20],
+        "thresholds": {
+            "min_quality_score": float(min_quality_score),
+            "min_rr_ratio": float(min_rr_ratio),
+        },
+        "policy": _policy() | {
+            "materialization_prefers_opening_playbooks": True,
+            "opening_playbooks": _opening_playbook_keys(),
+            "non_opening_playbooks": _non_opening_playbook_keys(),
+        },
+    }
+
+
+async def _decision_cards_from_interactions(
+    session: AsyncSession,
+    *,
+    limit: int,
+    min_quality_score: float,
+    min_rr_ratio: float,
+    playbooks: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], int, list[dict[str, Any]]]:
+    query = select(DarkflowInteraction).where(
+        DarkflowInteraction.status == "backtested",
+        DarkflowInteraction.entry_price.isnot(None),
+        DarkflowInteraction.stop_price.isnot(None),
+        DarkflowInteraction.target_price.isnot(None),
+    )
+    if playbooks is not None:
+        if not playbooks:
+            return [], 0, []
+        query = query.where(DarkflowInteraction.playbook.in_(playbooks))
+    rows = await session.scalars(
+        query.order_by(DarkflowInteraction.event_ts.desc(), DarkflowInteraction.id.desc()).limit(max(1, int(limit)))
+    )
+    scanned = 0
+    cards: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for item in rows.all():
+        scanned += 1
+        card = _decision_card(item, min_quality_score=min_quality_score, min_rr_ratio=min_rr_ratio)
+        if card is None:
+            skipped.append({"id": item.id, "reason": "not_core_darkflow_v2_or_invalid"})
+            continue
+        cards.append(card)
+    return cards, scanned, skipped
+
+
 async def materialize_darkflow_trade_candidates(
     session: AsyncSession,
     *,
@@ -102,9 +188,9 @@ async def materialize_darkflow_trade_candidates(
 ) -> dict[str, Any]:
     requested_limit = max(1, int(limit))
     card_fetch_limit = _materialize_card_fetch_limit(requested_limit)
-    report = await latest_darkflow_decision_cards(
+    report = await _latest_materialization_decision_cards(
         session,
-        limit=card_fetch_limit,
+        limit=requested_limit,
         min_quality_score=min_quality_score,
         min_rr_ratio=min_rr_ratio,
     )
@@ -192,8 +278,14 @@ async def materialize_darkflow_trade_candidates(
         "strategy_family": "darkflow_trade_candidates_v1",
         "requested_limit": requested_limit,
         "card_fetch_limit": card_fetch_limit,
+        "opening_card_fetch_limit": report.get("opening_card_fetch_limit"),
+        "non_opening_card_fetch_limit": report.get("non_opening_card_fetch_limit"),
         "scanned_interactions": report["scanned_interactions"],
+        "opening_scanned_interactions": report.get("opening_scanned_interactions"),
+        "non_opening_scanned_interactions": report.get("non_opening_scanned_interactions"),
         "card_count": report["card_count"],
+        "opening_card_count": report.get("opening_card_count", 0),
+        "non_opening_card_count": report.get("non_opening_card_count", 0),
         "inserted": inserted,
         "updated": updated,
         "unchanged": unchanged,
@@ -208,6 +300,16 @@ async def materialize_darkflow_trade_candidates(
 def _materialize_card_fetch_limit(limit: int) -> int:
     requested = max(1, int(limit))
     return min(max(requested * DEFAULT_TRADE_CANDIDATE_FETCH_MULTIPLIER, requested), 1000)
+
+
+def _materialize_opening_card_fetch_limit(limit: int) -> int:
+    requested = max(1, int(limit))
+    return min(max(requested * DEFAULT_TRADE_CANDIDATE_OPENING_FETCH_MULTIPLIER, requested + 500), 5000)
+
+
+def _materialize_non_opening_card_fetch_limit(limit: int) -> int:
+    requested = max(1, int(limit))
+    return min(max(requested * DEFAULT_TRADE_CANDIDATE_NON_OPENING_FETCH_MULTIPLIER, requested), 1000)
 
 
 async def latest_materialized_trade_candidates(
@@ -366,6 +468,14 @@ def _shadow_sampling_blockers(blockers: list[str], *, quality_score: float | Non
 def _non_opening_playbook_card(card: dict[str, Any]) -> bool:
     context = card.get("context") if isinstance(card.get("context"), dict) else {}
     return str(context.get("playbook_policy") or "") in NON_OPENING_PLAYBOOK_POLICIES
+
+
+def _opening_playbook_keys() -> list[str]:
+    return [playbook.key for playbook in PLAYBOOKS if playbook.policy not in NON_OPENING_PLAYBOOK_POLICIES]
+
+
+def _non_opening_playbook_keys() -> list[str]:
+    return [playbook.key for playbook in PLAYBOOKS if playbook.policy in NON_OPENING_PLAYBOOK_POLICIES]
 
 
 def _take_profit_levels(item: DarkflowInteraction, target: float) -> list[dict[str, Any]]:
