@@ -18,7 +18,7 @@ from app.services.darkflow_candidate_promotion import (
     DEFAULT_SHADOW_FORWARD_LIMIT,
     refresh_darkflow_candidate_promotion,
 )
-from app.services.shadow_paper import mark_shadow_paper_trades
+from app.services.shadow_paper import darkflow_subportfolio_recommendations_report, mark_shadow_paper_trades
 
 
 DEFAULT_ALPHA_SCOREBOARD_LIMIT = 50
@@ -82,25 +82,42 @@ async def darkflow_alpha_sampling_plan(
     limit: int = DEFAULT_ALPHA_SCOREBOARD_LIMIT,
 ) -> dict[str, Any]:
     scoreboard = await darkflow_alpha_scoreboard(session, limit=limit, min_closed_trades=1)
+    recommendations = await darkflow_subportfolio_recommendations_report(session)
     rows = list(scoreboard.get("rows") or [])
     priority = [row for row in rows if row.get("conclusion") in {"样本收集中", "可进入人工复核"}]
     paused = [row for row in rows if row.get("conclusion") == "暂停观察"]
     priority_groups = [_sampling_group_row(row, action="prioritize") for row in priority]
     paused_groups = [_sampling_group_row(row, action="pause") for row in paused]
+    recommendation_rows = list(recommendations.get("rows") or [])
+    whitelist_rows = [row for row in recommendation_rows if row.get("recommendation") == "whitelist"]
+    blocked_rows = [row for row in recommendation_rows if row.get("recommendation") in {"pause", "blacklist"}]
+    deweighted_strategy_rows = [row for row in list(recommendations.get("strategy_actions") or []) if row.get("main_path_action") == "deweight"]
+    priority_subportfolio_groups = [_recommendation_group_row(row, action="prioritize") for row in whitelist_rows]
+    paused_subportfolio_groups = [_recommendation_group_row(row, action="block") for row in blocked_rows]
+    deweighted_strategies = [_strategy_action_row(row) for row in deweighted_strategy_rows]
     return {
         "strategy_name": DARKFLOW_V2_SHADOW_STRATEGY_NAME,
         "lineage": CORE_DARKFLOW_V2,
         "generated_at": _iso(utc_now()),
         "priority_group_count": len(priority_groups),
         "paused_group_count": len(paused_groups),
+        "priority_subportfolio_count": len(priority_subportfolio_groups),
+        "paused_subportfolio_count": len(paused_subportfolio_groups),
+        "deweighted_strategy_count": len(deweighted_strategies),
         "priority_groups": priority_groups,
         "paused_groups": paused_groups,
+        "priority_subportfolio_groups": priority_subportfolio_groups,
+        "paused_subportfolio_groups": paused_subportfolio_groups,
+        "whitelist_subportfolio_groups": priority_subportfolio_groups,
+        "deweighted_strategies": deweighted_strategies,
         "scoreboard_totals": scoreboard.get("totals") or {},
         "thresholds": scoreboard.get("thresholds") or {},
+        "recommendation_counts": recommendations.get("recommendation_counts") or {},
         "policy": _policy() | {
             "report_only": True,
             "mutates_candidates": False,
             "sampling_plan_only": True,
+            "uses_subportfolio_recommendations": True,
         },
     }
 
@@ -124,6 +141,10 @@ async def accelerate_darkflow_alpha(
     sampling_plan = await darkflow_alpha_sampling_plan(session, limit=scoreboard_limit)
     priority_group_keys = [str(item["group_key"]) for item in sampling_plan["priority_groups"]]
     paused_group_keys = [str(item["group_key"]) for item in sampling_plan["paused_groups"]]
+    priority_subportfolio_keys = [str(item["group_key"]) for item in sampling_plan["priority_subportfolio_groups"]]
+    paused_subportfolio_keys = [str(item["group_key"]) for item in sampling_plan["paused_subportfolio_groups"]]
+    whitelist_subportfolio_keys = [str(item["group_key"]) for item in sampling_plan["whitelist_subportfolio_groups"]]
+    deweighted_strategy_ids = [str(item["strategy_id"]) for item in sampling_plan["deweighted_strategies"]]
     refresh = await refresh_darkflow_candidate_promotion(
         session,
         limit=candidate_limit,
@@ -134,6 +155,10 @@ async def accelerate_darkflow_alpha(
         retire_expired_entry_plans=retire_expired_entry_plans,
         priority_group_keys=priority_group_keys,
         paused_group_keys=paused_group_keys,
+        priority_subportfolio_keys=priority_subportfolio_keys,
+        paused_subportfolio_keys=paused_subportfolio_keys,
+        whitelist_subportfolio_keys=whitelist_subportfolio_keys,
+        deweighted_strategy_ids=deweighted_strategy_ids,
         paused_group_exploration_limit=paused_group_exploration_limit,
     )
     scoreboard = await darkflow_alpha_scoreboard(session, limit=scoreboard_limit, min_closed_trades=1)
@@ -149,9 +174,15 @@ async def accelerate_darkflow_alpha(
         "sampling_plan": {
             "priority_group_count": sampling_plan["priority_group_count"],
             "paused_group_count": sampling_plan["paused_group_count"],
+            "priority_subportfolio_count": sampling_plan["priority_subportfolio_count"],
+            "paused_subportfolio_count": sampling_plan["paused_subportfolio_count"],
+            "deweighted_strategy_count": sampling_plan["deweighted_strategy_count"],
             "paused_group_exploration_limit": max(0, int(paused_group_exploration_limit)),
             "priority_groups": sampling_plan["priority_groups"][:20],
             "paused_groups": sampling_plan["paused_groups"][:20],
+            "priority_subportfolio_groups": sampling_plan["priority_subportfolio_groups"][:20],
+            "paused_subportfolio_groups": sampling_plan["paused_subportfolio_groups"][:20],
+            "deweighted_strategies": sampling_plan["deweighted_strategies"][:20],
         },
         "policy": _policy(),
     }
@@ -267,6 +298,42 @@ def _sampling_group_row(row: dict[str, Any], *, action: str) -> dict[str, Any]:
         "max_drawdown": row.get("max_drawdown"),
         "conclusion": row.get("conclusion"),
         "reason": row.get("next_action"),
+    }
+
+
+def _recommendation_group_row(row: dict[str, Any], *, action: str) -> dict[str, Any]:
+    return {
+        "group_key": str(row.get("group_key") or "|".join([
+            str(row.get("strategy_id") or "unknown"),
+            str(row.get("symbol") or "unknown"),
+            str(row.get("direction") or "unknown"),
+            str(row.get("market_state") or "unknown"),
+        ])),
+        "action": action,
+        "strategy_id": row.get("strategy_id"),
+        "strategy_name": row.get("strategy_name"),
+        "symbol": row.get("symbol"),
+        "direction": row.get("direction"),
+        "market_state": row.get("market_state"),
+        "closed_trades": row.get("closed_trades"),
+        "win_rate": row.get("win_rate"),
+        "profit_factor": row.get("profit_factor"),
+        "recommendation": row.get("recommendation"),
+        "reason": " ".join(str(item) for item in (row.get("reasons") or [])),
+    }
+
+
+def _strategy_action_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "strategy_id": str(row.get("strategy_id") or "unknown"),
+        "strategy_name": row.get("strategy_name"),
+        "action": row.get("main_path_action"),
+        "closed_trades": row.get("closed_trades"),
+        "win_rate": row.get("win_rate"),
+        "profit_factor": row.get("profit_factor"),
+        "time_exit_share": row.get("time_exit_share"),
+        "weight_multiplier": row.get("weight_multiplier"),
+        "reason": " ".join(str(item) for item in (row.get("reasons") or [])),
     }
 
 

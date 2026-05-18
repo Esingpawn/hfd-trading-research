@@ -126,6 +126,10 @@ async def open_darkflow_shadow_forward_samples(
     entry_tolerance_pct: float = DEFAULT_ENTRY_TOLERANCE_PCT,
     priority_group_keys: list[str] | set[str] | tuple[str, ...] | None = None,
     paused_group_keys: list[str] | set[str] | tuple[str, ...] | None = None,
+    priority_subportfolio_keys: list[str] | set[str] | tuple[str, ...] | None = None,
+    paused_subportfolio_keys: list[str] | set[str] | tuple[str, ...] | None = None,
+    whitelist_subportfolio_keys: list[str] | set[str] | tuple[str, ...] | None = None,
+    deweighted_strategy_ids: list[str] | set[str] | tuple[str, ...] | None = None,
     paused_group_exploration_limit: int = DEFAULT_PAUSED_GROUP_EXPLORATION_LIMIT,
 ) -> dict[str, Any]:
     requested_limit = max(1, int(limit))
@@ -133,9 +137,21 @@ async def open_darkflow_shadow_forward_samples(
     rows = await _shadow_ready_candidate_rows(session, limit=scan_limit)
     priority_groups = _normalized_group_keys(priority_group_keys)
     paused_groups = _normalized_group_keys(paused_group_keys)
+    priority_subportfolios = _normalized_group_keys(priority_subportfolio_keys)
+    paused_subportfolios = _normalized_group_keys(paused_subportfolio_keys)
+    whitelist_subportfolios = _normalized_group_keys(whitelist_subportfolio_keys)
+    deweighted_strategies = _normalized_group_keys(deweighted_strategy_ids)
     paused_group_exploration_budget = _paused_group_exploration_budget(paused_groups, paused_group_exploration_limit)
-    if priority_groups or paused_groups:
-        rows = _sort_candidates_by_alpha_sampling_plan(rows, priority_groups=priority_groups, paused_groups=paused_groups)
+    if priority_groups or paused_groups or priority_subportfolios or paused_subportfolios or deweighted_strategies:
+        rows = _sort_candidates_by_alpha_sampling_plan(
+            rows,
+            priority_groups=priority_groups,
+            paused_groups=paused_groups,
+            priority_subportfolios=priority_subportfolios,
+            paused_subportfolios=paused_subportfolios,
+            whitelist_subportfolios=whitelist_subportfolios,
+            deweighted_strategies=deweighted_strategies,
+        )
     now = utc_now()
     market_stats = await _shadow_market_performance_stats(session)
     stats_by_candidate = await _shadow_stats_by_candidate(session, [candidate.candidate_key for candidate in rows])
@@ -225,7 +241,48 @@ async def open_darkflow_shadow_forward_samples(
             )
             continue
         alpha_group_key = _candidate_alpha_group_key(candidate)
+        subportfolio_key = _candidate_subportfolio_key(candidate)
         alpha_exploration_group_key = None
+        if subportfolio_key in paused_subportfolios:
+            if _pause_shadow_candidate_for_recommendation(
+                candidate,
+                group_key=subportfolio_key,
+                reason="darkflow_subportfolio_recommendation_paused",
+                decision="blocked",
+                now=now,
+            ):
+                updated.append(_candidate_update_row(candidate, _candidate_stats(stats_by_candidate, candidate), reason="darkflow_subportfolio_recommendation_paused"))
+            skipped.append(
+                {
+                    "candidate_key": candidate.candidate_key,
+                    "symbol": candidate.symbol,
+                    "direction": candidate.direction,
+                    "strategy_id": candidate.strategy_id,
+                    "reason": "darkflow_subportfolio_recommendation_paused",
+                    "subportfolio_key": subportfolio_key,
+                }
+            )
+            continue
+        if candidate.strategy_id in deweighted_strategies and subportfolio_key not in whitelist_subportfolios:
+            if _pause_shadow_candidate_for_recommendation(
+                candidate,
+                group_key=subportfolio_key,
+                reason="darkflow_strategy_deweighted_non_whitelist",
+                decision="deweighted",
+                now=now,
+            ):
+                updated.append(_candidate_update_row(candidate, _candidate_stats(stats_by_candidate, candidate), reason="darkflow_strategy_deweighted_non_whitelist"))
+            skipped.append(
+                {
+                    "candidate_key": candidate.candidate_key,
+                    "symbol": candidate.symbol,
+                    "direction": candidate.direction,
+                    "strategy_id": candidate.strategy_id,
+                    "reason": "darkflow_strategy_deweighted_non_whitelist",
+                    "subportfolio_key": subportfolio_key,
+                }
+            )
+            continue
         if alpha_group_key in paused_groups:
             if paused_group_exploration_budget.get(alpha_group_key, 0) > 0:
                 alpha_exploration_group_key = alpha_group_key
@@ -319,6 +376,15 @@ async def open_darkflow_shadow_forward_samples(
                 now=now,
             )
             paused_group_exploration_budget[alpha_exploration_group_key] -= 1
+        elif subportfolio_key in priority_subportfolios:
+            _mark_recommendation_sampling_gate(
+                candidate,
+                trade=trade,
+                group_key=subportfolio_key,
+                decision="prioritize",
+                reason="darkflow_subportfolio_whitelist",
+                now=now,
+            )
         session.add(trade)
         _index_open_shadow_trade(open_plan_index, trade)
         open_market_counts[market_key] = open_market_counts.get(market_key, 0) + 1
@@ -368,9 +434,13 @@ async def open_darkflow_shadow_forward_samples(
             "max_open_shadow_diversity_trades_per_market": DEFAULT_MAX_OPEN_SHADOW_DIVERSITY_TRADES_PER_MARKET,
         },
         "alpha_sampling": {
-            "applied": bool(priority_groups or paused_groups),
+            "applied": bool(priority_groups or paused_groups or priority_subportfolios or paused_subportfolios or deweighted_strategies),
             "priority_group_count": len(priority_groups),
             "paused_group_count": len(paused_groups),
+            "priority_subportfolio_count": len(priority_subportfolios),
+            "paused_subportfolio_count": len(paused_subportfolios),
+            "whitelist_subportfolio_count": len(whitelist_subportfolios),
+            "deweighted_strategy_count": len(deweighted_strategies),
             "paused_group_exploration_limit": max(0, int(paused_group_exploration_limit)),
         },
         "policy": _policy(),
@@ -388,6 +458,10 @@ async def refresh_darkflow_candidate_promotion(
     retire_expired_entry_plans: bool = False,
     priority_group_keys: list[str] | set[str] | tuple[str, ...] | None = None,
     paused_group_keys: list[str] | set[str] | tuple[str, ...] | None = None,
+    priority_subportfolio_keys: list[str] | set[str] | tuple[str, ...] | None = None,
+    paused_subportfolio_keys: list[str] | set[str] | tuple[str, ...] | None = None,
+    whitelist_subportfolio_keys: list[str] | set[str] | tuple[str, ...] | None = None,
+    deweighted_strategy_ids: list[str] | set[str] | tuple[str, ...] | None = None,
     paused_group_exploration_limit: int = DEFAULT_PAUSED_GROUP_EXPLORATION_LIMIT,
 ) -> dict[str, Any]:
     materialize_result: dict[str, Any] = {"enabled": False}
@@ -405,6 +479,10 @@ async def refresh_darkflow_candidate_promotion(
         entry_tolerance_pct=entry_tolerance_pct,
         priority_group_keys=priority_group_keys,
         paused_group_keys=paused_group_keys,
+        priority_subportfolio_keys=priority_subportfolio_keys,
+        paused_subportfolio_keys=paused_subportfolio_keys,
+        whitelist_subportfolio_keys=whitelist_subportfolio_keys,
+        deweighted_strategy_ids=deweighted_strategy_ids,
         paused_group_exploration_limit=paused_group_exploration_limit,
     )
     summary = await darkflow_candidate_promotion_report(session, limit=limit)
@@ -1202,6 +1280,47 @@ def _pause_shadow_candidate_for_alpha_group(candidate: TradeCandidate, *, group_
     )
 
 
+def _pause_shadow_candidate_for_recommendation(
+    candidate: TradeCandidate,
+    *,
+    group_key: str,
+    reason: str,
+    decision: str,
+    now: datetime,
+) -> bool:
+    previous = (
+        candidate.status,
+        candidate.shadow_status,
+        candidate.promotion_status,
+        tuple(candidate.promotion_blockers or []),
+        candidate.decision_payload,
+    )
+    blockers = set(str(item) for item in (candidate.promotion_blockers or []))
+    blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
+    blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
+    blockers.add(PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED)
+    candidate.promotion_blockers = _ordered_blockers(blockers)
+    candidate.shadow_status = "retired"
+    candidate.status = "entry_plan_retired"
+    payload = dict(candidate.decision_payload or {})
+    payload["darkflow_recommendation_gate"] = {
+        "decision": decision,
+        "reason": reason,
+        "group_key": group_key,
+        "paused_at": _iso(now),
+    }
+    candidate.decision_payload = payload
+    candidate.updated_at = now
+    _apply_lifecycle(candidate)
+    return previous != (
+        candidate.status,
+        candidate.shadow_status,
+        candidate.promotion_status,
+        tuple(candidate.promotion_blockers or []),
+        candidate.decision_payload,
+    )
+
+
 def _mark_paused_alpha_group_exploration(
     candidate: TradeCandidate,
     *,
@@ -1224,6 +1343,30 @@ def _mark_paused_alpha_group_exploration(
     candidate.updated_at = now
 
 
+def _mark_recommendation_sampling_gate(
+    candidate: TradeCandidate,
+    *,
+    trade: ShadowPaperTrade,
+    group_key: str,
+    decision: str,
+    reason: str,
+    now: datetime,
+) -> None:
+    gate = {
+        "decision": decision,
+        "reason": reason,
+        "group_key": group_key,
+        "opened_at": _iso(now),
+    }
+    payload = dict(candidate.decision_payload or {})
+    payload["darkflow_recommendation_gate"] = gate
+    candidate.decision_payload = payload
+    context = dict(trade.context or {})
+    context["darkflow_recommendation_gate"] = gate
+    trade.context = context
+    candidate.updated_at = now
+
+
 def _normalized_group_keys(values: list[str] | set[str] | tuple[str, ...] | None) -> set[str]:
     return {str(item) for item in (values or []) if str(item)}
 
@@ -1238,10 +1381,21 @@ def _sort_candidates_by_alpha_sampling_plan(
     *,
     priority_groups: set[str],
     paused_groups: set[str],
+    priority_subportfolios: set[str],
+    paused_subportfolios: set[str],
+    whitelist_subportfolios: set[str],
+    deweighted_strategies: set[str],
 ) -> list[TradeCandidate]:
     def rank(candidate: TradeCandidate) -> tuple[int, datetime, datetime, str]:
         group_key = _candidate_alpha_group_key(candidate)
-        if group_key in priority_groups:
+        subportfolio_key = _candidate_subportfolio_key(candidate)
+        if subportfolio_key in paused_subportfolios:
+            group_rank = 0
+        elif candidate.strategy_id in deweighted_strategies and subportfolio_key not in whitelist_subportfolios:
+            group_rank = 0
+        elif subportfolio_key in priority_subportfolios:
+            group_rank = 3
+        elif group_key in priority_groups:
             group_rank = 2
         elif group_key in paused_groups:
             group_rank = 0
@@ -1264,6 +1418,17 @@ def _candidate_alpha_group_key(candidate: TradeCandidate) -> str:
             candidate.symbol,
             candidate.direction,
             candidate.timeframe,
+            candidate.market_state,
+        ]
+    )
+
+
+def _candidate_subportfolio_key(candidate: TradeCandidate) -> str:
+    return "|".join(
+        [
+            candidate.strategy_id,
+            candidate.symbol,
+            candidate.direction,
             candidate.market_state,
         ]
     )
