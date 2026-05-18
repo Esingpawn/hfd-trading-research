@@ -534,6 +534,150 @@ async def test_trade_candidates_materialize_core_decision_cards_idempotently(ses
 
 
 @pytest.mark.asyncio
+async def test_trade_candidates_do_not_materialize_exit_filter_playbooks_as_opening_candidates(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-exit-filter-only",
+            zone_key="zone-exit-filter-only",
+            source_snapshot_id="snapshot-exit-filter-only",
+            symbol="BTCUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_exhaustion",
+            playbook="exhaustion_exit_filter",
+            direction="long",
+            interaction_type="first_touch",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {
+                    "score": 95.0,
+                    "confirmations": ["official_rule_mapped", "dynamic_darkflow_target"],
+                    "blockers": [],
+                },
+            },
+        )
+    )
+    await session.commit()
+
+    cards = await latest_darkflow_decision_cards(session, limit=10)
+    result = await materialize_darkflow_trade_candidates(session, limit=10)
+    candidates = (await session.execute(select(TradeCandidate))).scalars().all()
+
+    assert cards["card_count"] == 1
+    assert cards["cards"][0]["risk_gate"]["status"] == "research_blocked"
+    assert "exit_filter_not_opening_playbook" in cards["cards"][0]["risk_gate"]["blockers"]
+    assert result["card_count"] == 1
+    assert result["skipped_non_opening_count"] == 1
+    assert result["inserted"] == 0
+    assert candidates == []
+
+
+@pytest.mark.asyncio
+async def test_trade_candidates_retire_existing_exit_filter_opening_candidates(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-existing-exit-filter",
+            zone_key="zone-existing-exit-filter",
+            source_snapshot_id="snapshot-existing-exit-filter",
+            symbol="BTCUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_exhaustion",
+            playbook="exhaustion_exit_filter",
+            direction="long",
+            interaction_type="first_touch",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {
+                    "score": 95.0,
+                    "confirmations": ["official_rule_mapped", "dynamic_darkflow_target"],
+                    "blockers": [],
+                },
+            },
+        )
+    )
+    session.add(
+        TradeCandidate(
+            candidate_key="darkflow-card:v2:candidate-existing-exit-filter",
+            source_type="darkflow_interaction",
+            source_interaction_id="legacy-source",
+            lineage="core_darkflow_v2",
+            strategy_family="darkflow_trade_candidates_v1",
+            strategy_id="exhaustion_exit_filter",
+            strategy_name="耗尽/死亡线退出过滤",
+            symbol="BTCUSDT",
+            timeframe="short",
+            interval="30m",
+            direction="long",
+            setup_type="first_touch",
+            market_state="darkflow_zone_reaction",
+            setup_time=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            rr_ratio=2.0,
+            quality_score=95.0,
+            rule_score=9.5,
+            status="shadow_candidate",
+            promotion_status="shadow_forward_pending",
+            anti_repaint_status="passed",
+            shadow_status="not_started",
+            paper_eligible=False,
+            live_eligible=False,
+            blockers=[],
+            promotion_blockers=[],
+            supporting_signals=["official_rule_mapped"],
+            decision_payload={},
+            materialized_at=base,
+            updated_at=base,
+        )
+    )
+    await session.commit()
+
+    result = await materialize_darkflow_trade_candidates(session, limit=10)
+    candidate = await session.scalar(select(TradeCandidate))
+
+    assert result["inserted"] == 0
+    assert result["updated"] == 1
+    assert result["skipped_non_opening_count"] == 1
+    assert result["rows"][0]["action"] == "retired_non_opening_playbook"
+    assert candidate is not None
+    assert candidate.status == "entry_plan_retired"
+    assert candidate.promotion_status == "entry_plan_retired"
+    assert candidate.shadow_status == "retired"
+    assert "exit_filter_not_opening_playbook" in candidate.blockers
+    assert candidate.decision_payload["non_opening_playbook_retirement"]["reason"] == "playbook_policy_not_opening"
+
+
+@pytest.mark.asyncio
 async def test_trade_candidates_retire_duplicate_exposure_plans_during_materialize(session) -> None:
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
     targets = [102.0, 103.0]

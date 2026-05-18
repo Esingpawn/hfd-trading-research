@@ -31,6 +31,7 @@ DEFAULT_MIN_SHADOW_RESEARCH_QUALITY = 50.0
 DEFAULT_MIN_RR_RATIO = 1.5
 DEFAULT_TRADE_CANDIDATE_LIMIT = 100
 DEFAULT_TRADE_CANDIDATE_FETCH_MULTIPLIER = 3
+NON_OPENING_PLAYBOOK_POLICIES = {"research_only_exit_filter_not_opening"}
 FROZEN_ENTRY_PLAN_TYPE = entry_plan_rules.FROZEN_ENTRY_PLAN_TYPE
 DEFAULT_ENTRY_PLAN_VALID_BARS = entry_plan_rules.DEFAULT_ENTRY_PLAN_VALID_BARS
 DEFAULT_ENTRY_PLAN_TOLERANCE_PCT = entry_plan_rules.DEFAULT_ENTRY_PLAN_TOLERANCE_PCT
@@ -110,6 +111,7 @@ async def materialize_darkflow_trade_candidates(
     inserted = 0
     updated = 0
     unchanged = 0
+    skipped_non_opening = 0
     rows: list[dict[str, Any]] = []
     now = utc_now()
     representatives = _representative_exposure_candidates(report["cards"])
@@ -117,6 +119,26 @@ async def materialize_darkflow_trade_candidates(
         existing = await session.scalar(
             select(TradeCandidate).where(TradeCandidate.candidate_key == card["card_id"])
         )
+        if _non_opening_playbook_card(card):
+            skipped_non_opening += 1
+            if existing is not None and _retire_non_opening_candidate(existing, card=card, now=now):
+                updated += 1
+                rows.append({
+                    "candidate_key": card["card_id"],
+                    "action": "retired_non_opening_playbook",
+                    "status": existing.status,
+                    "promotion_status": existing.promotion_status,
+                    "duplicate_of": None,
+                })
+            else:
+                rows.append({
+                    "candidate_key": card["card_id"],
+                    "action": "skipped_non_opening_playbook",
+                    "status": "not_materialized",
+                    "promotion_status": "not_materialized",
+                    "duplicate_of": None,
+                })
+            continue
         exposure_fingerprint = _exposure_plan_fingerprint(card)
         duplicate_of = None
         if exposure_fingerprint is not None:
@@ -175,6 +197,7 @@ async def materialize_darkflow_trade_candidates(
         "inserted": inserted,
         "updated": updated,
         "unchanged": unchanged,
+        "skipped_non_opening_count": skipped_non_opening,
         "duplicate_exposure_count": sum(1 for row in rows if row.get("duplicate_of")),
         "rows": rows,
         "thresholds": report["thresholds"],
@@ -229,6 +252,9 @@ def _decision_card(
     quality_score = _float(quality.get("score")) or 0.0
     confirmations = [str(value) for value in quality.get("confirmations") or []]
     quality_blockers = [str(value) for value in quality.get("blockers") or []]
+    playbook_policy = _playbook_policy(item.playbook)
+    if playbook_policy in NON_OPENING_PLAYBOOK_POLICIES and "exit_filter_not_opening_playbook" not in quality_blockers:
+        quality_blockers.append("exit_filter_not_opening_playbook")
     rr_ratio = abs(target - entry) / abs(entry - stop)
     gate_blockers = _gate_blockers(
         quality_score=quality_score,
@@ -286,6 +312,7 @@ def _decision_card(
             "tutorial_rule_family": context.get("tutorial_rule_family"),
             "interaction_schema": _interaction_schema(context),
             "research_only": True,
+            "playbook_policy": playbook_policy,
         },
     }
 
@@ -330,6 +357,11 @@ def _shadow_sampling_blockers(blockers: list[str], *, quality_score: float | Non
     if isinstance(quality_score, (int, float)) and float(quality_score) >= DEFAULT_MIN_SHADOW_RESEARCH_QUALITY:
         research_only.add("quality_score_below_threshold")
     return [blocker for blocker in blockers if blocker not in research_only]
+
+
+def _non_opening_playbook_card(card: dict[str, Any]) -> bool:
+    context = card.get("context") if isinstance(card.get("context"), dict) else {}
+    return str(context.get("playbook_policy") or "") in NON_OPENING_PLAYBOOK_POLICIES
 
 
 def _take_profit_levels(item: DarkflowInteraction, target: float) -> list[dict[str, Any]]:
@@ -413,6 +445,13 @@ def _playbook_display_name(key: str) -> str:
         if playbook.key == key:
             return playbook.display_name
     return key
+
+
+def _playbook_policy(key: str) -> str | None:
+    for playbook in PLAYBOOKS:
+        if playbook.key == key:
+            return playbook.policy
+    return None
 
 
 def _policy() -> dict[str, Any]:
@@ -511,6 +550,51 @@ def _candidate_needs_update(existing: TradeCandidate, payload: dict[str, Any]) -
         "decision_payload",
     ]
     return any(getattr(existing, field) != payload[field] for field in fields)
+
+
+def _retire_non_opening_candidate(existing: TradeCandidate, *, card: dict[str, Any], now: datetime) -> bool:
+    previous = (
+        existing.status,
+        existing.promotion_status,
+        existing.anti_repaint_status,
+        existing.shadow_status,
+        tuple(existing.blockers or []),
+        tuple(existing.promotion_blockers or []),
+        existing.decision_payload,
+    )
+    payload = dict(existing.decision_payload or {})
+    payload.update(dict(card))
+    payload["non_opening_playbook_retirement"] = {
+        "reason": "playbook_policy_not_opening",
+        "playbook_policy": (card.get("context") or {}).get("playbook_policy") if isinstance(card.get("context"), dict) else None,
+        "retired_at": _iso(now),
+    }
+    blockers = set(str(item) for item in (existing.blockers or []))
+    blockers.add("exit_filter_not_opening_playbook")
+    promotion_blockers = set(str(item) for item in (existing.promotion_blockers or []))
+    promotion_blockers.add(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
+    existing.status = "entry_plan_retired"
+    existing.anti_repaint_status = "passed"
+    existing.shadow_status = "retired"
+    existing.blockers = sorted(blockers)
+    existing.promotion_blockers = _normalized_promotion_blockers(list(promotion_blockers))
+    existing.promotion_status = _promotion_status(
+        status=existing.status,
+        anti_repaint_status=existing.anti_repaint_status,
+        shadow_status=existing.shadow_status,
+        promotion_blockers=existing.promotion_blockers,
+    )
+    existing.decision_payload = payload
+    existing.updated_at = now
+    return previous != (
+        existing.status,
+        existing.promotion_status,
+        existing.anti_repaint_status,
+        existing.shadow_status,
+        tuple(existing.blockers or []),
+        tuple(existing.promotion_blockers or []),
+        existing.decision_payload,
+    )
 
 
 def _representative_exposure_candidates(cards: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
