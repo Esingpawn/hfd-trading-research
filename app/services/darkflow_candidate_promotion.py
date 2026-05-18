@@ -136,51 +136,25 @@ async def open_darkflow_shadow_forward_samples(
     paused_group_exploration_budget = _paused_group_exploration_budget(paused_groups, paused_group_exploration_limit)
     if priority_groups or paused_groups:
         rows = _sort_candidates_by_alpha_sampling_plan(rows, priority_groups=priority_groups, paused_groups=paused_groups)
+    now = utc_now()
     market_stats = await _shadow_market_performance_stats(session)
     stats_by_candidate = await _shadow_stats_by_candidate(session, [candidate.candidate_key for candidate in rows])
     latest_prices = await _latest_prices(session, sorted({candidate.symbol for candidate in rows}))
+    rows = _sort_shadow_candidates_by_entry_readiness(
+        rows,
+        latest_prices=latest_prices,
+        now=now,
+        entry_tolerance_pct=entry_tolerance_pct,
+    )
     open_plan_index = await _open_shadow_plan_index(session, rows)
     open_market_counts = _open_shadow_market_counts(open_plan_index)
     open_market_strategy_sets = _open_shadow_market_strategy_sets(open_plan_index)
     opened: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     updated: list[dict[str, Any]] = []
-    now = utc_now()
     scanned = 0
     for candidate in rows:
         scanned += 1
-        alpha_group_key = _candidate_alpha_group_key(candidate)
-        alpha_exploration_group_key = None
-        if alpha_group_key in paused_groups:
-            if paused_group_exploration_budget.get(alpha_group_key, 0) > 0:
-                alpha_exploration_group_key = alpha_group_key
-            else:
-                if _pause_shadow_candidate_for_alpha_group(candidate, group_key=alpha_group_key, now=now):
-                    updated.append(_candidate_update_row(candidate, _candidate_stats(stats_by_candidate, candidate), reason="alpha_group_shadow_performance_paused"))
-                skipped.append(
-                    {
-                        "candidate_key": candidate.candidate_key,
-                        "symbol": candidate.symbol,
-                        "direction": candidate.direction,
-                        "reason": "alpha_group_shadow_performance_paused",
-                        "alpha_group_key": alpha_group_key,
-                    }
-                )
-                continue
-        market_gate = _shadow_market_gate_from_stats(candidate, market_stats)
-        if market_gate["decision"] == "paused" and alpha_exploration_group_key is None:
-            if _pause_shadow_candidate_for_market(candidate, gate=market_gate, now=now):
-                updated.append(_candidate_update_row(candidate, _candidate_stats(stats_by_candidate, candidate), reason="shadow_market_performance_paused"))
-            skipped.append(
-                {
-                    "candidate_key": candidate.candidate_key,
-                    "symbol": candidate.symbol,
-                    "direction": candidate.direction,
-                    "reason": "shadow_market_performance_paused",
-                    "market_gate": market_gate,
-                }
-            )
-            continue
         stats = _candidate_stats(stats_by_candidate, candidate)
         if _update_shadow_lifecycle(candidate, stats, now=now):
             updated.append(
@@ -197,50 +171,6 @@ async def open_darkflow_shadow_forward_samples(
             continue
         if stats["open_trades"]:
             skipped.append({"candidate_key": candidate.candidate_key, "reason": "open_shadow_forward_exists"})
-            continue
-        market_key = (candidate.symbol, candidate.direction)
-        market_open_count = open_market_counts.get(market_key, 0)
-        open_market_strategies = open_market_strategy_sets.get(market_key, set())
-        uses_diversity_slot = _uses_shadow_market_diversity_slot(
-            candidate,
-            market_open_count=market_open_count,
-            open_market_strategies=open_market_strategies,
-        )
-        if market_open_count >= DEFAULT_MAX_OPEN_SHADOW_TRADES_PER_MARKET and not uses_diversity_slot:
-            skipped.append(
-                {
-                    "candidate_key": candidate.candidate_key,
-                    "symbol": candidate.symbol,
-                    "direction": candidate.direction,
-                    "strategy_id": candidate.strategy_id,
-                    "reason": "market_shadow_forward_slot_full",
-                    "open_market_trades": market_open_count,
-                    "max_open_market_trades": DEFAULT_MAX_OPEN_SHADOW_TRADES_PER_MARKET,
-                    "max_open_market_diversity_trades": DEFAULT_MAX_OPEN_SHADOW_DIVERSITY_TRADES_PER_MARKET,
-                    "open_market_strategies": sorted(open_market_strategies),
-                    "market_strategy_covered": candidate.strategy_id in open_market_strategies,
-                }
-            )
-            continue
-        duplicate_plan = _open_duplicate_shadow_plan_from_index(open_plan_index, candidate)
-        if duplicate_plan is not None:
-            if _retire_shadow_candidate(
-                candidate,
-                reason="duplicate_shadow_forward_plan",
-                entry_plan_state=None,
-                now=now,
-                blocker=PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN,
-            ):
-                updated.append(_candidate_update_row(candidate, stats, reason="duplicate_shadow_forward_plan"))
-            skipped.append(
-                {
-                    "candidate_key": candidate.candidate_key,
-                    "symbol": candidate.symbol,
-                    "reason": "duplicate_shadow_forward_plan",
-                    "existing_candidate_key": duplicate_plan.candidate_key,
-                    "existing_trade_id": duplicate_plan.id,
-                }
-            )
             continue
         plan_check = _candidate_plan_openable(
             candidate,
@@ -290,6 +220,83 @@ async def open_darkflow_shadow_forward_samples(
                     "reason": f"entry_plan_{entry_plan_state['state']}",
                     "mark_price": price,
                     "planned_entry": candidate.entry_price,
+                    "entry_plan_state": entry_plan_state,
+                }
+            )
+            continue
+        alpha_group_key = _candidate_alpha_group_key(candidate)
+        alpha_exploration_group_key = None
+        if alpha_group_key in paused_groups:
+            if paused_group_exploration_budget.get(alpha_group_key, 0) > 0:
+                alpha_exploration_group_key = alpha_group_key
+            else:
+                if _pause_shadow_candidate_for_alpha_group(candidate, group_key=alpha_group_key, now=now):
+                    updated.append(_candidate_update_row(candidate, _candidate_stats(stats_by_candidate, candidate), reason="alpha_group_shadow_performance_paused"))
+                skipped.append(
+                    {
+                        "candidate_key": candidate.candidate_key,
+                        "symbol": candidate.symbol,
+                        "direction": candidate.direction,
+                        "reason": "alpha_group_shadow_performance_paused",
+                        "alpha_group_key": alpha_group_key,
+                    }
+                )
+                continue
+        market_gate = _shadow_market_gate_from_stats(candidate, market_stats)
+        if market_gate["decision"] == "paused" and alpha_exploration_group_key is None:
+            if _pause_shadow_candidate_for_market(candidate, gate=market_gate, now=now):
+                updated.append(_candidate_update_row(candidate, _candidate_stats(stats_by_candidate, candidate), reason="shadow_market_performance_paused"))
+            skipped.append(
+                {
+                    "candidate_key": candidate.candidate_key,
+                    "symbol": candidate.symbol,
+                    "direction": candidate.direction,
+                    "reason": "shadow_market_performance_paused",
+                    "market_gate": market_gate,
+                }
+            )
+            continue
+        market_key = (candidate.symbol, candidate.direction)
+        market_open_count = open_market_counts.get(market_key, 0)
+        open_market_strategies = open_market_strategy_sets.get(market_key, set())
+        uses_diversity_slot = _uses_shadow_market_diversity_slot(
+            candidate,
+            market_open_count=market_open_count,
+            open_market_strategies=open_market_strategies,
+        )
+        if market_open_count >= DEFAULT_MAX_OPEN_SHADOW_TRADES_PER_MARKET and not uses_diversity_slot:
+            skipped.append(
+                {
+                    "candidate_key": candidate.candidate_key,
+                    "symbol": candidate.symbol,
+                    "direction": candidate.direction,
+                    "strategy_id": candidate.strategy_id,
+                    "reason": "market_shadow_forward_slot_full",
+                    "open_market_trades": market_open_count,
+                    "max_open_market_trades": DEFAULT_MAX_OPEN_SHADOW_TRADES_PER_MARKET,
+                    "max_open_market_diversity_trades": DEFAULT_MAX_OPEN_SHADOW_DIVERSITY_TRADES_PER_MARKET,
+                    "open_market_strategies": sorted(open_market_strategies),
+                    "market_strategy_covered": candidate.strategy_id in open_market_strategies,
+                }
+            )
+            continue
+        duplicate_plan = _open_duplicate_shadow_plan_from_index(open_plan_index, candidate)
+        if duplicate_plan is not None:
+            if _retire_shadow_candidate(
+                candidate,
+                reason="duplicate_shadow_forward_plan",
+                entry_plan_state=entry_plan_state,
+                now=now,
+                blocker=PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN,
+            ):
+                updated.append(_candidate_update_row(candidate, stats, reason="duplicate_shadow_forward_plan"))
+            skipped.append(
+                {
+                    "candidate_key": candidate.candidate_key,
+                    "symbol": candidate.symbol,
+                    "reason": "duplicate_shadow_forward_plan",
+                    "existing_candidate_key": duplicate_plan.candidate_key,
+                    "existing_trade_id": duplicate_plan.id,
                     "entry_plan_state": entry_plan_state,
                 }
             )
@@ -759,6 +766,83 @@ def _round_robin_candidates_by_market(candidates: list[TradeCandidate]) -> list[
                 buckets.pop(key, None)
                 market_order.remove(key)
     return result
+
+
+def _sort_shadow_candidates_by_entry_readiness(
+    candidates: list[TradeCandidate],
+    *,
+    latest_prices: dict[str, dict[str, Any]],
+    now: datetime,
+    entry_tolerance_pct: float,
+) -> list[TradeCandidate]:
+    readiness: list[tuple[tuple[int, float, datetime, datetime, str], TradeCandidate]] = []
+    for candidate in candidates:
+        state_rank, distance = _shadow_entry_readiness_rank(
+            candidate,
+            latest_prices=latest_prices,
+            now=now,
+            entry_tolerance_pct=entry_tolerance_pct,
+        )
+        readiness.append(
+            (
+                (
+                    state_rank,
+                    -distance,
+                    _aware(candidate.setup_time or datetime.min.replace(tzinfo=timezone.utc)),
+                    _aware(candidate.updated_at or datetime.min.replace(tzinfo=timezone.utc)),
+                    candidate.id,
+                ),
+                candidate,
+            )
+        )
+    return [candidate for _key, candidate in sorted(readiness, key=lambda item: item[0], reverse=True)]
+
+
+def _shadow_entry_readiness_rank(
+    candidate: TradeCandidate,
+    *,
+    latest_prices: dict[str, dict[str, Any]],
+    now: datetime,
+    entry_tolerance_pct: float,
+) -> tuple[int, float]:
+    price_snapshot = latest_prices.get(candidate.symbol)
+    price = price_snapshot["price"] if isinstance(price_snapshot, dict) else None
+    if not isinstance(price, (int, float)) or float(price) <= 0:
+        return 0, float("inf")
+    state = _candidate_entry_plan_state(
+        candidate,
+        mark_price=float(price),
+        now=now,
+        entry_tolerance_pct=entry_tolerance_pct,
+    )
+    state_name = str(state.get("state") or "unknown")
+    if state_name == "triggered":
+        return 3, 0.0
+    if state_name == "waiting":
+        return 2, _entry_plan_distance(candidate, mark_price=float(price), now=now, entry_tolerance_pct=entry_tolerance_pct)
+    if state_name in _TERMINAL_ENTRY_PLAN_STATES:
+        return 0, float("inf")
+    return 1, _entry_plan_distance(candidate, mark_price=float(price), now=now, entry_tolerance_pct=entry_tolerance_pct)
+
+
+def _entry_plan_distance(candidate: TradeCandidate, *, mark_price: float, now: datetime, entry_tolerance_pct: float) -> float:
+    state = _candidate_entry_plan_state(
+        candidate,
+        mark_price=mark_price,
+        now=now,
+        entry_tolerance_pct=entry_tolerance_pct,
+    )
+    entry_range = state.get("entry_range") if isinstance(state.get("entry_range"), dict) else {}
+    lower = _float(entry_range.get("lower"))
+    upper = _float(entry_range.get("upper"))
+    planned_entry = float(candidate.entry_price or 0.0)
+    if lower is None or upper is None or planned_entry <= 0:
+        return abs(mark_price - planned_entry)
+    if lower <= mark_price <= upper:
+        return 0.0
+    if mark_price < lower:
+        return lower - mark_price
+    return mark_price - upper
 
 
 async def _source_interaction(session: AsyncSession, candidate: TradeCandidate) -> DarkflowInteraction | None:

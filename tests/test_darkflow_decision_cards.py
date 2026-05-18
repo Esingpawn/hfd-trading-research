@@ -1605,7 +1605,7 @@ async def test_shadow_forward_scans_past_expired_front_rows_to_open_later_candid
 
     assert result["requested_limit"] == 1
     assert result["scan_limit"] > 1
-    assert result["scanned"] > 1
+    assert result["scanned"] == 1
     assert [item["symbol"] for item in result["opened"]] == ["BTCUSDT"]
     assert len(trades) == 1
     assert trades[0].symbol == "BTCUSDT"
@@ -2021,6 +2021,109 @@ async def test_shadow_forward_waits_when_price_has_not_reached_frozen_entry_rang
     assert len(trades) == 0
     assert result["skipped"][0]["reason"] == "entry_plan_waiting"
     assert result["skipped"][0]["entry_plan_state"]["state"] == "waiting"
+
+
+@pytest.mark.asyncio
+async def test_shadow_forward_prefers_triggered_candidate_over_newer_waiting_rows(session) -> None:
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    for index in range(12):
+        session.add(
+            DarkflowInteraction(
+                interaction_key=f"candidate-waiting-front-{index}",
+                zone_key=f"zone-waiting-front-{index}",
+                source_snapshot_id=f"snapshot-waiting-front-{index}",
+                symbol=f"WAIT{index}USDT",
+                timeframe="short",
+                interval="30m",
+                indicator="trend_price",
+                playbook="pullback_to_cost",
+                direction="long",
+                interaction_type="wick_pierce_reclaim",
+                event_ts=base + timedelta(seconds=index),
+                entry_price=100.0,
+                stop_price=99.0,
+                target_price=102.0,
+                invalidation_price=99.0,
+                exit_price=102.0,
+                exit_ts=base + timedelta(minutes=30),
+                exit_reason="target_hit",
+                pnl_pct=0.02,
+                r_multiple=2.0,
+                mfe=0.025,
+                mae=-0.004,
+                status="backtested",
+                context={
+                    "interaction_schema": "v2",
+                    "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+                },
+            )
+        )
+        session.add(
+            PriceSnapshot(
+                symbol=f"WAIT{index}USDT",
+                price=99.2,
+                raw_payload={},
+                collected_at=base + timedelta(minutes=5),
+                created_at=base + timedelta(minutes=5),
+            )
+        )
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-triggered-behind-waiting",
+            zone_key="zone-triggered-behind-waiting",
+            source_snapshot_id="snapshot-triggered-behind-waiting",
+            symbol="BTCUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            playbook="pullback_to_cost",
+            direction="long",
+            interaction_type="wick_pierce_reclaim",
+            event_ts=base - timedelta(minutes=2),
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+            },
+        )
+    )
+    session.add(
+        PriceSnapshot(
+            symbol="BTCUSDT",
+            price=100.0,
+            raw_payload={},
+            collected_at=base + timedelta(minutes=5),
+            created_at=base + timedelta(minutes=5),
+        )
+    )
+    await session.commit()
+    await materialize_darkflow_trade_candidates(session, limit=20)
+    await audit_darkflow_trade_candidates(session, limit=20)
+
+    result = await open_darkflow_shadow_forward_samples(
+        session,
+        limit=1,
+        max_candidate_age_hours=0,
+        entry_tolerance_pct=0.05,
+    )
+    trades = (await session.execute(select(ShadowPaperTrade))).scalars().all()
+
+    assert result["scan_limit"] > 1
+    assert result["scanned"] == 1
+    assert [item["symbol"] for item in result["opened"]] == ["BTCUSDT"]
+    assert len(trades) == 1
+    assert trades[0].symbol == "BTCUSDT"
 
 
 @pytest.mark.asyncio
