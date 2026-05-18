@@ -1414,6 +1414,105 @@ async def test_shadow_forward_caps_open_samples_per_symbol_direction(session) ->
 
 
 @pytest.mark.asyncio
+async def test_shadow_forward_allows_one_extra_strategy_diversity_sample_per_market(session) -> None:
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    for index in range(3):
+        session.add(
+            ShadowPaperTrade(
+                strategy_name=DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+                candidate_type="trade_candidate",
+                candidate_key=f"existing-btc-pullback-{index}",
+                signal_key=f"existing-btc-pullback-signal-{index}",
+                symbol="BTCUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=100.0 + index,
+                stop_loss=99.0 + index,
+                take_profit=102.0 + index,
+                position_size=1.0,
+                status="open",
+                opened_at=base + timedelta(seconds=index),
+                context={
+                    "shadow_forward": True,
+                    "shadow_plan_fingerprint": f"existing-btc-pullback-plan-{index}",
+                    "candidate_snapshot": {
+                        "strategy_id": "pullback_to_cost",
+                        "timeframe": "short",
+                        "entry_price": 100.0 + index,
+                        "stop_price": 99.0 + index,
+                        "target_price": 102.0 + index,
+                    },
+                },
+            )
+        )
+    for index, playbook in enumerate(["pullback_to_cost", "liquidity_sweep_reversal", "trend_ride_extension"]):
+        session.add(
+            DarkflowInteraction(
+                interaction_key=f"candidate-diversity-{playbook}",
+                zone_key=f"zone-diversity-{playbook}",
+                source_snapshot_id=f"snapshot-diversity-{playbook}",
+                symbol="BTCUSDT",
+                timeframe="short",
+                interval="30m",
+                indicator="trend_price",
+                playbook=playbook,
+                direction="long",
+                interaction_type="wick_pierce_reclaim",
+                event_ts=base + timedelta(seconds=index),
+                entry_price=100.0 + index * 0.05,
+                stop_price=99.0,
+                target_price=102.0 + index * 0.05,
+                invalidation_price=99.0,
+                exit_price=102.0,
+                exit_ts=base + timedelta(minutes=30 + index),
+                exit_reason="target_hit",
+                pnl_pct=0.02,
+                r_multiple=2.0,
+                mfe=0.025,
+                mae=-0.004,
+                status="backtested",
+                context={
+                    "interaction_schema": "v2",
+                    "quality": {"score": 92.0, "confirmations": ["official_rule_mapped"], "blockers": []},
+                },
+            )
+        )
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=base, created_at=base))
+    await session.commit()
+    await materialize_darkflow_trade_candidates(session, limit=10)
+    await audit_darkflow_trade_candidates(session, limit=10)
+
+    result = await open_darkflow_shadow_forward_samples(
+        session,
+        limit=3,
+        max_candidate_age_hours=0,
+        entry_tolerance_pct=0.05,
+    )
+    opened = (await session.scalars(select(ShadowPaperTrade).where(ShadowPaperTrade.status == "open"))).all()
+
+    opened_strategy_ids = {item["strategy_id"] for item in result["opened"]}
+    skipped_strategy_ids = {
+        item["strategy_id"]
+        for item in result["skipped"]
+        if item.get("reason") == "market_shadow_forward_slot_full" and item.get("symbol") == "BTCUSDT"
+    }
+
+    assert len(result["opened"]) == 1
+    assert opened_strategy_ids <= {"liquidity_sweep_reversal", "trend_ride_extension"}
+    assert len(opened_strategy_ids) == 1
+    assert result["opened"][0]["market_diversity_slot"] is True
+    assert result["opened"][0]["open_market_trades"] == 4
+    assert sum(1 for trade in opened if trade.symbol == "BTCUSDT" and trade.direction == "long") == 4
+    assert any(
+        item["reason"] == "market_shadow_forward_slot_full"
+        and item["symbol"] == "BTCUSDT"
+        and item["strategy_id"] == "pullback_to_cost"
+        for item in result["skipped"]
+    )
+    assert skipped_strategy_ids >= ({"liquidity_sweep_reversal", "trend_ride_extension"} - opened_strategy_ids)
+
+
+@pytest.mark.asyncio
 async def test_shadow_forward_retires_duplicate_open_plan(session) -> None:
     base = datetime.now(timezone.utc) - timedelta(minutes=5)
     for index in range(2):

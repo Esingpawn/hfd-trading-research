@@ -43,6 +43,7 @@ DEFAULT_MAX_CANDIDATE_AGE_HOURS = 72.0
 DEFAULT_ENTRY_TOLERANCE_PCT = 0.025
 DEFAULT_PAUSED_GROUP_EXPLORATION_LIMIT = 1
 DEFAULT_MAX_OPEN_SHADOW_TRADES_PER_MARKET = 3
+DEFAULT_MAX_OPEN_SHADOW_DIVERSITY_TRADES_PER_MARKET = 1
 DEFAULT_MAX_PRICE_AGE_SECONDS = 30 * 60
 SHADOW_FEE_RATE = 0.0004
 SHADOW_SLIPPAGE_RATE_BY_TIER = {
@@ -140,6 +141,7 @@ async def open_darkflow_shadow_forward_samples(
     latest_prices = await _latest_prices(session, sorted({candidate.symbol for candidate in rows}))
     open_plan_index = await _open_shadow_plan_index(session, rows)
     open_market_counts = _open_shadow_market_counts(open_plan_index)
+    open_market_strategy_sets = _open_shadow_market_strategy_sets(open_plan_index)
     opened: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     updated: list[dict[str, Any]] = []
@@ -196,16 +198,27 @@ async def open_darkflow_shadow_forward_samples(
         if stats["open_trades"]:
             skipped.append({"candidate_key": candidate.candidate_key, "reason": "open_shadow_forward_exists"})
             continue
-        market_open_count = open_market_counts.get((candidate.symbol, candidate.direction), 0)
-        if market_open_count >= DEFAULT_MAX_OPEN_SHADOW_TRADES_PER_MARKET:
+        market_key = (candidate.symbol, candidate.direction)
+        market_open_count = open_market_counts.get(market_key, 0)
+        open_market_strategies = open_market_strategy_sets.get(market_key, set())
+        uses_diversity_slot = _uses_shadow_market_diversity_slot(
+            candidate,
+            market_open_count=market_open_count,
+            open_market_strategies=open_market_strategies,
+        )
+        if market_open_count >= DEFAULT_MAX_OPEN_SHADOW_TRADES_PER_MARKET and not uses_diversity_slot:
             skipped.append(
                 {
                     "candidate_key": candidate.candidate_key,
                     "symbol": candidate.symbol,
                     "direction": candidate.direction,
+                    "strategy_id": candidate.strategy_id,
                     "reason": "market_shadow_forward_slot_full",
                     "open_market_trades": market_open_count,
                     "max_open_market_trades": DEFAULT_MAX_OPEN_SHADOW_TRADES_PER_MARKET,
+                    "max_open_market_diversity_trades": DEFAULT_MAX_OPEN_SHADOW_DIVERSITY_TRADES_PER_MARKET,
+                    "open_market_strategies": sorted(open_market_strategies),
+                    "market_strategy_covered": candidate.strategy_id in open_market_strategies,
                 }
             )
             continue
@@ -301,7 +314,8 @@ async def open_darkflow_shadow_forward_samples(
             paused_group_exploration_budget[alpha_exploration_group_key] -= 1
         session.add(trade)
         _index_open_shadow_trade(open_plan_index, trade)
-        open_market_counts[(candidate.symbol, candidate.direction)] = open_market_counts.get((candidate.symbol, candidate.direction), 0) + 1
+        open_market_counts[market_key] = open_market_counts.get(market_key, 0) + 1
+        open_market_strategy_sets.setdefault(market_key, set()).add(candidate.strategy_id)
         candidate.shadow_status = "collecting"
         candidate.updated_at = now
         _apply_lifecycle(candidate)
@@ -310,10 +324,13 @@ async def open_darkflow_shadow_forward_samples(
                 "candidate_key": candidate.candidate_key,
                 "symbol": candidate.symbol,
                 "direction": candidate.direction,
+                "strategy_id": candidate.strategy_id,
                 "entry_price": trade.entry_price,
                 "stop_loss": trade.stop_loss,
                 "take_profit": trade.take_profit,
                 "entry_plan_state": entry_plan_state,
+                "market_diversity_slot": uses_diversity_slot,
+                "open_market_trades": open_market_counts[market_key],
             }
         )
         if len(opened) >= requested_limit:
@@ -340,6 +357,8 @@ async def open_darkflow_shadow_forward_samples(
             "max_candidate_age_hours": float(max_candidate_age_hours),
             "entry_tolerance_pct": float(entry_tolerance_pct),
             "paused_group_exploration_limit": max(0, int(paused_group_exploration_limit)),
+            "max_open_shadow_trades_per_market": DEFAULT_MAX_OPEN_SHADOW_TRADES_PER_MARKET,
+            "max_open_shadow_diversity_trades_per_market": DEFAULT_MAX_OPEN_SHADOW_DIVERSITY_TRADES_PER_MARKET,
         },
         "alpha_sampling": {
             "applied": bool(priority_groups or paused_groups),
@@ -1212,6 +1231,39 @@ def _open_shadow_market_counts(index: dict[tuple[str, str], dict[str, ShadowPape
     for market, bucket in index.items():
         counts[market] = len({trade.id for trade in bucket.values()})
     return counts
+
+
+def _open_shadow_market_strategy_sets(index: dict[tuple[str, str], dict[str, ShadowPaperTrade]]) -> dict[tuple[str, str], set[str]]:
+    strategies: dict[tuple[str, str], set[str]] = {}
+    for market, bucket in index.items():
+        values: set[str] = set()
+        for trade in {trade.id: trade for trade in bucket.values()}.values():
+            strategy_id = _shadow_trade_strategy_id(trade)
+            if strategy_id:
+                values.add(strategy_id)
+        strategies[market] = values
+    return strategies
+
+
+def _uses_shadow_market_diversity_slot(
+    candidate: TradeCandidate,
+    *,
+    market_open_count: int,
+    open_market_strategies: set[str],
+) -> bool:
+    if market_open_count < DEFAULT_MAX_OPEN_SHADOW_TRADES_PER_MARKET:
+        return False
+    diversity_open_count = market_open_count - DEFAULT_MAX_OPEN_SHADOW_TRADES_PER_MARKET
+    if diversity_open_count >= DEFAULT_MAX_OPEN_SHADOW_DIVERSITY_TRADES_PER_MARKET:
+        return False
+    return candidate.strategy_id not in open_market_strategies
+
+
+def _shadow_trade_strategy_id(trade: ShadowPaperTrade) -> str | None:
+    context = trade.context if isinstance(trade.context, dict) else {}
+    snapshot = context.get("candidate_snapshot") if isinstance(context.get("candidate_snapshot"), dict) else {}
+    strategy_id = str(snapshot.get("strategy_id") or "").strip()
+    return strategy_id or None
 
 
 def _index_open_shadow_trade(
