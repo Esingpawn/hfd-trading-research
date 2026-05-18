@@ -52,6 +52,7 @@ def test_expected_api_routes_are_registered() -> None:
         ("POST", "/darkflow/trade-candidates/materialize"),
         ("GET", "/darkflow/trade-candidates/promotion"),
         ("GET", "/darkflow/trade-candidates/entry-plan-states"),
+        ("GET", "/darkflow/trade-candidates/waiting"),
         ("POST", "/darkflow/trade-candidates/audit"),
         ("POST", "/darkflow/trade-candidates/shadow-forward"),
         ("POST", "/darkflow/trade-candidates/promotion/refresh"),

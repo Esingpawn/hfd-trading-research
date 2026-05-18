@@ -157,6 +157,41 @@ async def accelerate_darkflow_alpha(
     }
 
 
+async def refresh_darkflow_waiting_candidates(
+    session: AsyncSession,
+    *,
+    shadow_limit: int = DEFAULT_SHADOW_FORWARD_LIMIT,
+    max_candidate_age_hours: float = DEFAULT_MAX_CANDIDATE_AGE_HOURS,
+    entry_tolerance_pct: float = DEFAULT_ENTRY_TOLERANCE_PCT,
+) -> dict[str, Any]:
+    mark_result = await mark_shadow_paper_trades(session)
+    shadow = await refresh_darkflow_candidate_promotion(
+        session,
+        limit=max(100, int(shadow_limit) * 5),
+        shadow_limit=shadow_limit,
+        max_candidate_age_hours=max_candidate_age_hours,
+        entry_tolerance_pct=entry_tolerance_pct,
+        materialize=False,
+        retire_expired_entry_plans=False,
+        priority_group_keys=None,
+        paused_group_keys=None,
+        paused_group_exploration_limit=0,
+    )
+    return {
+        "strategy_name": DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+        "lineage": CORE_DARKFLOW_V2,
+        "generated_at": _iso(utc_now()),
+        "steps": {
+            "mark_shadow_trades": mark_result,
+            "promotion_refresh": shadow,
+        },
+        "policy": _policy() | {
+            "report_only": False,
+            "purpose": "high-frequency refresh for waiting darkflow candidates without rematerializing the full candidate pool",
+        },
+    }
+
+
 def _policy() -> dict[str, Any]:
     return {
         "research_only": True,

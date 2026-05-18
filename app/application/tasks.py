@@ -38,7 +38,7 @@ from app.services.darkflow_candidate_promotion import (
     open_darkflow_shadow_forward_samples,
     refresh_darkflow_candidate_promotion,
 )
-from app.services.darkflow_alpha import accelerate_darkflow_alpha, darkflow_alpha_scoreboard
+from app.services.darkflow_alpha import accelerate_darkflow_alpha, darkflow_alpha_scoreboard, refresh_darkflow_waiting_candidates
 from app.services.paper import mark_open_trades, paper_scan
 from app.services.shadow_paper import (
     mark_shadow_paper_trades,
@@ -484,6 +484,13 @@ async def execute_task(session: AsyncSession, task_name: str, payload: dict[str,
             scoreboard_limit=_payload_int(payload, "scoreboard_limit", 50),
             paused_group_exploration_limit=_payload_int(payload, "paused_group_exploration_limit", 1),
             retire_expired_entry_plans=_payload_bool(payload, "retire_expired_entry_plans", True),
+        )
+    if task_name in {"darkflow.waiting_refresh", "darkflow-waiting-refresh"}:
+        return await refresh_darkflow_waiting_candidates(
+            session,
+            shadow_limit=_payload_int(payload, "shadow_limit", 100),
+            max_candidate_age_hours=_payload_float(payload, "max_candidate_age_hours", 72.0),
+            entry_tolerance_pct=_payload_float(payload, "entry_tolerance_pct", 0.025),
         )
     if task_name in {"darkflow.shadow_replay", "darkflow-shadow-replay"}:
         return await darkflow_shadow_replay(

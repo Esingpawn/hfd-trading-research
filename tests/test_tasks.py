@@ -539,6 +539,48 @@ async def test_run_task_by_id_executes_darkflow_alpha_scoreboard(session) -> Non
 
 
 @pytest.mark.asyncio
+async def test_run_task_by_id_executes_darkflow_waiting_refresh(session) -> None:
+    opened_at = datetime.now(timezone.utc) - timedelta(minutes=15)
+    session.add(
+        ShadowPaperTrade(
+            strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+            candidate_type="trade_candidate",
+            candidate_key="existing-open-shadow",
+            signal_key="existing-open-shadow-signal",
+            symbol="BTCUSDT",
+            timeframe="short",
+            direction="long",
+            entry_price=100.0,
+            stop_loss=99.0,
+            take_profit=103.0,
+            position_size=1.0,
+            status="open",
+            opened_at=opened_at,
+            context={
+                "shadow_forward": True,
+                "candidate_snapshot": {"strategy_id": "pullback_to_cost", "market_state": "trend_pullback"},
+            },
+        )
+    )
+    item = TaskRun(
+        task_name="darkflow.waiting_refresh",
+        payload={"shadow_limit": 20, "entry_tolerance_pct": 0.02},
+        result={},
+    )
+    session.add(item)
+    await session.commit()
+
+    result = await run_task_by_id(session, item.id)
+
+    execution = result["result"]["execution"]
+    assert result["status"] == "completed"
+    assert execution["policy"]["opens_paper_trades"] is False
+    assert execution["policy"]["opens_live_orders"] is False
+    assert execution["steps"]["mark_shadow_trades"] is not None
+    assert execution["steps"]["promotion_refresh"]["materialize"]["enabled"] is False
+
+
+@pytest.mark.asyncio
 async def test_run_task_by_id_caps_research_report_materialization_limit(session) -> None:
     await _add_feature_group(session, symbol="BTCUSDT")
     item = TaskRun(

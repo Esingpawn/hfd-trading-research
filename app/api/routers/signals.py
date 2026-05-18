@@ -53,6 +53,7 @@ from app.services.darkflow_candidate_promotion import (
     audit_darkflow_trade_candidates,
     darkflow_entry_plan_state_report,
     darkflow_candidate_promotion_report,
+    darkflow_waiting_candidates_report,
     open_darkflow_shadow_forward_samples,
     refresh_darkflow_candidate_promotion,
 )
@@ -263,6 +264,19 @@ async def darkflow_trade_candidate_entry_plan_state_report(
     entry_tolerance_pct: float = Query(default=0.025, ge=0.0, le=0.2),
 ) -> dict[str, object]:
     return await darkflow_entry_plan_state_report(
+        session,
+        limit=limit,
+        entry_tolerance_pct=entry_tolerance_pct,
+    )
+
+
+@router.get("/darkflow/trade-candidates/waiting")
+async def darkflow_waiting_trade_candidates_report(
+    session: SessionDep,
+    limit: int = Query(default=100, ge=1, le=5000),
+    entry_tolerance_pct: float = Query(default=0.025, ge=0.0, le=0.2),
+) -> dict[str, object]:
+    return await darkflow_waiting_candidates_report(
         session,
         limit=limit,
         entry_tolerance_pct=entry_tolerance_pct,

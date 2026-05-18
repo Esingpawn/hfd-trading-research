@@ -594,6 +594,87 @@ async def darkflow_entry_plan_state_report(
     }
 
 
+async def darkflow_waiting_candidates_report(
+    session: AsyncSession,
+    *,
+    limit: int = DEFAULT_PROMOTION_LIMIT,
+    entry_tolerance_pct: float = DEFAULT_ENTRY_TOLERANCE_PCT,
+) -> dict[str, Any]:
+    rows = await _candidate_rows(session, limit=limit, include_blocked=True)
+    now = utc_now()
+    prices = await _latest_prices(session, sorted({candidate.symbol for candidate in rows}))
+    waiting_rows: list[dict[str, Any]] = []
+    state_counts: dict[str, int] = {}
+    for candidate in rows:
+        price_snapshot = prices.get(candidate.symbol)
+        price = price_snapshot["price"] if isinstance(price_snapshot, dict) else None
+        if price is None or price <= 0:
+            state = _missing_price_entry_plan_state(candidate, now=now)
+            distance = None
+            latest_price_age_seconds = None
+        else:
+            state = _candidate_entry_plan_state(
+                candidate,
+                mark_price=price,
+                now=now,
+                entry_tolerance_pct=entry_tolerance_pct,
+            )
+            distance = _entry_plan_distance(candidate, mark_price=float(price), now=now, entry_tolerance_pct=entry_tolerance_pct)
+            created_at = _aware(price_snapshot.get("created_at")) if isinstance(price_snapshot, dict) else None
+            latest_price_age_seconds = (now - created_at).total_seconds() if created_at is not None else None
+        state_key = str(state.get("state") or "unknown")
+        state_counts[state_key] = state_counts.get(state_key, 0) + 1
+        if state_key != "waiting":
+            continue
+        valid_until = _parse_iso_datetime(state.get("valid_until"))
+        seconds_until_expiry = (valid_until - now).total_seconds() if valid_until is not None else None
+        waiting_rows.append(
+            {
+                "candidate_key": candidate.candidate_key,
+                "symbol": candidate.symbol,
+                "direction": candidate.direction,
+                "strategy_id": candidate.strategy_id,
+                "strategy_name": candidate.strategy_name,
+                "setup_time": _iso(_aware(candidate.setup_time)) if candidate.setup_time is not None else None,
+                "status": candidate.status,
+                "promotion_status": candidate.promotion_status,
+                "shadow_status": candidate.shadow_status,
+                "quality_score": candidate.quality_score,
+                "entry_price": candidate.entry_price,
+                "stop_price": candidate.stop_price,
+                "target_price": candidate.target_price,
+                "latest_price": float(price) if isinstance(price, (int, float)) else None,
+                "latest_price_age_seconds": latest_price_age_seconds,
+                "entry_plan_state": state,
+                "distance_to_entry_range": distance,
+                "seconds_until_expiry": seconds_until_expiry,
+            }
+        )
+    waiting_rows.sort(
+        key=lambda item: (
+            item.get("seconds_until_expiry") is None,
+            item.get("seconds_until_expiry") if item.get("seconds_until_expiry") is not None else float("inf"),
+            item.get("distance_to_entry_range") if item.get("distance_to_entry_range") is not None else float("inf"),
+            str(item.get("candidate_key") or ""),
+        )
+    )
+    return {
+        "strategy_name": DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+        "requested_limit": max(1, int(limit)),
+        "generated_at": _iso(now),
+        "state_counts": state_counts,
+        "waiting_count": len(waiting_rows),
+        "rows": waiting_rows[: max(1, int(limit))],
+        "thresholds": {"entry_tolerance_pct": float(entry_tolerance_pct)},
+        "policy": _policy() | {
+            "report_only": True,
+            "opens_paper_trades": False,
+            "opens_live_orders": False,
+            "purpose": "monitor waiting darkflow candidates and prioritize near-entry refreshes",
+        },
+    }
+
+
 async def _darkflow_freshness(
     session: AsyncSession,
     *,
