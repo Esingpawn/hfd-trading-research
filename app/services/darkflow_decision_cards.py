@@ -185,6 +185,7 @@ async def materialize_darkflow_trade_candidates(
     limit: int = DEFAULT_TRADE_CANDIDATE_LIMIT,
     min_quality_score: float = DEFAULT_MIN_DECISION_CARD_QUALITY,
     min_rr_ratio: float = DEFAULT_MIN_RR_RATIO,
+    retire_expired_entry_plans: bool = False,
 ) -> dict[str, Any]:
     requested_limit = max(1, int(limit))
     card_fetch_limit = _materialize_card_fetch_limit(requested_limit)
@@ -198,6 +199,7 @@ async def materialize_darkflow_trade_candidates(
     updated = 0
     unchanged = 0
     skipped_non_opening = 0
+    expired_entry_plan_retired = 0
     rows: list[dict[str, Any]] = []
     now = utc_now()
     representatives = _representative_exposure_candidates(report["cards"])
@@ -238,6 +240,9 @@ async def materialize_darkflow_trade_candidates(
             duplicate_of=duplicate_of,
             exposure_fingerprint=exposure_fingerprint,
         )
+        if retire_expired_entry_plans and _entry_plan_expired(card.get("entry_plan"), now=now):
+            payload = _retired_entry_plan_payload(payload, reason="entry_plan_expired", entry_plan_state=None, now=now)
+            expired_entry_plan_retired += 1
         if existing is None:
             session.add(TradeCandidate(**payload))
             inserted += 1
@@ -290,6 +295,7 @@ async def materialize_darkflow_trade_candidates(
         "updated": updated,
         "unchanged": unchanged,
         "skipped_non_opening_count": skipped_non_opening,
+        "expired_entry_plan_retired_count": expired_entry_plan_retired,
         "duplicate_exposure_count": sum(1 for row in rows if row.get("duplicate_of")),
         "rows": rows,
         "thresholds": report["thresholds"],
@@ -643,6 +649,44 @@ def _candidate_payload(
         "materialized_at": now,
         "updated_at": now,
     }
+
+
+def _retired_entry_plan_payload(
+    payload: dict[str, Any],
+    *,
+    reason: str,
+    entry_plan_state: dict[str, Any] | None,
+    now: datetime,
+) -> dict[str, Any]:
+    retired = dict(payload)
+    decision_payload = dict(retired.get("decision_payload") or {})
+    decision_payload["entry_plan_retirement"] = {
+        "reason": reason,
+        "retired_at": _iso(now),
+        "entry_plan_state": entry_plan_state or {},
+    }
+    promotion_blockers = set(_normalized_promotion_blockers(retired.get("promotion_blockers") or []))
+    promotion_blockers.add(PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED)
+    retired["status"] = "entry_plan_retired"
+    retired["anti_repaint_status"] = "passed"
+    retired["shadow_status"] = "retired"
+    retired["promotion_blockers"] = _normalized_promotion_blockers(list(promotion_blockers))
+    retired["promotion_status"] = _promotion_status(
+        status=retired["status"],
+        anti_repaint_status=retired["anti_repaint_status"],
+        shadow_status=retired["shadow_status"],
+        promotion_blockers=retired["promotion_blockers"],
+    )
+    retired["decision_payload"] = decision_payload
+    retired["updated_at"] = now
+    return retired
+
+
+def _entry_plan_expired(plan: Any, *, now: datetime) -> bool:
+    if not isinstance(plan, dict):
+        return False
+    valid_until = _parse_iso_datetime(plan.get("valid_until"))
+    return valid_until is not None and _aware(now) > _aware(valid_until)
 
 
 def _candidate_needs_update(existing: TradeCandidate, payload: dict[str, Any]) -> bool:

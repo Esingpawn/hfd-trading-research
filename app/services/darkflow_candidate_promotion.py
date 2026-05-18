@@ -378,13 +378,18 @@ async def refresh_darkflow_candidate_promotion(
     max_candidate_age_hours: float = DEFAULT_MAX_CANDIDATE_AGE_HOURS,
     entry_tolerance_pct: float = DEFAULT_ENTRY_TOLERANCE_PCT,
     materialize: bool = True,
+    retire_expired_entry_plans: bool = False,
     priority_group_keys: list[str] | set[str] | tuple[str, ...] | None = None,
     paused_group_keys: list[str] | set[str] | tuple[str, ...] | None = None,
     paused_group_exploration_limit: int = DEFAULT_PAUSED_GROUP_EXPLORATION_LIMIT,
 ) -> dict[str, Any]:
     materialize_result: dict[str, Any] = {"enabled": False}
     if materialize:
-        materialize_result = await materialize_darkflow_trade_candidates(session, limit=limit)
+        materialize_result = await materialize_darkflow_trade_candidates(
+            session,
+            limit=limit,
+            retire_expired_entry_plans=retire_expired_entry_plans,
+        )
     audit = await audit_darkflow_trade_candidates(session, limit=limit, include_blocked=True)
     shadow = await open_darkflow_shadow_forward_samples(
         session,

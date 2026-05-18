@@ -152,12 +152,14 @@ async def run_darkflow_pipeline(
         candidates = await materialize_darkflow_trade_candidates(
             session,
             limit=params["candidate_limit"],
+            retire_expired_entry_plans=True,
         )
         promotion = await refresh_darkflow_candidate_promotion(
             session,
             limit=params["candidate_limit"],
             shadow_limit=params["shadow_limit"],
             materialize=False,
+            retire_expired_entry_plans=True,
         )
         payload = {
             "enabled": True,

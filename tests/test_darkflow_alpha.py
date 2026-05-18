@@ -440,6 +440,42 @@ async def test_paused_group_exploration_budget_is_spent_only_on_opened_samples(s
     assert openable_trade.context["alpha_sampling_gate"]["decision"] == "exploration"
 
 
+@pytest.mark.asyncio
+async def test_accelerate_darkflow_alpha_retires_expired_materialized_candidates_before_shadow_scan(session) -> None:
+    now = datetime.now(timezone.utc)
+    expired_source = _source_interaction(interaction_key="alpha-expired-source", setup_time=now - timedelta(hours=8))
+    fresh_source = _source_interaction(interaction_key="alpha-fresh-source", setup_time=now - timedelta(minutes=15))
+    session.add_all([expired_source, fresh_source])
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=now, created_at=now))
+    await session.commit()
+
+    result = await accelerate_darkflow_alpha(
+        session,
+        candidate_limit=10,
+        shadow_limit=5,
+        materialize=True,
+        mark_first=False,
+        entry_tolerance_pct=0.01,
+    )
+
+    expired = await session.scalar(select(TradeCandidate).where(TradeCandidate.candidate_key == "darkflow-card:v2:alpha-expired-source"))
+    fresh = await session.scalar(select(TradeCandidate).where(TradeCandidate.candidate_key == "darkflow-card:v2:alpha-fresh-source"))
+    shadow_rows = (await session.scalars(select(ShadowPaperTrade).where(ShadowPaperTrade.status == "open"))).all()
+    materialize = result["steps"]["promotion_refresh"]["materialize"]
+    shadow = result["steps"]["promotion_refresh"]["shadow_forward"]
+
+    assert materialize["expired_entry_plan_retired_count"] == 1
+    assert expired is not None
+    assert expired.status == "entry_plan_retired"
+    assert expired.shadow_status == "retired"
+    assert expired.decision_payload["entry_plan_retirement"]["reason"] == "entry_plan_expired"
+    assert fresh is not None
+    assert fresh.status == "shadow_candidate"
+    assert shadow["opened_count"] == 1
+    assert shadow_rows[0].candidate_key == "darkflow-card:v2:alpha-fresh-source"
+    assert not any(item["candidate_key"] == "darkflow-card:v2:alpha-expired-source" for item in shadow["skipped"])
+
+
 def _shadow_trade(
     signal_key: str,
     *,

@@ -116,6 +116,7 @@ async def accelerate_darkflow_alpha(
     mark_first: bool = True,
     scoreboard_limit: int = DEFAULT_ALPHA_SCOREBOARD_LIMIT,
     paused_group_exploration_limit: int = DEFAULT_PAUSED_GROUP_EXPLORATION_LIMIT,
+    retire_expired_entry_plans: bool = True,
 ) -> dict[str, Any]:
     mark_result: dict[str, Any] = {"enabled": False, "reason": "mark_first_disabled"}
     if mark_first:
@@ -130,6 +131,7 @@ async def accelerate_darkflow_alpha(
         max_candidate_age_hours=max_candidate_age_hours,
         entry_tolerance_pct=entry_tolerance_pct,
         materialize=materialize,
+        retire_expired_entry_plans=retire_expired_entry_plans,
         priority_group_keys=priority_group_keys,
         paused_group_keys=paused_group_keys,
         paused_group_exploration_limit=paused_group_exploration_limit,
