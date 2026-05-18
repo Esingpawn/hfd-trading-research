@@ -232,6 +232,102 @@ async def test_decision_cards_block_weak_or_conflicting_quality(session) -> None
 
 
 @pytest.mark.asyncio
+async def test_decision_cards_allow_high_quality_sweep_reversal_trend_conflict_into_shadow_research(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="decision-sweep-trend-conflict-shadow-research",
+            zone_key="zone-sweep-trend-conflict-shadow-research",
+            source_snapshot_id="snapshot-sweep-trend-conflict-shadow-research",
+            symbol="ZECUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="liquidity_sweep",
+            playbook="liquidity_sweep_reversal",
+            direction="long",
+            interaction_type="first_touch",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {
+                    "score": 55.0,
+                    "confirmations": ["official_rule_mapped", "dynamic_darkflow_target"],
+                    "blockers": ["parent_trend_conflict"],
+                },
+            },
+        )
+    )
+    await session.commit()
+
+    report = await latest_darkflow_decision_cards(session, limit=5)
+    card = report["cards"][0]
+
+    assert card["risk_gate"]["status"] == "shadow_candidate"
+    assert card["risk_gate"]["blockers"] == ["parent_trend_conflict"]
+    assert card["risk_gate"]["paper_eligible"] is False
+    assert card["risk_gate"]["live_eligible"] is False
+
+
+@pytest.mark.asyncio
+async def test_decision_cards_keep_pullback_trend_conflict_blocked(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="decision-pullback-trend-conflict-blocked",
+            zone_key="zone-pullback-trend-conflict-blocked",
+            source_snapshot_id="snapshot-pullback-trend-conflict-blocked",
+            symbol="BNBUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="trend_price",
+            playbook="pullback_to_cost",
+            direction="long",
+            interaction_type="wick_pierce_reclaim",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {
+                    "score": 92.0,
+                    "confirmations": ["official_rule_mapped", "dynamic_darkflow_target"],
+                    "blockers": ["parent_trend_conflict"],
+                },
+            },
+        )
+    )
+    await session.commit()
+
+    report = await latest_darkflow_decision_cards(session, limit=5)
+    card = report["cards"][0]
+
+    assert card["risk_gate"]["status"] == "research_blocked"
+    assert card["risk_gate"]["blockers"] == ["parent_trend_conflict"]
+
+
+@pytest.mark.asyncio
 async def test_decision_cards_allow_low_rr_candidates_into_shadow_research(session) -> None:
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
     session.add(
@@ -472,6 +568,76 @@ async def test_refresh_opens_marginal_quality_candidates_for_shadow_but_gate_blo
 
     assert gate["gate_status"] == "blocked"
     assert gate["primary_blocker"] == "quality_score_below_threshold"
+
+
+@pytest.mark.asyncio
+async def test_refresh_opens_sweep_trend_conflict_for_shadow_but_gate_blocks_review(session) -> None:
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    session.add(
+        DarkflowInteraction(
+            interaction_key="candidate-sweep-trend-conflict-shadow-forward",
+            zone_key="zone-sweep-trend-conflict-shadow-forward",
+            source_snapshot_id="snapshot-sweep-trend-conflict-shadow-forward",
+            symbol="ZECUSDT",
+            timeframe="short",
+            interval="30m",
+            indicator="liquidity_sweep",
+            playbook="liquidity_sweep_reversal",
+            direction="long",
+            interaction_type="first_touch",
+            event_ts=base,
+            entry_price=100.0,
+            stop_price=99.0,
+            target_price=102.0,
+            invalidation_price=99.0,
+            exit_price=102.0,
+            exit_ts=base + timedelta(minutes=30),
+            exit_reason="target_hit",
+            pnl_pct=0.02,
+            r_multiple=2.0,
+            mfe=0.025,
+            mae=-0.004,
+            status="backtested",
+            context={
+                "interaction_schema": "v2",
+                "quality": {
+                    "score": 55.0,
+                    "confirmations": ["official_rule_mapped", "dynamic_darkflow_target"],
+                    "blockers": ["parent_trend_conflict"],
+                },
+            },
+        )
+    )
+    session.add(PriceSnapshot(symbol="ZECUSDT", price=100.0, raw_payload={}, collected_at=base, created_at=base))
+    await session.commit()
+
+    result = await refresh_darkflow_candidate_promotion(
+        session,
+        limit=10,
+        shadow_limit=10,
+        max_candidate_age_hours=0,
+        entry_tolerance_pct=0.05,
+    )
+    candidate = await session.scalar(select(TradeCandidate))
+    trades = (await session.execute(select(ShadowPaperTrade))).scalars().all()
+
+    assert len(result["shadow_forward"]["opened"]) == 1
+    assert result["shadow_forward"]["opened_count"] == 1
+    assert candidate is not None
+    assert candidate.status == "shadow_candidate"
+    assert candidate.blockers == ["parent_trend_conflict"]
+    assert candidate.shadow_status == "collecting"
+    assert len(trades) == 1
+
+    candidate.shadow_status = "passed"
+    candidate.promotion_blockers = []
+    await session.commit()
+
+    report = await darkflow_candidate_promotion_report(session, limit=10)
+    gate = report["gate_samples"][0]
+
+    assert gate["gate_status"] == "blocked"
+    assert gate["primary_blocker"] == "parent_trend_conflict"
 
 
 @pytest.mark.asyncio

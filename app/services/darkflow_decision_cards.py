@@ -293,7 +293,9 @@ def _decision_card(
         "supporting_signals": confirmations,
         "blocking_risks": quality_blockers,
         "risk_gate": {
-            "status": "shadow_candidate" if not _shadow_sampling_blockers(gate_blockers, quality_score=quality_score) else "research_blocked",
+            "status": "shadow_candidate"
+            if not _shadow_sampling_blockers(gate_blockers, quality_score=quality_score, strategy_id=item.playbook)
+            else "research_blocked",
             "blockers": gate_blockers,
             "paper_eligible": False,
             "live_eligible": False,
@@ -352,10 +354,12 @@ def _gate_blockers(
     return blockers
 
 
-def _shadow_sampling_blockers(blockers: list[str], *, quality_score: float | None = None) -> list[str]:
+def _shadow_sampling_blockers(blockers: list[str], *, quality_score: float | None = None, strategy_id: str | None = None) -> list[str]:
     research_only = set(_SHADOW_RESEARCH_ONLY_BLOCKERS)
     if isinstance(quality_score, (int, float)) and float(quality_score) >= DEFAULT_MIN_SHADOW_RESEARCH_QUALITY:
         research_only.add("quality_score_below_threshold")
+    if strategy_id == "liquidity_sweep_reversal" and isinstance(quality_score, (int, float)) and float(quality_score) >= DEFAULT_MIN_DECISION_CARD_QUALITY:
+        research_only.add("parent_trend_conflict")
     return [blocker for blocker in blockers if blocker not in research_only]
 
 
@@ -615,7 +619,7 @@ def _representative_rank(card: dict[str, Any]) -> tuple[int, float, float, str]:
     risk_gate = card.get("risk_gate") if isinstance(card.get("risk_gate"), dict) else {}
     blockers = [str(value) for value in risk_gate.get("blockers") or []]
     quality_score = _float(scores.get("quality_score")) or 0.0
-    sampleable_rank = 1 if not _shadow_sampling_blockers(blockers, quality_score=quality_score) else 0
+    sampleable_rank = 1 if not _shadow_sampling_blockers(blockers, quality_score=quality_score, strategy_id=str(card.get("strategy_id") or "")) else 0
     return (
         sampleable_rank,
         quality_score,
