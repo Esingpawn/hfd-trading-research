@@ -826,6 +826,9 @@ def _preserve_candidate_lifecycle(existing: TradeCandidate, payload: dict[str, A
     duplicate_payload = payload.get("shadow_status") == "retired" and PROMOTION_BLOCKER_DUPLICATE_SHADOW_PLAN in set(
         payload.get("promotion_blockers") or []
     )
+    retired_payload = payload.get("shadow_status") == "retired" and PROMOTION_BLOCKER_ENTRY_PLAN_RETIRED in set(
+        payload.get("promotion_blockers") or []
+    )
     preserved = dict(payload)
     for field in (
         "anti_repaint_status",
@@ -837,7 +840,7 @@ def _preserve_candidate_lifecycle(existing: TradeCandidate, payload: dict[str, A
         preserved[field] = getattr(existing, field)
     lifecycle_anti_repaint = existing.anti_repaint_status
     lifecycle_shadow = existing.shadow_status
-    if duplicate_payload:
+    if duplicate_payload or retired_payload:
         preserved["status"] = payload["status"]
         preserved["shadow_status"] = payload["shadow_status"]
         preserved["promotion_status"] = payload["promotion_status"]
@@ -854,7 +857,7 @@ def _preserve_candidate_lifecycle(existing: TradeCandidate, payload: dict[str, A
         anti_repaint_status=lifecycle_anti_repaint,
         shadow_status=lifecycle_shadow,
     )
-    if duplicate_payload:
+    if duplicate_payload or retired_payload:
         preserved["promotion_status"] = _promotion_status(
             status=preserved["status"],
             anti_repaint_status=preserved["anti_repaint_status"],

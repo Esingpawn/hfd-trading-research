@@ -476,6 +476,45 @@ async def test_accelerate_darkflow_alpha_retires_expired_materialized_candidates
     assert not any(item["candidate_key"] == "darkflow-card:v2:alpha-expired-source" for item in shadow["skipped"])
 
 
+@pytest.mark.asyncio
+async def test_accelerate_darkflow_alpha_updates_existing_expired_candidate_lifecycle_consistently(session) -> None:
+    now = datetime.now(timezone.utc)
+    expired_source = _source_interaction(interaction_key="alpha-existing-expired", setup_time=now - timedelta(hours=8))
+    session.add(expired_source)
+    await session.flush()
+    stale_candidate = _candidate(
+        "darkflow-card:v2:alpha-existing-expired",
+        setup_time=now - timedelta(hours=8),
+        source_interaction_id=expired_source.id,
+    )
+    stale_candidate.status = "research_blocked"
+    stale_candidate.promotion_status = "blocked"
+    stale_candidate.anti_repaint_status = "missing"
+    stale_candidate.shadow_status = "not_started"
+    session.add(stale_candidate)
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=now, created_at=now))
+    await session.commit()
+
+    result = await accelerate_darkflow_alpha(
+        session,
+        candidate_limit=10,
+        shadow_limit=5,
+        materialize=True,
+        mark_first=False,
+        entry_tolerance_pct=0.01,
+    )
+
+    refreshed = await session.scalar(select(TradeCandidate).where(TradeCandidate.candidate_key == "darkflow-card:v2:alpha-existing-expired"))
+
+    assert result["steps"]["promotion_refresh"]["materialize"]["expired_entry_plan_retired_count"] == 1
+    assert refreshed is not None
+    assert refreshed.status == "entry_plan_retired"
+    assert refreshed.promotion_status == "entry_plan_retired"
+    assert refreshed.anti_repaint_status == "passed"
+    assert refreshed.shadow_status == "retired"
+    assert refreshed.promotion_blockers == ["entry_plan_retired"]
+
+
 def _shadow_trade(
     signal_key: str,
     *,
