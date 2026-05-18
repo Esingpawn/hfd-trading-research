@@ -109,6 +109,38 @@ type EntryPlanStateReport = {
   policy: Policy & { report_only?: boolean; mutates_candidate_state?: boolean };
 };
 
+type WaitingCandidateReport = {
+  requested_limit: number;
+  generated_at?: string | null;
+  waiting_count: number;
+  state_counts: Record<string, number>;
+  rows: WaitingCandidate[];
+  thresholds: { entry_tolerance_pct: number };
+  policy?: Policy & { report_only?: boolean; purpose?: string };
+};
+
+type WaitingCandidate = {
+  candidate_key: string;
+  symbol: string;
+  direction: "long" | "short" | string;
+  strategy_id: string;
+  strategy_name?: string;
+  setup_time?: string | null;
+  status: string;
+  promotion_status: string;
+  anti_repaint_status?: string;
+  shadow_status: string;
+  quality_score: number;
+  entry_price: number;
+  stop_price: number;
+  target_price: number;
+  latest_price?: number | null;
+  latest_price_age_seconds?: number | null;
+  entry_plan_state: EntryPlanState;
+  distance_to_entry_range?: number | null;
+  seconds_until_expiry?: number | null;
+};
+
 type DarkflowFreshness = {
   status: "fresh" | "stale" | string;
   stale_reasons: string[];
@@ -632,6 +664,7 @@ type LoadState = {
   candidates: TradeCandidateReport | null;
   promotionGate: PromotionGateReport | null;
   entryStates: EntryPlanStateReport | null;
+  waitingCandidates: WaitingCandidateReport | null;
   darkflow: DarkflowBacktest | null;
   backtestsLatest: BacktestsLatestReport | null;
   playbookBacktest: PlaybookBacktestReport | null;
@@ -663,6 +696,7 @@ const EMPTY_STATE: LoadState = {
   candidates: null,
   promotionGate: null,
   entryStates: null,
+  waitingCandidates: null,
   darkflow: null,
   backtestsLatest: null,
   playbookBacktest: null,
@@ -777,6 +811,7 @@ function App() {
       loadSection("candidates", () => fetchFirstJson<TradeCandidateReport>(["/darkflow/trade-candidates?limit=100", "/darkflow/trade-candidates?limit=50", "/darkflow/trade-candidates?limit=20"], 45000)),
       loadSection("promotionGate", () => fetchJson<PromotionGateReport>("/darkflow/trade-candidates/promotion?limit=250", 45000)),
       loadSection("entryStates", () => fetchFirstJson<EntryPlanStateReport>(["/darkflow/trade-candidates/entry-plan-states?limit=250", "/darkflow/trade-candidates/entry-plan-states?limit=100"], 45000)),
+      loadSection("waitingCandidates", () => fetchFirstJson<WaitingCandidateReport>(["/darkflow/trade-candidates/waiting?limit=100", "/darkflow/trade-candidates/waiting?limit=50"], 45000)),
       loadSection("darkflow", () => fetchJson<DarkflowBacktest>("/darkflow/interactions/backtest/latest")),
       loadSection("alphaScoreboard", () => fetchJson<DarkflowAlphaScoreboard>("/darkflow/alpha-scoreboard?limit=50&min_closed_trades=1", 16000)),
       loadSection("safety", () => fetchJson<TradingSafety>("/trading/safety")),
@@ -909,7 +944,7 @@ function App() {
           />
         )}
         {activePage === "candidates" && <CandidatePoolPage rows={tradeRows} promotionGate={data.promotionGate} onSelect={(key) => { setSelectedKey(key); navigate("tradeCards"); }} />}
-        {activePage === "entryPlans" && <EntryPlansPage report={data.entryStates} rows={rows} onSelect={(key) => { setSelectedKey(key); navigate("tradeCards"); }} />}
+        {activePage === "entryPlans" && <EntryPlansPage report={data.entryStates} waitingReport={data.waitingCandidates} rows={rows} onSelect={(key) => { setSelectedKey(key); navigate("tradeCards"); }} />}
         {activePage === "experimentLab" && <ExperimentLabPage data={data} rows={rows} onNavigate={navigate} onAccelerate={queueDarkflowAlphaAcceleration} />}
         {activePage === "backtest" && <BacktestPage data={data} />}
         {activePage === "paperTrading" && <PaperTradingPage stats={data.paperStats} trades={data.paperTrades} />}
@@ -1010,7 +1045,7 @@ function TopStatusBar({ data, errors, loading, onRefresh, onJumpFreshness }: { d
 }
 
 function OverviewPage({ data, rows, onNavigate }: { data: LoadState; rows: CardRow[]; onNavigate: (page: PageId) => void }) {
-  const waiting = rows.filter((item) => item.state === "waiting").length;
+  const waiting = data.waitingCandidates?.waiting_count ?? rows.filter((item) => item.state === "waiting").length;
   const triggered = rows.filter((item) => item.state === "triggered").length;
   const actionable = rows.filter((item) => item.state === "waiting" || item.state === "triggered").length;
   const shadowReady = rows.filter((item) => item.promotionStatus === "shadow_forward_pending" || item.status === "shadow_candidate").length;
@@ -1153,6 +1188,7 @@ function TradeDetailPane({ row }: { row: CardRow | null }) {
   if (!row) {
     return <aside className="detailPane"><StateBox type="empty" title="请选择一张交易卡片" text="左侧点击卡片后，这里会显示完整入场逻辑、风控审计和评分雷达图。" /></aside>;
   }
+  const waitMeta = waitingMeta(row);
   return (
     <aside className="detailPane">
       <div className="detailHeader">
@@ -1186,6 +1222,9 @@ function TradeDetailPane({ row }: { row: CardRow | null }) {
         </div>
         <div className="textLine"><strong>冻结入场区间：</strong>{row.entryRangeText}</div>
         <div className="textLine"><strong>有效期：</strong>{timeText(row.validUntil)}</div>
+        {waitMeta.distance && <div className="textLine"><strong>距入场区间：</strong>{waitMeta.distance}</div>}
+        {waitMeta.expiry && <div className="textLine"><strong>剩余有效时间：</strong>{waitMeta.expiry}</div>}
+        {waitMeta.priceAge && <div className="textLine"><strong>价格新鲜度：</strong>{waitMeta.priceAge}</div>}
       </section>
       <section className="detailSection twoPane">
         <div>
@@ -1254,7 +1293,7 @@ function CandidatePoolPage({ rows, promotionGate, onSelect }: { rows: CardRow[];
   );
 }
 
-function EntryPlansPage({ report, rows, onSelect }: { report: EntryPlanStateReport | null; rows: CardRow[]; onSelect: (key: string) => void }) {
+function EntryPlansPage({ report, rows, onSelect, waitingReport }: { report: EntryPlanStateReport | null; rows: CardRow[]; onSelect: (key: string) => void; waitingReport: WaitingCandidateReport | null }) {
   const states = ["waiting", "missed", "expired", "invalidated", "triggered", "missing_price", "invalid_shape"];
   return (
     <div className="pageStack">
@@ -1279,6 +1318,25 @@ function EntryPlansPage({ report, rows, onSelect }: { report: EntryPlanStateRepo
               <span>{row.entryRangeText}</span>
             </button>
           ))}
+        </div>
+      </Panel>
+      <Panel title="等待入场队列" subtitle={`仍在等价格进入冻结区间 · 更新时间 ${timeText(waitingReport?.generated_at)}`}>
+        <div className="metricGrid compactMetrics">
+          <Metric title="等待候选" value={fmt(waitingReport?.waiting_count, 0)} detail={`触发 ${fmt(waitingReport?.state_counts?.triggered ?? 0, 0)} · 错过 ${fmt(waitingReport?.state_counts?.missed ?? 0, 0)}`} tone={(waitingReport?.waiting_count ?? 0) > 0 ? "info" : "warn"} />
+          <Metric title="最近失效压力" value={fmt(waitingReport?.rows?.filter((item) => (item.seconds_until_expiry ?? Infinity) < 900).length, 0)} detail="15 分钟内失效的 waiting 候选" tone="warn" />
+          <Metric title="最近价格老化" value={fmt(waitingReport?.rows?.filter((item) => (item.latest_price_age_seconds ?? 0) > 60).length, 0)} detail="价格年龄超过 60 秒" tone="warn" />
+          <Metric title="最近可观察距离" value={fmt(minWaitingDistance(waitingReport), 4)} detail="距入场区间最近的 waiting 候选" tone="good" />
+        </div>
+        <div className="tableList waitingList">
+          {(waitingReport?.rows ?? []).map((item) => (
+            <button className="tableRow waitingRow" key={item.candidate_key} onClick={() => onSelect(item.candidate_key)}>
+              <strong>{item.symbol}</strong>
+              <span>{directionText(item.direction)} · {strategyText(item.strategy_id)}</span>
+              <span>距离 {fmt(item.distance_to_entry_range, 4)} · 剩余 {secondsText(item.seconds_until_expiry)}</span>
+              <span>价格年龄 {secondsText(item.latest_price_age_seconds)} · {entryStateText(item.entry_plan_state.state)}</span>
+            </button>
+          ))}
+          {!waitingReport?.rows?.length && <StateBox type="empty" title="当前没有 waiting 候选" text="要么都已触发/失效，要么当前确实没有仍可观察的入场计划。" />}
         </div>
       </Panel>
     </div>
@@ -2313,8 +2371,38 @@ function pageTitleFromHash() { return pageLabel(pageFromHash()); }
 function pageFromHash(): PageId { const raw = window.location.hash.replace("#", ""); return NAV_GROUPS.flatMap((group) => group.items).some((item) => item.id === raw) ? raw as PageId : "overview"; }
 function timeText(value?: string | null) { return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "等待数据"; }
 function ageText(value?: number | null) { if (typeof value !== "number" || !Number.isFinite(value)) return "--"; if (value < 1) return "小于1分钟"; if (value < 120) return `${Math.round(value)}分钟`; return `${(value / 60).toFixed(1)}小时`; }
+function secondsText(value?: number | null) { if (typeof value !== "number" || !Number.isFinite(value)) return "--"; if (value < 60) return `${Math.round(value)} 秒`; if (value < 3600) return `${Math.round(value / 60)} 分钟`; return `${(value / 3600).toFixed(1)} 小时`; }
 function entryRangeText(plan?: FrozenEntryPlan | null) { const lower = plan?.entry_range?.lower; const upper = plan?.entry_range?.upper; return typeof lower === "number" && typeof upper === "number" ? `${fmt(lower, 4)} ~ ${fmt(upper, 4)}` : "--"; }
 function sampleRangeText(sample: EntryPlanSample) { const lower = sample.entry_plan_state.entry_range?.lower; const upper = sample.entry_plan_state.entry_range?.upper; return typeof lower === "number" && typeof upper === "number" ? `${fmt(lower, 4)} ~ ${fmt(upper, 4)}` : "--"; }
+function minWaitingDistance(report?: WaitingCandidateReport | null) {
+  const values = (report?.rows ?? []).map((item) => item.distance_to_entry_range).filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (!values.length) return null;
+  return Math.min(...values);
+}
+function waitingMeta(row: CardRow) {
+  const sample = row.entrySample;
+  const waiting = sample?.entry_plan_state?.state === "waiting" ? sample : null;
+  if (!waiting) return { distance: null, expiry: null, priceAge: null };
+  return {
+    distance: waiting.entry_plan_state.mark_price !== undefined && waiting.entry_plan_state.entry_range?.lower !== undefined
+      ? `距区间 ${fmt(distanceToRange(waiting.entry_plan_state.mark_price, waiting.entry_plan_state.entry_range?.lower, waiting.entry_plan_state.entry_range?.upper), 4)}`
+      : null,
+    expiry: waiting.entry_plan_state.valid_until ? timeUntil(waiting.entry_plan_state.valid_until) : null,
+    priceAge: waiting.entry_plan_state.mark_price !== undefined ? "以当前最新价格评估" : null,
+  };
+}
+function distanceToRange(markPrice?: number | null, lower?: number, upper?: number) {
+  if (typeof markPrice !== "number" || typeof lower !== "number" || typeof upper !== "number") return null;
+  if (markPrice < lower) return lower - markPrice;
+  if (markPrice > upper) return markPrice - upper;
+  return 0;
+}
+function timeUntil(value?: string | null) {
+  if (!value) return null;
+  const target = new Date(value).getTime();
+  if (!Number.isFinite(target)) return null;
+  return secondsText(Math.max(0, (target - Date.now()) / 1000));
+}
 function stateTone(value: string) { if (value === "triggered" || value === "shadow_candidate") return "good"; if (value === "waiting") return "info"; if (value === "missed" || value === "expired") return "warn"; return "bad"; }
 function stateHint(value: string) { return ({ waiting: "仍可观察", missed: "不追价", expired: "时间失效", invalidated: "条件破坏", triggered: "进入区间", missing_price: "补价格", invalid_shape: "需修正" } as Record<string, string>)[value] ?? "--"; }
 function normalizeEntryState(value: string) { return value === "invalid" ? "invalidated" : value; }
