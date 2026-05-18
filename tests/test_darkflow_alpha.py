@@ -203,7 +203,55 @@ async def test_darkflow_alpha_sampling_plan_uses_subportfolio_recommendations(se
     assert "liquidity_sweep_reversal|HYPEUSDT|long|liquidity_hunt_reversal" in priority_subportfolios
     assert "trend_ride_extension|BTCUSDT|long|trend_extension" in paused_subportfolios
     assert "trend_ride_extension" in deweighted_strategies
+    whitelist_row = next(item for item in plan["priority_subportfolio_groups"] if item["group_key"] == "liquidity_sweep_reversal|HYPEUSDT|long|liquidity_hunt_reversal")
+    assert whitelist_row["next_sample_target"] == 30
+    assert whitelist_row["remaining_to_next_target"] == 24
+    assert whitelist_row["paper_review_ready"] is False
     assert plan["policy"]["uses_subportfolio_recommendations"] is True
+
+
+@pytest.mark.asyncio
+async def test_darkflow_alpha_sampling_plan_orders_whitelist_by_sample_gap_then_edge(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            _shadow_trade(
+                f"thin-{index}",
+                candidate_key=f"thin-candidate-{index}",
+                symbol="HYPEUSDT",
+                direction="long",
+                strategy_id="liquidity_sweep_reversal",
+                market_state="liquidity_hunt_reversal",
+                pnl=0.02,
+                opened_at=base + timedelta(minutes=index),
+            )
+            for index in range(6)
+        ]
+        + [
+            _shadow_trade(
+                f"deeper-{index}",
+                candidate_key=f"deeper-candidate-{index}",
+                symbol="SOLUSDT",
+                direction="long",
+                strategy_id="liquidity_sweep_reversal",
+                market_state="liquidity_hunt_reversal",
+                pnl=0.02,
+                opened_at=base + timedelta(hours=1, minutes=index),
+            )
+            for index in range(30)
+        ]
+    )
+    await session.commit()
+
+    plan = await darkflow_alpha_sampling_plan(session, limit=10)
+    rows = plan["priority_subportfolio_groups"]
+
+    assert rows[0]["group_key"] == "liquidity_sweep_reversal|HYPEUSDT|long|liquidity_hunt_reversal"
+    assert rows[0]["sample_stage"] == "first_review"
+    assert rows[0]["remaining_to_next_target"] == 24
+    assert rows[1]["group_key"] == "liquidity_sweep_reversal|SOLUSDT|long|liquidity_hunt_reversal"
+    assert rows[1]["sample_stage"] == "validation"
+    assert rows[1]["paper_review_ready"] is True
 
 
 @pytest.mark.asyncio

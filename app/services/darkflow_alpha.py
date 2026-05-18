@@ -92,7 +92,10 @@ async def darkflow_alpha_sampling_plan(
     whitelist_rows = [row for row in recommendation_rows if row.get("recommendation") == "whitelist"]
     blocked_rows = [row for row in recommendation_rows if row.get("recommendation") in {"pause", "blacklist"}]
     deweighted_strategy_rows = [row for row in list(recommendations.get("strategy_actions") or []) if row.get("main_path_action") == "deweight"]
-    priority_subportfolio_groups = [_recommendation_group_row(row, action="prioritize") for row in whitelist_rows]
+    priority_subportfolio_groups = [
+        _recommendation_group_row(row, action="prioritize")
+        for row in sorted(whitelist_rows, key=_whitelist_sampling_rank, reverse=True)
+    ]
     paused_subportfolio_groups = [_recommendation_group_row(row, action="block") for row in blocked_rows]
     deweighted_strategies = [_strategy_action_row(row) for row in deweighted_strategy_rows]
     return {
@@ -318,9 +321,25 @@ def _recommendation_group_row(row: dict[str, Any], *, action: str) -> dict[str, 
         "closed_trades": row.get("closed_trades"),
         "win_rate": row.get("win_rate"),
         "profit_factor": row.get("profit_factor"),
+        "max_drawdown": row.get("max_drawdown"),
         "recommendation": row.get("recommendation"),
+        "sample_targets": row.get("sample_targets"),
+        "next_sample_target": row.get("next_sample_target"),
+        "remaining_to_next_target": row.get("remaining_to_next_target"),
+        "sample_progress": row.get("sample_progress"),
+        "sample_stage": row.get("sample_stage"),
+        "paper_review_ready": row.get("paper_review_ready"),
         "reason": " ".join(str(item) for item in (row.get("reasons") or [])),
     }
+
+
+def _whitelist_sampling_rank(row: dict[str, Any]) -> tuple[int, float, float, int]:
+    stage = str(row.get("sample_stage") or "unknown")
+    stage_rank = {"first_review": 4, "validation": 3, "pre_paper": 2, "mature": 1}.get(stage, 0)
+    edge = _sort_number(row.get("profit_factor")) + _sort_number(row.get("win_rate"))
+    remaining = int(row.get("remaining_to_next_target") or 0)
+    closed = int(row.get("closed_trades") or 0)
+    return (stage_rank, edge, float(remaining), -closed)
 
 
 def _strategy_action_row(row: dict[str, Any]) -> dict[str, Any]:

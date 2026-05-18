@@ -42,6 +42,14 @@ DARKFLOW_RECOMMENDATION_WHITELIST_MIN_CLOSED = 5
 DARKFLOW_RECOMMENDATION_PAUSE_MIN_CLOSED = 3
 DARKFLOW_STRATEGY_ACTION_MIN_CLOSED = 10
 DARKFLOW_TIME_EXIT_REASON = DARKFLOW_SHADOW_FORWARD_TIME_EXIT_REASON
+DARKFLOW_SAMPLE_REVIEW_TARGET = 30
+DARKFLOW_SAMPLE_VALIDATION_TARGET = 100
+DARKFLOW_SAMPLE_PRE_PAPER_TARGET = 200
+DARKFLOW_SAMPLE_TARGETS = {
+    "first_review": DARKFLOW_SAMPLE_REVIEW_TARGET,
+    "validation": DARKFLOW_SAMPLE_VALIDATION_TARGET,
+    "pre_paper": DARKFLOW_SAMPLE_PRE_PAPER_TARGET,
+}
 
 
 async def shadow_paper_scan(
@@ -471,6 +479,9 @@ async def darkflow_subportfolio_recommendations_report(session: AsyncSession) ->
             "whitelist_min_closed_trades": DARKFLOW_RECOMMENDATION_WHITELIST_MIN_CLOSED,
             "pause_min_closed_trades": DARKFLOW_RECOMMENDATION_PAUSE_MIN_CLOSED,
             "strategy_action_min_closed_trades": DARKFLOW_STRATEGY_ACTION_MIN_CLOSED,
+            "sample_first_review_target": DARKFLOW_SAMPLE_REVIEW_TARGET,
+            "sample_validation_target": DARKFLOW_SAMPLE_VALIDATION_TARGET,
+            "sample_pre_paper_target": DARKFLOW_SAMPLE_PRE_PAPER_TARGET,
             "whitelist_min_win_rate": 0.60,
             "whitelist_min_profit_factor": 1.50,
             "pause_max_win_rate": 0.35,
@@ -501,6 +512,7 @@ def _darkflow_subportfolio_rows(trades: list[ShadowPaperTrade]) -> list[dict[str
         stats = _trade_stats(items)
         exit_counts = _exit_reason_counts(items)
         recommendation, reasons = _darkflow_subportfolio_recommendation(stats, exit_counts)
+        sample_progress = _darkflow_sample_progress(int(stats.get("closed_trades") or 0), recommendation=recommendation)
         rows.append(
             {
                 "group_key": "|".join([strategy_id, symbol, direction, market_state]),
@@ -519,6 +531,7 @@ def _darkflow_subportfolio_rows(trades: list[ShadowPaperTrade]) -> list[dict[str
                 "sampling_action": _darkflow_sampling_action(recommendation),
                 "confidence": _recommendation_confidence(int(stats.get("closed_trades") or 0)),
                 "reasons": reasons,
+                **sample_progress,
             }
         )
     return sorted(
@@ -600,6 +613,30 @@ def _darkflow_subportfolio_recommendation(stats: dict[str, Any], exit_counts: di
     if closed < DARKFLOW_RECOMMENDATION_WHITELIST_MIN_CLOSED:
         return "keep_sampling", [f"只有 {closed} 笔平仓样本，尚不足以进入白名单或黑名单。"]
     return "observe", ["样本已有一定数量，但胜率、盈利因子或回撤没有同时给出明确方向。"]
+
+
+def _darkflow_sample_progress(closed: int, *, recommendation: str) -> dict[str, Any]:
+    if closed < DARKFLOW_SAMPLE_REVIEW_TARGET:
+        next_target = DARKFLOW_SAMPLE_REVIEW_TARGET
+        stage = "first_review"
+    elif closed < DARKFLOW_SAMPLE_VALIDATION_TARGET:
+        next_target = DARKFLOW_SAMPLE_VALIDATION_TARGET
+        stage = "validation"
+    elif closed < DARKFLOW_SAMPLE_PRE_PAPER_TARGET:
+        next_target = DARKFLOW_SAMPLE_PRE_PAPER_TARGET
+        stage = "pre_paper"
+    else:
+        next_target = None
+        stage = "mature"
+    denominator = next_target or DARKFLOW_SAMPLE_PRE_PAPER_TARGET
+    return {
+        "sample_targets": dict(DARKFLOW_SAMPLE_TARGETS),
+        "next_sample_target": next_target,
+        "remaining_to_next_target": max(0, int(next_target or DARKFLOW_SAMPLE_PRE_PAPER_TARGET) - closed),
+        "sample_progress": min(1.0, closed / denominator) if denominator else 1.0,
+        "sample_stage": stage,
+        "paper_review_ready": recommendation == "whitelist" and closed >= DARKFLOW_SAMPLE_REVIEW_TARGET,
+    }
 
 
 def _darkflow_strategy_action(stats: dict[str, Any], exit_counts: dict[str, int]) -> tuple[str, list[str]]:

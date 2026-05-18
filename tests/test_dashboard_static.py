@@ -124,3 +124,6 @@ def test_react_dashboard_exposes_darkflow_subportfolio_recommendations() -> None
     assert "黑名单隔离" in source
     assert "主路径降权建议" in source
     assert "只读建议，不会自动改权重" in source
+    assert "白名单样本进度" in source
+    assert "距离下一档" in source
+    assert "真实纸上复核仍关闭" in source

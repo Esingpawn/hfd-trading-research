@@ -356,6 +356,12 @@ type DarkflowAlphaRow = ShadowUniquePlanStats & {
   source_trade_count?: number;
   conclusion: string;
   next_action: string;
+  sample_targets?: DarkflowSampleTargets;
+  next_sample_target?: number | null;
+  remaining_to_next_target?: number | null;
+  sample_progress?: number | null;
+  sample_stage?: string;
+  paper_review_ready?: boolean;
 };
 
 type FrozenEntryPlan = {
@@ -660,6 +666,12 @@ type DarkflowSubportfolioRecommendationsReport = {
   policy?: Policy & { report_only?: boolean; mutates_candidates?: boolean; mutates_weights?: boolean };
 };
 
+type DarkflowSampleTargets = {
+  first_review?: number;
+  validation?: number;
+  pre_paper?: number;
+};
+
 type DarkflowRecommendationRow = ShadowUniquePlanStats & {
   group_key?: string;
   strategy_id: string;
@@ -676,6 +688,12 @@ type DarkflowRecommendationRow = ShadowUniquePlanStats & {
   sampling_action?: string;
   confidence?: string;
   reasons?: string[];
+  sample_targets?: DarkflowSampleTargets;
+  next_sample_target?: number | null;
+  remaining_to_next_target?: number | null;
+  sample_progress?: number | null;
+  sample_stage?: string;
+  paper_review_ready?: boolean;
   main_path_action?: string;
   main_path_action_text?: string;
   main_path_weight_multiplier?: number;
@@ -1442,6 +1460,7 @@ function ShadowPage({ data, rows, onAccelerate }: { data: LoadState; rows: CardR
   const recommendationRows = data.darkflowRecommendations?.rows ?? [];
   const strategyActions = data.darkflowRecommendations?.strategy_actions ?? [];
   const whitelistRows = recommendationRows.filter((item) => item.recommendation === "whitelist").slice(0, 6);
+  const whitelistProgressRows = recommendationRows.filter((item) => item.recommendation === "whitelist").slice(0, 8);
   const watchRows = recommendationRows.filter((item) => item.recommendation === "keep_sampling" || item.recommendation === "observe").slice(0, 6);
   const blockedRows = recommendationRows.filter((item) => item.recommendation === "pause" || item.recommendation === "blacklist").slice(0, 6);
   const deweightRows = strategyActions.filter((item) => item.main_path_action === "deweight" || item.main_path_action === "review").slice(0, 4);
@@ -1503,6 +1522,16 @@ function ShadowPage({ data, rows, onAccelerate }: { data: LoadState; rows: CardR
           <RecommendationColumn title="白名单候选" rows={whitelistRows} empty="暂时没有达到白名单的子组合。" />
           <RecommendationColumn title="继续补样" rows={watchRows} empty="当前没有需要优先补样的中性子组合。" />
           <RecommendationColumn title="暂停/黑名单" rows={blockedRows} empty="暂时没有明确需要暂停的子组合。" />
+        </section>
+        <section className="whitelistProgressPanel">
+          <div className="sectionHeaderCompact">
+            <strong>白名单样本进度</strong>
+            <span>目标 30 / 100 / 200 笔平仓样本；真实纸上复核仍关闭，只作为人工判断依据。</span>
+          </div>
+          <div className="whitelistProgressList">
+            {whitelistProgressRows.map((row) => <WhitelistProgressCard row={row} key={`progress-${row.group_key || `${row.strategy_id}-${row.symbol}-${row.direction}-${row.market_state}`}`} />)}
+            {!whitelistProgressRows.length && <span className="emptyInline">暂无白名单进度。系统需要先看到胜率、盈利因子和回撤同时达标的影子子组合。</span>}
+          </div>
         </section>
         {deweightRows.length > 0 && (
           <div className="strategyActionList">
@@ -1623,6 +1652,7 @@ function RecommendationColumn({ title, rows, empty }: { title: string; rows: Dar
             <p>{(row.reasons ?? ["等待更多影子前向证据。"]).join(" ")}</p>
             <div className="recommendationStats">
               <small>样本 {fmt(row.closed_trades, 0)}</small>
+              <small>距下一档 {fmt(row.remaining_to_next_target, 0)}</small>
               <small>胜率 {pct(row.win_rate)}</small>
               <small>PF {fmt(row.profit_factor, 2)}</small>
               <small>时间退出 {pct(row.time_exit_share)}</small>
@@ -1631,6 +1661,30 @@ function RecommendationColumn({ title, rows, empty }: { title: string; rows: Dar
         ))}
         {!rows.length && <span className="emptyInline">{empty}</span>}
       </div>
+    </div>
+  );
+}
+
+function WhitelistProgressCard({ row }: { row: DarkflowRecommendationRow }) {
+  const nextTarget = row.next_sample_target ?? row.sample_targets?.pre_paper ?? 200;
+  const closed = Number(row.closed_trades ?? 0);
+  const progress = Math.max(0, Math.min(1, row.sample_progress ?? (nextTarget ? closed / nextTarget : 1)));
+  return (
+    <div className="whitelistProgressCard">
+      <div className="whitelistProgressTitle">
+        <div>
+          <strong>{row.symbol} · {directionText(row.direction)}</strong>
+          <span>{strategyText(row.strategy_id)} · {marketStateText(row.market_state)}</span>
+        </div>
+        <StatusBadge tone={row.paper_review_ready ? "good" : "warn"} label={row.paper_review_ready ? "可人工复核" : "继续补样"} />
+      </div>
+      <div className="progressTrack"><span style={{ width: `${Math.round(progress * 100)}%` }} /></div>
+      <div className="progressMeta">
+        <span>已平仓 {fmt(row.closed_trades, 0)} / 下一档 {fmt(nextTarget, 0)}</span>
+        <span>距离下一档 {fmt(row.remaining_to_next_target, 0)} 笔</span>
+        <span>{sampleStageText(row.sample_stage)}</span>
+      </div>
+      <p>{row.paper_review_ready ? "已达到第一复核样本线，但真实纸上复核仍需人工确认。" : "还没达到 30 笔第一复核线，不能拿它判断长期胜率。"}</p>
     </div>
   );
 }
@@ -2509,6 +2563,7 @@ function marketStateText(value: string) { return ({ trend_pullback: "趋势回�
 function alphaTone(value: string) { return ({ 可进入人工复核: "good", 样本收集中: "info", 观察名单: "warn", 暂停观察: "bad" } as Record<string, string>)[value] ?? "info"; }
 function alphaSamplingAction(row: DarkflowAlphaRow) { if (row.conclusion === "可进入人工复核" || row.conclusion === "样本收集中") return "prioritize"; if (row.conclusion === "暂停观察") return "pause"; return "watch"; }
 function alphaSamplingText(row: DarkflowAlphaRow) { return ({ prioritize: "优先补样", pause: "暂停补样", watch: "继续观察" } as Record<string, string>)[alphaSamplingAction(row)]; }
+function sampleStageText(value?: string) { return ({ first_review: "第一复核线", validation: "验证线", pre_paper: "实盘前观察线", mature: "样本成熟" } as Record<string, string>)[value || ""] ?? "补样中"; }
 function recommendationText(value: string) { return ({ whitelist: "白名单补样", keep_sampling: "继续补样", observe: "继续观察", pause: "暂停补样", blacklist: "黑名单隔离" } as Record<string, string>)[value] ?? readableCode(value); }
 function recommendationTone(value: string) { return ({ whitelist: "good", keep_sampling: "info", observe: "warn", pause: "bad", blacklist: "bad" } as Record<string, string>)[value] ?? "info"; }
 function mainPathActionText(value: string) { return ({ keep: "主路径保留", collect_more: "继续补样", review: "人工复核", deweight: "主路径降权" } as Record<string, string>)[value] ?? readableCode(value); }

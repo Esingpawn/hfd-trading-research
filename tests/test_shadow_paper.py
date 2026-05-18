@@ -1020,12 +1020,49 @@ async def test_darkflow_subportfolio_recommendations_whitelists_strong_and_black
     assert strong_row["recommendation"] == "whitelist"
     assert strong_row["sampling_action"] == "prioritize"
     assert strong_row["main_path_action"] == "collect_more"
+    assert strong_row["sample_targets"] == {"first_review": 30, "validation": 100, "pre_paper": 200}
+    assert strong_row["next_sample_target"] == 30
+    assert strong_row["remaining_to_next_target"] == 24
+    assert strong_row["sample_progress"] == pytest.approx(0.2)
+    assert strong_row["paper_review_ready"] is False
     assert weak_row["recommendation"] == "blacklist"
     assert weak_row["sampling_action"] == "block"
     assert weak_row["time_exit_share"] >= 0.8
     assert weak_row["main_path_action"] == "deweight"
     assert weak_row["main_path_weight_multiplier"] < 1.0
     assert any(item["strategy_id"] == "trend_ride_extension" and item["main_path_action"] == "deweight" for item in report["strategy_actions"])
+
+
+@pytest.mark.asyncio
+async def test_darkflow_subportfolio_recommendations_marks_paper_review_ready_after_first_review_target(session) -> None:
+    opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            _darkflow_shadow_trade(
+                key=f"ready-{index}",
+                symbol="HYPEUSDT",
+                direction="long",
+                strategy_id="liquidity_sweep_reversal",
+                strategy_name="扫损反转",
+                market_state="liquidity_hunt_reversal",
+                pnl=0.02,
+                exit_reason="take_profit",
+                opened_at=opened_at + timedelta(minutes=index),
+            )
+            for index in range(30)
+        ]
+    )
+    await session.commit()
+
+    report = await darkflow_subportfolio_recommendations_report(session)
+    row = report["rows"][0]
+
+    assert row["recommendation"] == "whitelist"
+    assert row["paper_review_ready"] is True
+    assert row["next_sample_target"] == 100
+    assert row["remaining_to_next_target"] == 70
+    assert row["sample_progress"] == pytest.approx(0.3)
+    assert row["sample_stage"] == "validation"
 
 
 def _darkflow_shadow_trade(
