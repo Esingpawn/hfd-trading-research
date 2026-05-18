@@ -7,6 +7,8 @@ def runtime_payload(
     last_error: str | None = None,
     paper_running: bool | None = None,
     paper_last_error: str | None = None,
+    waiting_running: bool | None = None,
+    waiting_last_error: str | None = None,
 ) -> dict:
     payload = {
         "collector": {
@@ -25,6 +27,12 @@ def runtime_payload(
             "running": bool(paper_running),
             "stderr_log": "data/logs/paper-loop.err.log",
             "last_error_line": paper_last_error,
+        }
+    if waiting_running is not None or waiting_last_error is not None:
+        payload["waiting_loop"] = {
+            "running": bool(waiting_running),
+            "stderr_log": "data/logs/waiting-loop.err.log",
+            "last_error_line": waiting_last_error,
         }
     return payload
 
@@ -114,6 +122,29 @@ def test_diagnostics_surfaces_paper_loop_error_line() -> None:
     codes = {issue["code"] for issue in result["issues"]}
     assert result["overall_status"] == "warning"
     assert "paper_loop_error_log" in codes
+
+
+def test_diagnostics_warns_when_waiting_loop_is_not_running() -> None:
+    result = build_diagnostics(
+        runtime_payload(waiting_running=False),
+        completeness_payload(),
+    )
+
+    codes = {issue["code"] for issue in result["issues"]}
+    assert result["overall_status"] == "warning"
+    assert "waiting_loop_not_running" in codes
+    assert result["metrics"]["waiting_loop_running"] is False
+
+
+def test_diagnostics_surfaces_waiting_loop_error_line() -> None:
+    result = build_diagnostics(
+        runtime_payload(waiting_running=True, waiting_last_error="waiting boom"),
+        completeness_payload(),
+    )
+
+    codes = {issue["code"] for issue in result["issues"]}
+    assert result["overall_status"] == "warning"
+    assert "waiting_loop_error_log" in codes
 
 
 def test_diagnostics_warns_when_collection_has_not_run() -> None:

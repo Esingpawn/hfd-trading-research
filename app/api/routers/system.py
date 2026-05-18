@@ -94,6 +94,7 @@ async def system_runtime(session: SessionDep) -> dict[str, object]:
     latest_collection = await _latest_collection_run(session)
     collector = _runtime_process_payload("collect-core-loop", "分层采集循环")
     paper_loop = _runtime_process_payload("paper-loop", "纸上交易循环")
+    waiting_loop = _runtime_process_payload("waiting-loop", "等待入场巡检")
     interval_seconds = _runtime_interval_seconds(collector, default=1800)
     next_collect_at = None
     if latest_collection and latest_collection.finished_at:
@@ -110,6 +111,7 @@ async def system_runtime(session: SessionDep) -> dict[str, object]:
         },
         "collector": collector,
         "paper_loop": paper_loop,
+        "waiting_loop": waiting_loop,
         "market_cache": _market_cache_info(),
         "completeness_cache": _completeness_cache_info(),
         "collection": {

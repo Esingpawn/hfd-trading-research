@@ -16,6 +16,7 @@ def build_diagnostics(
 
     collector = _as_dict(runtime.get("collector"))
     paper_loop = _as_dict(runtime.get("paper_loop"))
+    waiting_loop = _as_dict(runtime.get("waiting_loop"))
     collection = _as_dict(runtime.get("collection"))
     latest_collection = _as_dict(collection.get("latest"))
     summary = _as_dict(completeness.get("summary"))
@@ -59,6 +60,25 @@ def build_diagnostics(
             message="纸上交易循环错误日志有最新内容。",
             action=f"查看错误日志：{paper_loop.get('stderr_log') or 'data/logs/paper-loop.err.log'}。",
             details={"last_error_line": paper_last_error_line},
+        )
+
+    waiting_last_error_line = _clean_text(waiting_loop.get("last_error_line"))
+    if waiting_loop and not waiting_loop.get("running"):
+        _add_issue(
+            issues,
+            code="waiting_loop_not_running",
+            severity="warning",
+            message="等待入场巡检未运行，waiting 候选不会被高频刷新。",
+            action="检查 waiting-worker 服务是否正常，必要时重启 docker compose 服务。",
+        )
+    if waiting_last_error_line:
+        _add_issue(
+            issues,
+            code="waiting_loop_error_log",
+            severity="warning",
+            message="等待入场巡检错误日志有最新内容。",
+            action=f"查看错误日志：{waiting_loop.get('stderr_log') or 'data/logs/waiting-loop.err.log'}。",
+            details={"last_error_line": waiting_last_error_line},
         )
 
     if latest_collection:
@@ -147,6 +167,7 @@ def build_diagnostics(
         "metrics": {
             "collector_running": bool(collector.get("running")),
             "paper_loop_running": bool(paper_loop.get("running")),
+            "waiting_loop_running": bool(waiting_loop.get("running")),
             "collector_age_seconds": _as_float(latest_collection.get("age_seconds")),
             "scoring_missing_slots": scoring_missing,
             "scoring_stale_slots": scoring_stale,
