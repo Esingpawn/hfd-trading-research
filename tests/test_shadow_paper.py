@@ -8,6 +8,8 @@ from app.db import Base
 from app.models import ExperimentRun, FeatureEvent, FeatureLabel, PaperTrade, PriceSnapshot, ShadowPaperTrade
 from app.services.shadow_paper import (
     SHADOW_FEE_RATE,
+    darkflow_playbook_attribution_report,
+    darkflow_trend_extension_exit_report,
     mark_shadow_paper_trades,
     shadow_paper_replay,
     shadow_paper_replay_all,
@@ -813,3 +815,158 @@ async def add_labeled_replay_features(session, *, returns: list[float], horizons
                     status="labeled",
                 )
             )
+
+
+@pytest.mark.asyncio
+async def test_darkflow_playbook_attribution_report_groups_exit_mix_by_playbook(session) -> None:
+    opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            ShadowPaperTrade(
+                strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+                candidate_type="trade_candidate",
+                candidate_key="candidate-pullback-a",
+                signal_key="signal-pullback-a",
+                symbol="BTCUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=100.0,
+                stop_loss=99.0,
+                take_profit=103.0,
+                position_size=1.0,
+                status="closed",
+                pnl=0.02,
+                exit_reason="take_profit",
+                opened_at=opened_at,
+                closed_at=opened_at + timedelta(minutes=30),
+                context={"candidate_snapshot": {"strategy_id": "pullback_to_cost", "market_state": "trend_pullback", "strategy_name": "成本带回踩"}, "shadow_plan_fingerprint": "pullback-a"},
+            ),
+            ShadowPaperTrade(
+                strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+                candidate_type="trade_candidate",
+                candidate_key="candidate-pullback-b",
+                signal_key="signal-pullback-b",
+                symbol="BTCUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=100.0,
+                stop_loss=99.0,
+                take_profit=103.0,
+                position_size=1.0,
+                status="closed",
+                pnl=-0.01,
+                exit_reason="stop_loss",
+                opened_at=opened_at,
+                closed_at=opened_at + timedelta(minutes=20),
+                context={"candidate_snapshot": {"strategy_id": "pullback_to_cost", "market_state": "trend_pullback", "strategy_name": "成本带回踩"}, "shadow_plan_fingerprint": "pullback-b"},
+            ),
+            ShadowPaperTrade(
+                strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+                candidate_type="trade_candidate",
+                candidate_key="candidate-trend-a",
+                signal_key="signal-trend-a",
+                symbol="HYPEUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=38.0,
+                stop_loss=37.0,
+                take_profit=40.0,
+                position_size=1.0,
+                status="closed",
+                pnl=0.03,
+                exit_reason="take_profit",
+                opened_at=opened_at,
+                closed_at=opened_at + timedelta(minutes=90),
+                context={"candidate_snapshot": {"strategy_id": "trend_ride_extension", "market_state": "trend_extension", "strategy_name": "趋势延展"}, "shadow_plan_fingerprint": "trend-a"},
+            ),
+            ShadowPaperTrade(
+                strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+                candidate_type="trade_candidate",
+                candidate_key="candidate-trend-b",
+                signal_key="signal-trend-b",
+                symbol="HYPEUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=38.0,
+                stop_loss=37.0,
+                take_profit=40.0,
+                position_size=1.0,
+                status="closed",
+                pnl=0.01,
+                exit_reason="shadow_forward_time_exit",
+                opened_at=opened_at,
+                closed_at=opened_at + timedelta(minutes=120),
+                context={"candidate_snapshot": {"strategy_id": "trend_ride_extension", "market_state": "trend_extension", "strategy_name": "趋势延展"}, "shadow_plan_fingerprint": "trend-b"},
+            ),
+        ]
+    )
+    await session.commit()
+
+    report = await darkflow_playbook_attribution_report(session)
+
+    pullback = next(item for item in report["rows"] if item["strategy_id"] == "pullback_to_cost")
+    trend = next(item for item in report["rows"] if item["strategy_id"] == "trend_ride_extension")
+
+    assert report["strategy_name"] == "darkflow_v2_trade_candidate_shadow_forward_v1"
+    assert pullback["closed_trades"] == 2
+    assert pullback["exit_reason_counts"]["take_profit"] == 1
+    assert pullback["exit_reason_counts"]["stop_loss"] == 1
+    assert trend["closed_trades"] == 2
+    assert trend["exit_reason_counts"]["take_profit"] == 1
+    assert trend["exit_reason_counts"]["shadow_forward_time_exit"] == 1
+
+
+@pytest.mark.asyncio
+async def test_darkflow_trend_extension_exit_report_summarizes_runner_vs_time_exit(session) -> None:
+    opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            ShadowPaperTrade(
+                strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+                candidate_type="trade_candidate",
+                candidate_key="trend-a",
+                signal_key="trend-a",
+                symbol="HYPEUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=38.0,
+                stop_loss=37.0,
+                take_profit=40.0,
+                position_size=1.0,
+                status="closed",
+                pnl=0.03,
+                exit_reason="take_profit",
+                opened_at=opened_at,
+                closed_at=opened_at + timedelta(minutes=120),
+                context={"candidate_snapshot": {"strategy_id": "trend_ride_extension", "market_state": "trend_extension"}, "shadow_plan_fingerprint": "trend-a"},
+            ),
+            ShadowPaperTrade(
+                strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+                candidate_type="trade_candidate",
+                candidate_key="trend-b",
+                signal_key="trend-b",
+                symbol="TONUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=1.9,
+                stop_loss=1.85,
+                take_profit=2.0,
+                position_size=1.0,
+                status="closed",
+                pnl=0.01,
+                exit_reason="shadow_forward_time_exit",
+                opened_at=opened_at,
+                closed_at=opened_at + timedelta(minutes=180),
+                context={"candidate_snapshot": {"strategy_id": "trend_ride_extension", "market_state": "trend_extension"}, "shadow_plan_fingerprint": "trend-b"},
+            ),
+        ]
+    )
+    await session.commit()
+
+    report = await darkflow_trend_extension_exit_report(session)
+
+    assert report["strategy_id"] == "trend_ride_extension"
+    assert report["closed_trades"] == 2
+    assert report["exit_reason_counts"]["take_profit"] == 1
+    assert report["exit_reason_counts"]["shadow_forward_time_exit"] == 1
+    assert report["median_hold_minutes"] >= 120

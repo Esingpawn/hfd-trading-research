@@ -631,6 +631,37 @@ type ShadowStats = {
   by_horizon?: ShadowGroupStats[];
 };
 
+type DarkflowPlaybookAttributionReport = {
+  strategy_name?: string;
+  generated_at?: string | null;
+  rows: Array<{
+    strategy_id: string;
+    strategy_name?: string;
+    symbol: string;
+    direction: string;
+    market_state: string;
+    closed_trades?: number;
+    win_rate?: number | null;
+    avg_pnl?: number | null;
+    profit_factor?: number | null;
+    max_drawdown?: number | null;
+    exit_reason_counts: Record<string, number>;
+  }>;
+};
+
+type TrendExtensionExitReport = {
+  strategy_name?: string;
+  strategy_id?: string;
+  generated_at?: string | null;
+  closed_trades?: number;
+  win_rate?: number | null;
+  avg_pnl?: number | null;
+  profit_factor?: number | null;
+  max_drawdown?: number | null;
+  median_hold_minutes?: number | null;
+  exit_reason_counts: Record<string, number>;
+};
+
 type ShadowUniquePlanStats = {
   total_trades?: number;
   open_trades?: number;
@@ -673,6 +704,8 @@ type LoadState = {
   shadow: ShadowStats | null;
   shadowTrades: ShadowTrade[] | null;
   alphaScoreboard: DarkflowAlphaScoreboard | null;
+  playbookAttribution: DarkflowPlaybookAttributionReport | null;
+  trendExtensionExit: TrendExtensionExitReport | null;
   rulebook: RulebookReport | null;
   playbooks: PlaybookCatalogReport | null;
   indicatorCoverage: IndicatorCoverageReport | null;
@@ -705,6 +738,8 @@ const EMPTY_STATE: LoadState = {
   shadow: null,
   shadowTrades: null,
   alphaScoreboard: null,
+  playbookAttribution: null,
+  trendExtensionExit: null,
   rulebook: null,
   playbooks: null,
   indicatorCoverage: null,
@@ -866,6 +901,12 @@ function App() {
     if (activePage === "shadow" && data.shadowTrades === null && !errors.shadowTrades) {
       void loadSection("shadowTrades", () => fetchJson<ShadowTrade[]>(`/shadow-paper/trades?limit=80&strategy_name=${DARKFLOW_SHADOW_STRATEGY}`, 12000));
     }
+    if (activePage === "shadow" && data.playbookAttribution === null && !errors.playbookAttribution) {
+      void loadSection("playbookAttribution", () => fetchJson<DarkflowPlaybookAttributionReport>("/shadow-paper/darkflow-playbook-attribution", 16000));
+    }
+    if (activePage === "shadow" && data.trendExtensionExit === null && !errors.trendExtensionExit) {
+      void loadSection("trendExtensionExit", () => fetchJson<TrendExtensionExitReport>("/shadow-paper/darkflow-trend-extension-exit", 16000));
+    }
     if (activePage === "indicatorMap") {
       if (data.rulebook === null && !errors.rulebook) void loadSection("rulebook", () => fetchJson<RulebookReport>("/darkflow/rulebook", 12000));
       if (data.playbooks === null && !errors.playbooks) void loadSection("playbooks", () => fetchJson<PlaybookCatalogReport>("/darkflow/playbooks", 12000));
@@ -879,7 +920,7 @@ function App() {
       if (data.featurePaperAb === null && !errors.featurePaperAb) void loadSection("featurePaperAb", () => fetchJson<FeaturePaperAbReport>("/features/paper-ab/latest?horizon=30m", 16000));
       if (data.featureSegmentPaperAb === null && !errors.featureSegmentPaperAb) void loadSection("featureSegmentPaperAb", () => fetchJson<FeaturePaperAbReport>("/features/segment-paper-ab/latest?horizon=30m", 16000));
     }
-  }, [activePage, data.backtestsLatest, data.playbookBacktest, data.paperStats, data.paperTrades, data.shadow, data.shadowTrades, data.alphaScoreboard, data.rulebook, data.playbooks, data.indicatorCoverage, data.experimentEffectiveness, data.featurePaperAb, data.featureSegmentPaperAb, errors.backtestsLatest, errors.playbookBacktest, errors.paperStats, errors.paperTrades, errors.shadow, errors.shadowTrades, errors.alphaScoreboard, errors.rulebook, errors.playbooks, errors.indicatorCoverage, errors.experimentEffectiveness, errors.featurePaperAb, errors.featureSegmentPaperAb]);
+  }, [activePage, data.backtestsLatest, data.playbookBacktest, data.paperStats, data.paperTrades, data.shadow, data.shadowTrades, data.alphaScoreboard, data.playbookAttribution, data.trendExtensionExit, data.rulebook, data.playbooks, data.indicatorCoverage, data.experimentEffectiveness, data.featurePaperAb, data.featureSegmentPaperAb, errors.backtestsLatest, errors.playbookBacktest, errors.paperStats, errors.paperTrades, errors.shadow, errors.shadowTrades, errors.alphaScoreboard, errors.playbookAttribution, errors.trendExtensionExit, errors.rulebook, errors.playbooks, errors.indicatorCoverage, errors.experimentEffectiveness, errors.featurePaperAb, errors.featureSegmentPaperAb]);
 
   async function queueDarkflowAlphaAcceleration() {
     setTaskMessage("正在排队暗流 Alpha 加速巡检...");
@@ -1349,6 +1390,8 @@ function ShadowPage({ data, rows, onAccelerate }: { data: LoadState; rows: CardR
   const unique = data.shadow?.unique_plan_stats;
   const alphaRows = data.alphaScoreboard?.rows ?? [];
   const alphaTotals = data.alphaScoreboard?.totals;
+  const attributionRows = data.playbookAttribution?.rows ?? [];
+  const trendExit = data.trendExtensionExit;
   return (
     <div className="pageStack">
       <section className="metricGrid compactMetrics">
@@ -1397,6 +1440,28 @@ function ShadowPage({ data, rows, onAccelerate }: { data: LoadState; rows: CardR
           ))}
           {!topGroups.length && <StateBox type="empty" title="暂无候选聚合" text="影子交易统计接口尚未返回候选维度数据。" />}
         </div>
+      </Panel>
+      <Panel title="剧本级前向归因" subtitle={`按玩法、币种、方向和市场状态拆分 · 更新时间 ${timeText(data.playbookAttribution?.generated_at)}`}>
+        <div className="tableList">
+          {attributionRows.slice(0, 12).map((item) => (
+            <div className="tableRow shadowRow" key={`${item.strategy_id}-${item.symbol}-${item.direction}-${item.market_state}`}>
+              <strong>{strategyText(item.strategy_id)}</strong>
+              <span>{item.symbol} · {directionText(item.direction)} · {marketStateText(item.market_state)}</span>
+              <span>样本 {fmt(item.closed_trades, 0)} · 胜率 {pct(item.win_rate)} · PF {fmt(item.profit_factor, 2)}</span>
+              <span>{exitMixText(item.exit_reason_counts)}</span>
+            </div>
+          ))}
+          {!attributionRows.length && <StateBox type="empty" title="暂无剧本级前向归因" text="影子样本还不足，或接口尚未返回。" />}
+        </div>
+      </Panel>
+      <Panel title="趋势延展退出评估" subtitle={`只看 trend_ride_extension · 更新时间 ${timeText(trendExit?.generated_at)}`}>
+        <div className="metricGrid compactMetrics">
+          <Metric title="已平仓样本" value={fmt(trendExit?.closed_trades, 0)} detail={`中位持仓 ${fmt(trendExit?.median_hold_minutes, 0)} 分钟`} tone="info" />
+          <Metric title="胜率" value={pct(trendExit?.win_rate)} detail={`平均收益 ${pct(trendExit?.avg_pnl)}`} tone="good" />
+          <Metric title="盈利因子" value={fmt(trendExit?.profit_factor, 2)} detail={`最大回撤 ${pct(trendExit?.max_drawdown)}`} tone="good" />
+          <Metric title="退出分布" value={exitReasonPrimary(trendExit?.exit_reason_counts)} detail={exitMixText(trendExit?.exit_reason_counts ?? {})} tone="warn" />
+        </div>
+        {!trendExit?.closed_trades && <StateBox type="empty" title="趋势延展退出样本不足" text="需要更多 trend_ride_extension 前向平仓后，才能判断是否仍在过早止盈。" />}
       </Panel>
       <Panel title="影子隔离说明" subtitle="不会触发真实订单">
         <p className="bodyText">影子纸上交易只写入隔离研究表，不会触发真实纸上交易，也不会触发实盘订单。这里用于观察候选策略是否持续积累样本，以及样本表现是否稳定。</p>
@@ -2514,6 +2579,22 @@ function experimentRecommendationText(item: ExperimentIndicator) {
   if (item.status === "candidate") return "研究表现不错，但仍是候选特征，需要通过纸上 A/B 和影子前向验证后才能晋级。";
   if (item.status === "noise_candidate") return "当前更像噪声，需要换转换方式或增加行情分段过滤。";
   return item.recommendation || "仍处于研究观察阶段，不能直接用于实盘或纸上开仓。";
+}
+
+function exitMixText(counts: Record<string, number>) {
+  const entries = Object.entries(counts || {}).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) return "暂无退出样本";
+  return entries.slice(0, 3).map(([key, value]) => `${exitReasonText(key)} ${fmt(value, 0)}`).join(" · ");
+}
+
+function exitReasonPrimary(counts?: Record<string, number>) {
+  const entries = Object.entries(counts || {}).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) return "暂无";
+  return exitReasonText(entries[0][0]);
+}
+
+function exitReasonText(value: string) {
+  return ({ take_profit: "止盈", stop_loss: "止损", shadow_forward_time_exit: "时间退出", trailing_stop: "跟踪止损", open: "仍持仓" } as Record<string, string>)[value] ?? readableCode(value);
 }
 
 function playbookText(value: string) {

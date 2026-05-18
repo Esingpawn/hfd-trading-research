@@ -39,6 +39,8 @@ def test_expected_api_routes_are_registered() -> None:
         ("POST", "/shadow-paper/replay-all"),
         ("GET", "/shadow-paper/trades"),
         ("GET", "/shadow-paper/stats"),
+        ("GET", "/shadow-paper/darkflow-playbook-attribution"),
+        ("GET", "/shadow-paper/darkflow-trend-extension-exit"),
         ("POST", "/signals/backfill"),
         ("GET", "/signals/weights"),
         ("GET", "/darkflow/rulebook"),

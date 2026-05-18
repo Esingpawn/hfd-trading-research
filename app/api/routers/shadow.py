@@ -4,6 +4,8 @@ from fastapi import APIRouter, Query
 
 from app.api.deps import SessionDep
 from app.services.shadow_paper import (
+    darkflow_playbook_attribution_report,
+    darkflow_trend_extension_exit_report,
     mark_shadow_paper_trades,
     shadow_paper_promotion_report,
     shadow_paper_replay_all,
@@ -84,3 +86,13 @@ async def get_shadow_paper_stats(
 @router.get("/shadow-paper/promotion")
 async def get_shadow_paper_promotion(session: SessionDep) -> dict[str, object]:
     return await shadow_paper_promotion_report(session)
+
+
+@router.get("/shadow-paper/darkflow-playbook-attribution")
+async def get_darkflow_playbook_attribution(session: SessionDep) -> dict[str, object]:
+    return await darkflow_playbook_attribution_report(session)
+
+
+@router.get("/shadow-paper/darkflow-trend-extension-exit")
+async def get_darkflow_trend_extension_exit(session: SessionDep) -> dict[str, object]:
+    return await darkflow_trend_extension_exit_report(session)

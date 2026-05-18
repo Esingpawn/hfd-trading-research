@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timedelta, timezone
-from statistics import mean
+from statistics import mean, median
 from typing import Any
 
 from sqlalchemy import and_, or_, select
@@ -376,6 +376,67 @@ async def shadow_paper_promotion_report(session: AsyncSession) -> dict[str, Any]
     }
 
 
+async def darkflow_playbook_attribution_report(session: AsyncSession) -> dict[str, Any]:
+    rows = await session.execute(
+        select(ShadowPaperTrade)
+        .where(ShadowPaperTrade.strategy_name == DARKFLOW_V2_SHADOW_STRATEGY_NAME)
+        .order_by(ShadowPaperTrade.opened_at.desc())
+    )
+    trades = _unique_plan_trades(list(rows.scalars().all()))
+    buckets: dict[tuple[str, str, str, str], list[ShadowPaperTrade]] = {}
+    for trade in trades:
+        snapshot = _candidate_snapshot(trade)
+        strategy_id = str(snapshot.get("strategy_id") or "unknown")
+        market_state = str(snapshot.get("market_state") or "unknown")
+        buckets.setdefault((strategy_id, trade.symbol, trade.direction, market_state), []).append(trade)
+    report_rows: list[dict[str, Any]] = []
+    for (strategy_id, symbol, direction, market_state), items in buckets.items():
+        stats = _trade_stats(items)
+        exit_reason_counts = _exit_reason_counts(items)
+        report_rows.append(
+            {
+                "strategy_id": strategy_id,
+                "strategy_name": str(_candidate_snapshot(items[0]).get("strategy_name") or strategy_id),
+                "symbol": symbol,
+                "direction": direction,
+                "market_state": market_state,
+                **stats,
+                "exit_reason_counts": exit_reason_counts,
+            }
+        )
+    report_rows.sort(key=lambda item: (int(item.get("closed_trades") or 0), float(item.get("profit_factor") or -999.0)), reverse=True)
+    return {
+        "strategy_name": DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "rows": report_rows,
+        "policy": _shadow_policy() | {"report_only": True, "lineage": "core_darkflow_v2"},
+    }
+
+
+async def darkflow_trend_extension_exit_report(session: AsyncSession) -> dict[str, Any]:
+    rows = await session.execute(
+        select(ShadowPaperTrade)
+        .where(ShadowPaperTrade.strategy_name == DARKFLOW_V2_SHADOW_STRATEGY_NAME)
+        .order_by(ShadowPaperTrade.opened_at.desc())
+    )
+    trades = [
+        trade
+        for trade in _unique_plan_trades(list(rows.scalars().all()))
+        if str(_candidate_snapshot(trade).get("strategy_id") or "") == "trend_ride_extension"
+    ]
+    hold_minutes = sorted(_hold_minutes(trade) for trade in trades if _hold_minutes(trade) is not None)
+    return {
+        "strategy_name": DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+        "strategy_id": "trend_ride_extension",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        **_trade_stats(trades),
+        "exit_reason_counts": _exit_reason_counts(trades),
+        "median_hold_minutes": _median_minutes(hold_minutes),
+        "rows": [_trade_payload(trade) for trade in trades[:50]],
+        "policy": _shadow_policy() | {"report_only": True, "lineage": "core_darkflow_v2"},
+    }
+
+
 def _trade_stats(trades: list[ShadowPaperTrade]) -> dict[str, Any]:
     closed = sorted(
         [item for item in trades if item.status == "closed" and isinstance(item.pnl, (int, float))],
@@ -424,7 +485,7 @@ def _trade_plan_fingerprint(trade: ShadowPaperTrade) -> str:
     explicit = context.get("shadow_plan_fingerprint")
     if explicit:
         return f"explicit:{explicit}"
-    snapshot = context.get("candidate_snapshot") if isinstance(context.get("candidate_snapshot"), dict) else {}
+    snapshot = _candidate_snapshot(trade)
     strategy_id = str(snapshot.get("strategy_id") or trade.strategy_name)
     entry = _number(snapshot.get("entry_price")) or float(trade.entry_price)
     stop = _number(snapshot.get("stop_price")) or float(trade.stop_loss)
@@ -459,6 +520,12 @@ def _rounded_price_bucket(price: float) -> str:
     else:
         digits = 6
     return f"{round(float(price), digits):.{digits}f}"
+
+
+def _candidate_snapshot(trade: ShadowPaperTrade) -> dict[str, Any]:
+    context = trade.context if isinstance(trade.context, dict) else {}
+    snapshot = context.get("candidate_snapshot")
+    return snapshot if isinstance(snapshot, dict) else {}
 
 
 def _grouped_trade_stats(
@@ -499,6 +566,26 @@ def _grouped_trade_stats(
         ),
         reverse=True,
     )
+
+
+def _exit_reason_counts(trades: list[ShadowPaperTrade]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for trade in trades:
+        reason = str(trade.exit_reason or "open")
+        counts[reason] = counts.get(reason, 0) + 1
+    return counts
+
+
+def _hold_minutes(trade: ShadowPaperTrade) -> float | None:
+    if not trade.opened_at or not trade.closed_at:
+        return None
+    return max(0.0, (_aware(trade.closed_at) - _aware(trade.opened_at)).total_seconds() / 60.0)
+
+
+def _median_minutes(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return median(values)
 
 
 def _candidate_group_key(trade: ShadowPaperTrade) -> tuple[str, ...]:
