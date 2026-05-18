@@ -113,3 +113,14 @@ def test_react_dashboard_exposes_darkflow_alpha_scoreboard() -> None:
     assert "优先补样分组" in source
     assert "暂停污染分组" in source
     assert "暂停补样" in source
+
+
+def test_react_dashboard_exposes_darkflow_subportfolio_recommendations() -> None:
+    source = Path("web/src/main.tsx").read_text(encoding="utf-8")
+
+    assert "/shadow-paper/darkflow-subportfolio-recommendations" in source
+    assert "子组合白名单/黑名单" in source
+    assert "白名单补样" in source
+    assert "黑名单隔离" in source
+    assert "主路径降权建议" in source
+    assert "只读建议，不会自动改权重" in source

@@ -38,6 +38,10 @@ PROMOTION_MIN_WIN_RATE = 0.52
 PROMOTION_MIN_PROFIT_FACTOR = 1.25
 PROMOTION_MAX_DRAWDOWN = 0.12
 DEFAULT_SHADOW_REPLAY_LIMIT = 500
+DARKFLOW_RECOMMENDATION_WHITELIST_MIN_CLOSED = 5
+DARKFLOW_RECOMMENDATION_PAUSE_MIN_CLOSED = 3
+DARKFLOW_STRATEGY_ACTION_MIN_CLOSED = 10
+DARKFLOW_TIME_EXIT_REASON = DARKFLOW_SHADOW_FORWARD_TIME_EXIT_REASON
 
 
 async def shadow_paper_scan(
@@ -435,6 +439,265 @@ async def darkflow_trend_extension_exit_report(session: AsyncSession) -> dict[st
         "rows": [_trade_payload(trade) for trade in trades[:50]],
         "policy": _shadow_policy() | {"report_only": True, "lineage": "core_darkflow_v2"},
     }
+
+
+async def darkflow_subportfolio_recommendations_report(session: AsyncSession) -> dict[str, Any]:
+    rows = await session.execute(
+        select(ShadowPaperTrade)
+        .where(ShadowPaperTrade.strategy_name == DARKFLOW_V2_SHADOW_STRATEGY_NAME)
+        .order_by(ShadowPaperTrade.opened_at.desc())
+    )
+    trades = _unique_plan_trades(list(rows.scalars().all()))
+    group_rows = _darkflow_subportfolio_rows(trades)
+    strategy_rows = _darkflow_strategy_action_rows(trades)
+    strategy_action_by_id = {str(item["strategy_id"]): item for item in strategy_rows}
+    for row in group_rows:
+        strategy_action = strategy_action_by_id.get(str(row["strategy_id"])) or {}
+        row["main_path_action"] = strategy_action.get("main_path_action", "collect_more")
+        row["main_path_action_text"] = strategy_action.get("action_text", "继续补样，暂不提高主路径权重。")
+        row["main_path_weight_multiplier"] = strategy_action.get("weight_multiplier", 1.0)
+    counts: dict[str, int] = {}
+    for row in group_rows:
+        key = str(row["recommendation"])
+        counts[key] = counts.get(key, 0) + 1
+    return {
+        "strategy_name": DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "dimension": "strategy_id+symbol+direction+market_state",
+        "rows": group_rows,
+        "recommendation_counts": counts,
+        "strategy_actions": strategy_rows,
+        "thresholds": {
+            "whitelist_min_closed_trades": DARKFLOW_RECOMMENDATION_WHITELIST_MIN_CLOSED,
+            "pause_min_closed_trades": DARKFLOW_RECOMMENDATION_PAUSE_MIN_CLOSED,
+            "strategy_action_min_closed_trades": DARKFLOW_STRATEGY_ACTION_MIN_CLOSED,
+            "whitelist_min_win_rate": 0.60,
+            "whitelist_min_profit_factor": 1.50,
+            "pause_max_win_rate": 0.35,
+            "pause_max_profit_factor": 0.85,
+            "deweight_max_profit_factor": 1.0,
+            "time_exit_share_limit": 0.65,
+        },
+        "policy": _shadow_policy()
+        | {
+            "report_only": True,
+            "lineage": "core_darkflow_v2",
+            "mutates_candidates": False,
+            "mutates_weights": False,
+            "purpose": "rank darkflow shadow-forward sub-portfolios before any paper/live promotion",
+        },
+    }
+
+
+def _darkflow_subportfolio_rows(trades: list[ShadowPaperTrade]) -> list[dict[str, Any]]:
+    buckets: dict[tuple[str, str, str, str], list[ShadowPaperTrade]] = {}
+    for trade in trades:
+        snapshot = _candidate_snapshot(trade)
+        strategy_id = str(snapshot.get("strategy_id") or "unknown")
+        market_state = str(snapshot.get("market_state") or "unknown")
+        buckets.setdefault((strategy_id, trade.symbol, trade.direction, market_state), []).append(trade)
+    rows: list[dict[str, Any]] = []
+    for (strategy_id, symbol, direction, market_state), items in buckets.items():
+        stats = _trade_stats(items)
+        exit_counts = _exit_reason_counts(items)
+        recommendation, reasons = _darkflow_subportfolio_recommendation(stats, exit_counts)
+        rows.append(
+            {
+                "group_key": "|".join([strategy_id, symbol, direction, market_state]),
+                "strategy_id": strategy_id,
+                "strategy_name": str(_candidate_snapshot(items[0]).get("strategy_name") or strategy_id),
+                "symbol": symbol,
+                "direction": direction,
+                "market_state": market_state,
+                **stats,
+                "exit_reason_counts": exit_counts,
+                "time_exit_share": _exit_reason_share(exit_counts, DARKFLOW_TIME_EXIT_REASON),
+                "take_profit_share": _exit_reason_share(exit_counts, "take_profit"),
+                "stop_loss_share": _exit_reason_share(exit_counts, "stop_loss"),
+                "recommendation": recommendation,
+                "recommendation_text": _darkflow_recommendation_text(recommendation),
+                "sampling_action": _darkflow_sampling_action(recommendation),
+                "confidence": _recommendation_confidence(int(stats.get("closed_trades") or 0)),
+                "reasons": reasons,
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda item: (
+            _darkflow_recommendation_rank(str(item["recommendation"])),
+            int(item.get("closed_trades") or 0),
+            float(item.get("profit_factor") or -999.0),
+        ),
+        reverse=True,
+    )
+
+
+def _darkflow_strategy_action_rows(trades: list[ShadowPaperTrade]) -> list[dict[str, Any]]:
+    buckets: dict[str, list[ShadowPaperTrade]] = {}
+    for trade in trades:
+        strategy_id = str(_candidate_snapshot(trade).get("strategy_id") or "unknown")
+        buckets.setdefault(strategy_id, []).append(trade)
+    rows: list[dict[str, Any]] = []
+    for strategy_id, items in buckets.items():
+        stats = _trade_stats(items)
+        exit_counts = _exit_reason_counts(items)
+        action, reasons = _darkflow_strategy_action(stats, exit_counts)
+        rows.append(
+            {
+                "strategy_id": strategy_id,
+                "strategy_name": str(_candidate_snapshot(items[0]).get("strategy_name") or strategy_id),
+                **stats,
+                "exit_reason_counts": exit_counts,
+                "time_exit_share": _exit_reason_share(exit_counts, DARKFLOW_TIME_EXIT_REASON),
+                "main_path_action": action,
+                "action_text": _darkflow_strategy_action_text(action),
+                "weight_multiplier": _darkflow_strategy_weight_multiplier(action),
+                "reasons": reasons,
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda item: (
+            _darkflow_strategy_action_rank(str(item["main_path_action"])),
+            int(item.get("closed_trades") or 0),
+            float(item.get("profit_factor") or -999.0),
+        ),
+        reverse=True,
+    )
+
+
+def _darkflow_subportfolio_recommendation(stats: dict[str, Any], exit_counts: dict[str, int]) -> tuple[str, list[str]]:
+    closed = int(stats.get("closed_trades") or 0)
+    win_rate = _number(stats.get("win_rate"))
+    profit_factor = _number(stats.get("profit_factor"))
+    max_drawdown = _number(stats.get("max_drawdown"))
+    time_exit_share = _exit_reason_share(exit_counts, DARKFLOW_TIME_EXIT_REASON)
+    reasons: list[str] = []
+    if closed <= 0:
+        return "keep_sampling", ["还没有平仓样本，继续只在影子环境补样。"]
+    if closed >= DARKFLOW_RECOMMENDATION_WHITELIST_MIN_CLOSED and _at_least(win_rate, 0.60) and _at_least(profit_factor, 1.50) and _at_most(max_drawdown, 0.08):
+        if time_exit_share is None or time_exit_share <= 0.55:
+            reasons.append("胜率、盈利因子和回撤同时达标。")
+            reasons.append("时间退出占比没有异常升高，说明不是靠拖到结束维持结果。")
+            return "whitelist", reasons
+    if closed >= DARKFLOW_RECOMMENDATION_PAUSE_MIN_CLOSED:
+        weak_edge = _at_most(win_rate, 0.35) and _at_most(profit_factor, 0.85)
+        severe_edge = _at_most(profit_factor, 0.50) or (_at_most(win_rate, 0.25) and _at_most(profit_factor, 0.75))
+        time_exit_problem = time_exit_share is not None and time_exit_share >= 0.70 and (profit_factor is None or profit_factor < 1.05)
+        drawdown_problem = max_drawdown is not None and max_drawdown > 0.12 and (profit_factor is None or profit_factor < 1.10)
+        if severe_edge or (closed >= 5 and weak_edge and time_exit_problem):
+            reasons.append("前向胜率或盈利因子已经明显低于保留门槛。")
+            if time_exit_problem:
+                reasons.append("大量持仓拖到时间退出，说明入场或止盈逻辑没有形成有效边际。")
+            return "blacklist", reasons
+        if weak_edge or time_exit_problem or drawdown_problem:
+            reasons.append("当前前向表现偏弱，继续补样会污染主路径统计。")
+            if time_exit_problem:
+                reasons.append("时间退出占比过高，需要先复核规则。")
+            if drawdown_problem:
+                reasons.append("回撤压力超过保守观察线。")
+            return "pause", reasons
+    if closed < DARKFLOW_RECOMMENDATION_WHITELIST_MIN_CLOSED:
+        return "keep_sampling", [f"只有 {closed} 笔平仓样本，尚不足以进入白名单或黑名单。"]
+    return "observe", ["样本已有一定数量，但胜率、盈利因子或回撤没有同时给出明确方向。"]
+
+
+def _darkflow_strategy_action(stats: dict[str, Any], exit_counts: dict[str, int]) -> tuple[str, list[str]]:
+    closed = int(stats.get("closed_trades") or 0)
+    win_rate = _number(stats.get("win_rate"))
+    profit_factor = _number(stats.get("profit_factor"))
+    max_drawdown = _number(stats.get("max_drawdown"))
+    time_exit_share = _exit_reason_share(exit_counts, DARKFLOW_TIME_EXIT_REASON)
+    if closed < DARKFLOW_STRATEGY_ACTION_MIN_CLOSED:
+        return "collect_more", [f"策略级样本只有 {closed} 笔，先继续隔离补样。"]
+    if _at_least(win_rate, 0.55) and _at_least(profit_factor, 1.25) and _at_most(max_drawdown, 0.12):
+        return "keep", ["策略级前向胜率、盈利因子和回撤达到主路径保留线。"]
+    if (profit_factor is not None and profit_factor < 1.0) or (win_rate is not None and win_rate < 0.45) or (time_exit_share is not None and time_exit_share >= 0.65):
+        reasons = ["策略级前向结果不足以继续占用主路径权重。"]
+        if time_exit_share is not None and time_exit_share >= 0.65:
+            reasons.append("时间退出占比过高，说明该玩法在当前实现中缺少有效退出优势。")
+        return "deweight", reasons
+    return "review", ["策略级表现不够强，也没有弱到需要整体移出，保持人工复核。"]
+
+
+def _exit_reason_share(counts: dict[str, int], reason: str) -> float | None:
+    closed_total = sum(count for key, count in counts.items() if key != "open")
+    if closed_total <= 0:
+        return None
+    return counts.get(reason, 0) / closed_total
+
+
+def _at_least(value: float | None, threshold: float) -> bool:
+    return value is not None and value >= threshold
+
+
+def _at_most(value: float | None, threshold: float) -> bool:
+    return value is not None and value <= threshold
+
+
+def _recommendation_confidence(closed: int) -> str:
+    if closed >= 30:
+        return "high"
+    if closed >= 10:
+        return "medium"
+    return "low"
+
+
+def _darkflow_recommendation_text(recommendation: str) -> str:
+    return {
+        "whitelist": "白名单补样",
+        "keep_sampling": "继续补样",
+        "observe": "继续观察",
+        "pause": "暂停补样",
+        "blacklist": "黑名单隔离",
+    }.get(recommendation, recommendation)
+
+
+def _darkflow_sampling_action(recommendation: str) -> str:
+    return {
+        "whitelist": "prioritize",
+        "keep_sampling": "prioritize",
+        "observe": "watch",
+        "pause": "pause",
+        "blacklist": "block",
+    }.get(recommendation, "watch")
+
+
+def _darkflow_strategy_action_text(action: str) -> str:
+    return {
+        "keep": "主路径保留",
+        "collect_more": "继续补样",
+        "review": "人工复核",
+        "deweight": "主路径降权",
+    }.get(action, action)
+
+
+def _darkflow_strategy_weight_multiplier(action: str) -> float:
+    return {
+        "keep": 1.0,
+        "collect_more": 1.0,
+        "review": 0.75,
+        "deweight": 0.35,
+    }.get(action, 1.0)
+
+
+def _darkflow_recommendation_rank(recommendation: str) -> int:
+    return {
+        "whitelist": 5,
+        "keep_sampling": 4,
+        "observe": 3,
+        "pause": 2,
+        "blacklist": 1,
+    }.get(recommendation, 0)
+
+
+def _darkflow_strategy_action_rank(action: str) -> int:
+    return {
+        "keep": 4,
+        "collect_more": 3,
+        "review": 2,
+        "deweight": 1,
+    }.get(action, 0)
 
 
 def _trade_stats(trades: list[ShadowPaperTrade]) -> dict[str, Any]:

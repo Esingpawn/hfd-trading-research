@@ -9,6 +9,7 @@ from app.models import ExperimentRun, FeatureEvent, FeatureLabel, PaperTrade, Pr
 from app.services.shadow_paper import (
     SHADOW_FEE_RATE,
     darkflow_playbook_attribution_report,
+    darkflow_subportfolio_recommendations_report,
     darkflow_trend_extension_exit_report,
     mark_shadow_paper_trades,
     shadow_paper_replay,
@@ -970,3 +971,98 @@ async def test_darkflow_trend_extension_exit_report_summarizes_runner_vs_time_ex
     assert report["exit_reason_counts"]["take_profit"] == 1
     assert report["exit_reason_counts"]["shadow_forward_time_exit"] == 1
     assert report["median_hold_minutes"] >= 120
+
+
+@pytest.mark.asyncio
+async def test_darkflow_subportfolio_recommendations_whitelists_strong_and_blacklists_weak(session) -> None:
+    opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    strong = [
+        _darkflow_shadow_trade(
+            key=f"strong-{index}",
+            symbol="HYPEUSDT",
+            direction="long",
+            strategy_id="liquidity_sweep_reversal",
+            strategy_name="扫损反转",
+            market_state="liquidity_hunt_reversal",
+            pnl=0.02,
+            exit_reason="take_profit",
+            opened_at=opened_at + timedelta(minutes=index),
+        )
+        for index in range(6)
+    ]
+    weak = [
+        _darkflow_shadow_trade(
+            key=f"weak-{index}",
+            symbol="BTCUSDT",
+            direction="long",
+            strategy_id="trend_ride_extension",
+            strategy_name="趋势延展",
+            market_state="trend_extension",
+            pnl=-0.015 if index < 8 else 0.003,
+            exit_reason="shadow_forward_time_exit" if index < 8 else "take_profit",
+            opened_at=opened_at + timedelta(hours=1, minutes=index),
+        )
+        for index in range(10)
+    ]
+    session.add_all(strong + weak)
+    await session.commit()
+
+    report = await darkflow_subportfolio_recommendations_report(session)
+
+    by_group = {(row["strategy_id"], row["symbol"], row["direction"], row["market_state"]): row for row in report["rows"]}
+    strong_row = by_group[("liquidity_sweep_reversal", "HYPEUSDT", "long", "liquidity_hunt_reversal")]
+    weak_row = by_group[("trend_ride_extension", "BTCUSDT", "long", "trend_extension")]
+
+    assert report["dimension"] == "strategy_id+symbol+direction+market_state"
+    assert report["policy"]["report_only"] is True
+    assert report["policy"]["opens_paper_trades"] is False
+    assert report["policy"]["opens_live_orders"] is False
+    assert strong_row["recommendation"] == "whitelist"
+    assert strong_row["sampling_action"] == "prioritize"
+    assert strong_row["main_path_action"] == "collect_more"
+    assert weak_row["recommendation"] == "blacklist"
+    assert weak_row["sampling_action"] == "block"
+    assert weak_row["time_exit_share"] >= 0.8
+    assert weak_row["main_path_action"] == "deweight"
+    assert weak_row["main_path_weight_multiplier"] < 1.0
+    assert any(item["strategy_id"] == "trend_ride_extension" and item["main_path_action"] == "deweight" for item in report["strategy_actions"])
+
+
+def _darkflow_shadow_trade(
+    *,
+    key: str,
+    symbol: str,
+    direction: str,
+    strategy_id: str,
+    strategy_name: str,
+    market_state: str,
+    pnl: float,
+    exit_reason: str,
+    opened_at: datetime,
+) -> ShadowPaperTrade:
+    return ShadowPaperTrade(
+        strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+        candidate_type="trade_candidate",
+        candidate_key=key,
+        signal_key=f"signal-{key}",
+        symbol=symbol,
+        timeframe="short",
+        direction=direction,
+        entry_price=100.0,
+        stop_loss=99.0,
+        take_profit=103.0,
+        position_size=1.0,
+        status="closed",
+        pnl=pnl,
+        exit_reason=exit_reason,
+        opened_at=opened_at,
+        closed_at=opened_at + timedelta(minutes=120),
+        context={
+            "candidate_snapshot": {
+                "strategy_id": strategy_id,
+                "strategy_name": strategy_name,
+                "market_state": market_state,
+            },
+            "shadow_plan_fingerprint": key,
+        },
+    )

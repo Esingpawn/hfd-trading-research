@@ -575,6 +575,58 @@ button { color: inherit; }
 }
 .samplingSummary strong { display: block; color: var(--green); font-family: "Cascadia Mono", Consolas, monospace; font-size: 20px; }
 .samplingSummary span, .samplingSummary p { color: var(--muted); font-size: 13px; line-height: 1.5; }
+
+.recommendationSummary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+.recommendationLane {
+  border: 1px solid var(--line-soft);
+  background: #0b1118;
+  border-radius: 7px;
+  padding: 10px;
+}
+.recommendationLane span { display: block; color: var(--muted); font-size: 12px; }
+.recommendationLane strong { display: block; margin-top: 6px; font-family: "Cascadia Mono", Consolas, monospace; font-size: 22px; }
+.recommendationLane small { display: block; margin-top: 5px; color: var(--faint); line-height: 1.4; }
+.recommendationLane.good strong { color: var(--green); }
+.recommendationLane.info strong { color: var(--blue); }
+.recommendationLane.warn strong { color: var(--amber); }
+.recommendationLane.bad strong { color: var(--red); }
+.recommendationColumns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.recommendationColumn { min-width: 0; display: grid; gap: 8px; }
+.recommendationColumn > strong { font-size: 13px; color: #dbeafe; }
+.recommendationList { display: grid; gap: 8px; }
+.recommendationCard {
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--blue);
+  background: #0b1118;
+  border-radius: 7px;
+  padding: 10px;
+  min-width: 0;
+}
+.recommendationCard.good { border-left-color: var(--green); }
+.recommendationCard.warn { border-left-color: var(--amber); }
+.recommendationCard.bad { border-left-color: var(--red); }
+.recommendationCard > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.recommendationCard > div:first-child span { color: var(--muted); font-size: 12px; }
+.recommendationCard h3 { margin: 8px 0 0; font-size: 14px; }
+.recommendationCard p { margin: 8px 0 0; color: #cbd5e1; line-height: 1.55; font-size: 13px; }
+.recommendationStats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-top: 9px; }
+.recommendationStats small { border: 1px solid var(--line-soft); background: #091018; border-radius: 6px; padding: 6px; color: var(--muted); }
+.emptyInline { display: block; border: 1px dashed #344155; border-radius: 7px; padding: 12px; color: var(--muted); font-size: 13px; }
+.strategyActionList { display: grid; gap: 8px; margin-top: 12px; }
+.strategyActionList > strong { font-size: 13px; color: #dbeafe; }
+.strategyAction {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.35fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  border: 1px solid #4f3f18;
+  background: #151207;
+  border-radius: 7px;
+  padding: 10px;
+}
+.strategyAction span { display: block; color: var(--amber); font-weight: 700; }
+.strategyAction small { display: block; margin-top: 4px; color: #d6bd73; }
+.strategyAction p { margin: 0; color: #e5d08d; line-height: 1.55; font-size: 13px; }
 .alphaHeader, .alphaRow {
   display: grid;
   grid-template-columns: minmax(150px, 0.9fr) minmax(150px, 0.9fr) minmax(160px, 0.9fr) minmax(190px, 1fr) minmax(230px, 1.2fr);
@@ -775,7 +827,7 @@ button { color: inherit; }
   .mobileQuickLinks button.active { color: var(--text); border-color: #36526f; background: #121d2a; }
   .topbar { align-items: flex-start; flex-direction: column; }
   .statusRail { justify-content: flex-start; }
-  .metricGrid, .filterBar, .auditGrid, .safetyGrid, .priceGrid, .detailSection.twoPane, .definitionGrid, .stateBuckets, .candidateGroup, .indicatorRow, .playbookItem div, .loopSteps, .abCompareGrid, .alphaHeader, .alphaRow, .samplingSummary { grid-template-columns: 1fr; }
+  .metricGrid, .filterBar, .auditGrid, .safetyGrid, .priceGrid, .detailSection.twoPane, .definitionGrid, .stateBuckets, .candidateGroup, .indicatorRow, .playbookItem div, .loopSteps, .abCompareGrid, .alphaHeader, .alphaRow, .samplingSummary, .recommendationSummary, .recommendationColumns, .strategyAction { grid-template-columns: 1fr; }
   .alphaHeader { display: none; }
   .panelToolbar { align-items: stretch; flex-direction: column; }
   .panelToolbar button { justify-content: center; }
