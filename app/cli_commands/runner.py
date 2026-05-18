@@ -36,6 +36,7 @@ from app.services.darkflow_candidate_promotion import (
     open_darkflow_shadow_forward_samples,
     refresh_darkflow_candidate_promotion,
 )
+from app.services.darkflow_alpha import refresh_darkflow_waiting_candidates
 from app.services.darkflow_rules import darkflow_rulebook
 from app.services.feature_candidates import (
     feature_candidate_screen,
@@ -697,6 +698,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seconds between lightweight darkflow pipeline refreshes",
     )
     darkflow_loop.add_argument(
+        "--max-runs",
+        type=int,
+        default=0,
+        help="Stop after N runs. 0 means run until interrupted",
+    )
+
+    waiting_loop = subparsers.add_parser(
+        "waiting-loop",
+        help="Run lightweight waiting-candidate refreshes on a high-frequency schedule",
+    )
+    waiting_loop.add_argument(
+        "--shadow-limit",
+        type=int,
+        default=50,
+        help="Maximum waiting darkflow candidates to scan into isolated shadow-forward each refresh",
+    )
+    waiting_loop.add_argument(
+        "--max-candidate-age-hours",
+        type=float,
+        default=72.0,
+        help="Maximum candidate age for waiting refresh shadow scans",
+    )
+    waiting_loop.add_argument(
+        "--entry-tolerance-pct",
+        type=float,
+        default=0.025,
+        help="Entry tolerance used when evaluating waiting candidates",
+    )
+    waiting_loop.add_argument(
+        "--interval-seconds",
+        type=int,
+        default=60,
+        help="Seconds between waiting refresh runs",
+    )
+    waiting_loop.add_argument(
         "--max-runs",
         type=int,
         default=0,
@@ -1680,6 +1716,74 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 await asyncio.sleep(args.interval_seconds)
         except KeyboardInterrupt:
             print("darkflow loop interrupted")
+        finally:
+            await _stop_runtime_heartbeat(heartbeat_task)
+            await engine.dispose()
+        return 0
+
+    if args.command == "waiting-loop":
+        runtime_meta = _runtime_metadata(
+            "waiting-loop",
+            command="python -m app.cli waiting-loop",
+            interval_seconds=args.interval_seconds,
+            heartbeat_ttl_seconds=_heartbeat_ttl(args.interval_seconds),
+            shadow_limit=args.shadow_limit,
+            max_candidate_age_hours=args.max_candidate_age_hours,
+            entry_tolerance_pct=args.entry_tolerance_pct,
+            research_only=True,
+            opens_live_orders=False,
+            opens_paper_trades=False,
+        )
+        heartbeat_task = _start_runtime_heartbeat("waiting-loop", runtime_meta)
+        run_number = 0
+        try:
+            while True:
+                run_number += 1
+                _touch_runtime("waiting-loop", runtime_meta, run_number=run_number)
+                try:
+                    async with SessionLocal() as session:
+                        result = await refresh_darkflow_waiting_candidates(
+                            session,
+                            shadow_limit=args.shadow_limit,
+                            max_candidate_age_hours=args.max_candidate_age_hours,
+                            entry_tolerance_pct=args.entry_tolerance_pct,
+                        )
+                    _touch_runtime(
+                        "waiting-loop",
+                        runtime_meta,
+                        run_number=run_number,
+                        last_success_at=_utc_now_iso(),
+                        last_result={
+                            "shadow_scanned": result.get("steps", {}).get("promotion_refresh", {}).get("shadow_forward", {}).get("scanned"),
+                            "shadow_opened": result.get("steps", {}).get("promotion_refresh", {}).get("shadow_forward", {}).get("opened_count"),
+                        },
+                    )
+                    print(json.dumps(jsonable({"run": run_number, "status": "processed", "waiting_refresh": result}), ensure_ascii=False), flush=True)
+                except Exception as exc:  # noqa: BLE001
+                    _touch_runtime(
+                        "waiting-loop",
+                        runtime_meta,
+                        run_number=run_number,
+                        last_error_at=_utc_now_iso(),
+                        last_error=str(exc),
+                    )
+                    print(
+                        json.dumps(
+                            {
+                                "run": run_number,
+                                "status": "error",
+                                "reason": "waiting_loop_iteration_failed",
+                                "error": str(exc),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+                if args.max_runs and run_number >= args.max_runs:
+                    break
+                await asyncio.sleep(args.interval_seconds)
+        except KeyboardInterrupt:
+            print("waiting loop interrupted")
         finally:
             await _stop_runtime_heartbeat(heartbeat_task)
             await engine.dispose()

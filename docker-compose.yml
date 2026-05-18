@@ -231,6 +231,43 @@ services:
       - hfd_logs:/app/data/logs
     restart: unless-stopped
 
+  waiting-worker:
+    build:
+      context: .
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
+      REDIS_URL: redis://redis:6379/0
+      RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
+      EXTERNALIZE_RAW_PAYLOADS: "true"
+      LIVE_TRADING_ENABLED: "false"
+      TRADING_GATEWAY: disabled
+    command:
+      - python
+      - -m
+      - app.cli
+      - waiting-loop
+      - --shadow-limit
+      - "50"
+      - --entry-tolerance-pct
+      - "0.025"
+      - --interval-seconds
+      - "60"
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    volumes:
+      - hfd_raw_payloads:/var/lib/hfd/raw_payloads
+      - hfd_runtime:/app/data/runtime
+      - hfd_logs:/app/data/logs
+    restart: unless-stopped
+
   task-worker:
     build:
       context: .
