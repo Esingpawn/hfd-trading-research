@@ -50,6 +50,10 @@ DARKFLOW_SAMPLE_TARGETS = {
     "validation": DARKFLOW_SAMPLE_VALIDATION_TARGET,
     "pre_paper": DARKFLOW_SAMPLE_PRE_PAPER_TARGET,
 }
+DARKFLOW_TIME_EXIT_REVIEW_WINDOWS_MINUTES = (30, 60, 120, 240)
+DARKFLOW_TIME_EXIT_EXTENSION_MIN_SAMPLES = 3
+DARKFLOW_TIME_EXIT_EXTENSION_MIN_DELTA = 0.002
+DARKFLOW_TIME_EXIT_EXTENSION_MIN_IMPROVED_RATE = 0.60
 
 
 async def shadow_paper_scan(
@@ -449,6 +453,45 @@ async def darkflow_trend_extension_exit_report(session: AsyncSession) -> dict[st
     }
 
 
+async def darkflow_time_exit_review_report(session: AsyncSession) -> dict[str, Any]:
+    rows = await session.execute(
+        select(ShadowPaperTrade)
+        .where(
+            ShadowPaperTrade.strategy_name == DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+            ShadowPaperTrade.status == "closed",
+            ShadowPaperTrade.exit_reason == DARKFLOW_TIME_EXIT_REASON,
+            ShadowPaperTrade.closed_at.is_not(None),
+            ShadowPaperTrade.exit_price.is_not(None),
+        )
+        .order_by(ShadowPaperTrade.closed_at.desc())
+    )
+    trades = _unique_plan_trades(list(rows.scalars().all()))
+    post_exit_by_trade = await _time_exit_post_exit_windows(session, trades)
+    global_summary = _time_exit_global_summary(trades, post_exit_by_trade)
+    group_rows = _time_exit_group_rows(trades, post_exit_by_trade)
+    return {
+        "strategy_name": DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "time_exit_trade_count": len(trades),
+        "windows_minutes": list(DARKFLOW_TIME_EXIT_REVIEW_WINDOWS_MINUTES),
+        **global_summary,
+        "rows": group_rows,
+        "thresholds": {
+            "extension_min_samples": DARKFLOW_TIME_EXIT_EXTENSION_MIN_SAMPLES,
+            "extension_min_delta": DARKFLOW_TIME_EXIT_EXTENSION_MIN_DELTA,
+            "extension_min_improved_rate": DARKFLOW_TIME_EXIT_EXTENSION_MIN_IMPROVED_RATE,
+        },
+        "policy": _shadow_policy()
+        | {
+            "report_only": True,
+            "lineage": "core_darkflow_v2",
+            "mutates_trades": False,
+            "mutates_exit_rules": False,
+            "purpose": "review whether time exits should be extended per darkflow sub-portfolio",
+        },
+    }
+
+
 async def darkflow_subportfolio_recommendations_report(session: AsyncSession) -> dict[str, Any]:
     rows = await session.execute(
         select(ShadowPaperTrade)
@@ -655,6 +698,210 @@ def _darkflow_strategy_action(stats: dict[str, Any], exit_counts: dict[str, int]
             reasons.append("时间退出占比过高，说明该玩法在当前实现中缺少有效退出优势。")
         return "deweight", reasons
     return "review", ["策略级表现不够强，也没有弱到需要整体移出，保持人工复核。"]
+
+
+async def _time_exit_post_exit_windows(session: AsyncSession, trades: list[ShadowPaperTrade]) -> dict[str, dict[int, dict[str, Any]]]:
+    payload: dict[str, dict[int, dict[str, Any]]] = {}
+    for trade in trades:
+        if trade.closed_at is None or trade.exit_price is None:
+            continue
+        closed_at = _aware(trade.closed_at)
+        max_minutes = max(DARKFLOW_TIME_EXIT_REVIEW_WINDOWS_MINUTES)
+        price_rows = await session.execute(
+            select(PriceSnapshot)
+            .where(
+                PriceSnapshot.symbol == trade.symbol,
+                PriceSnapshot.collected_at > closed_at,
+                PriceSnapshot.collected_at <= closed_at + timedelta(minutes=max_minutes),
+            )
+            .order_by(PriceSnapshot.collected_at.asc())
+        )
+        prices = list(price_rows.scalars().all())
+        if not prices:
+            continue
+        trade_payload: dict[int, dict[str, Any]] = {}
+        for minutes in DARKFLOW_TIME_EXIT_REVIEW_WINDOWS_MINUTES:
+            window_prices = [item for item in prices if _aware(item.collected_at) <= closed_at + timedelta(minutes=minutes)]
+            if not window_prices:
+                continue
+            last_price = float(window_prices[-1].price)
+            total_pnl = _time_exit_net_pnl_if_held(trade, last_price)
+            incremental = _pnl(trade.direction, float(trade.exit_price), last_price) if trade.exit_price else None
+            hit, hit_at = _time_exit_first_hit(trade, window_prices)
+            trade_payload[minutes] = {
+                "last_price": last_price,
+                "last_price_at": window_prices[-1].collected_at,
+                "total_pnl_if_held": total_pnl,
+                "incremental_after_exit": incremental,
+                "delta_vs_actual": total_pnl - float(trade.pnl or 0.0),
+                "mfe_after_exit": _time_exit_mfe_after_exit(trade, window_prices),
+                "mae_after_exit": _time_exit_mae_after_exit(trade, window_prices),
+                "first_hit_after_exit": hit,
+                "first_hit_at": hit_at,
+            }
+        if trade_payload:
+            payload[trade.id] = trade_payload
+    return payload
+
+
+def _time_exit_net_pnl_if_held(trade: ShadowPaperTrade, mark_price: float) -> float:
+    exit_price = _execution_price(trade.direction, mark_price, side="exit", asset_tier=_asset_tier(trade.symbol))
+    return _net_pnl(trade, exit_price, exit_side="executed")
+
+
+def _time_exit_first_hit(trade: ShadowPaperTrade, prices: list[PriceSnapshot]) -> tuple[str | None, str | None]:
+    for item in prices:
+        price = float(item.price)
+        if trade.direction == "long":
+            hit = "stop_loss" if price <= trade.stop_loss else "take_profit" if price >= trade.take_profit else None
+        else:
+            hit = "stop_loss" if price >= trade.stop_loss else "take_profit" if price <= trade.take_profit else None
+        if hit:
+            return hit, item.collected_at.isoformat()
+    return None, None
+
+
+def _time_exit_mfe_after_exit(trade: ShadowPaperTrade, prices: list[PriceSnapshot]) -> float | None:
+    if trade.exit_price is None or not prices:
+        return None
+    return max(_pnl(trade.direction, float(trade.exit_price), float(item.price)) for item in prices)
+
+
+def _time_exit_mae_after_exit(trade: ShadowPaperTrade, prices: list[PriceSnapshot]) -> float | None:
+    if trade.exit_price is None or not prices:
+        return None
+    return min(_pnl(trade.direction, float(trade.exit_price), float(item.price)) for item in prices)
+
+
+def _time_exit_global_summary(trades: list[ShadowPaperTrade], windows_by_trade: dict[str, dict[int, dict[str, Any]]]) -> dict[str, Any]:
+    actual = [float(trade.pnl) for trade in trades if isinstance(trade.pnl, (int, float))]
+    return {
+        "actual": _time_exit_actual_stats(actual),
+        "windows": {
+            str(minutes): _time_exit_window_stats(trades, windows_by_trade, minutes)
+            for minutes in DARKFLOW_TIME_EXIT_REVIEW_WINDOWS_MINUTES
+        },
+    }
+
+
+def _time_exit_group_rows(trades: list[ShadowPaperTrade], windows_by_trade: dict[str, dict[int, dict[str, Any]]]) -> list[dict[str, Any]]:
+    buckets: dict[tuple[str, str, str, str], list[ShadowPaperTrade]] = {}
+    for trade in trades:
+        snapshot = _candidate_snapshot(trade)
+        strategy_id = str(snapshot.get("strategy_id") or "unknown")
+        market_state = str(snapshot.get("market_state") or "unknown")
+        buckets.setdefault((strategy_id, trade.symbol, trade.direction, market_state), []).append(trade)
+    rows: list[dict[str, Any]] = []
+    for (strategy_id, symbol, direction, market_state), items in buckets.items():
+        windows = {
+            str(minutes): _time_exit_window_stats(items, windows_by_trade, minutes)
+            for minutes in DARKFLOW_TIME_EXIT_REVIEW_WINDOWS_MINUTES
+        }
+        best_window, action, reasons = _time_exit_action(windows)
+        rows.append(
+            {
+                "group_key": "|".join([strategy_id, symbol, direction, market_state]),
+                "strategy_id": strategy_id,
+                "strategy_name": str(_candidate_snapshot(items[0]).get("strategy_name") or strategy_id),
+                "symbol": symbol,
+                "direction": direction,
+                "market_state": market_state,
+                "time_exit_trades": len(items),
+                "actual": _time_exit_actual_stats([float(item.pnl) for item in items if isinstance(item.pnl, (int, float))]),
+                "windows": windows,
+                "best_window_minutes": best_window,
+                "action": action,
+                "action_text": _time_exit_action_text(action),
+                "reasons": reasons,
+            }
+        )
+    return sorted(rows, key=_time_exit_row_rank, reverse=True)
+
+
+def _time_exit_window_stats(trades: list[ShadowPaperTrade], windows_by_trade: dict[str, dict[int, dict[str, Any]]], minutes: int) -> dict[str, Any]:
+    windows = [windows_by_trade.get(trade.id, {}).get(minutes) for trade in trades]
+    windows = [item for item in windows if item is not None]
+    total = [_number(item.get("total_pnl_if_held")) for item in windows]
+    incremental = [_number(item.get("incremental_after_exit")) for item in windows]
+    deltas = [_number(item.get("delta_vs_actual")) for item in windows]
+    hits = [item.get("first_hit_after_exit") for item in windows]
+    return {
+        "coverage": len(windows),
+        "coverage_rate": len(windows) / len(trades) if trades else None,
+        "avg_total_pnl_if_held": _mean_number(total),
+        "median_total_pnl_if_held": _median_number(total),
+        "win_rate_if_held": _positive_rate(total),
+        "avg_incremental_after_exit": _mean_number(incremental),
+        "median_incremental_after_exit": _median_number(incremental),
+        "avg_delta_vs_actual": _mean_number(deltas),
+        "median_delta_vs_actual": _median_number(deltas),
+        "improved_rate": _positive_rate(deltas),
+        "worsened_rate": _negative_rate(deltas),
+        "target_first_rate": hits.count("take_profit") / len(hits) if hits else None,
+        "stop_first_rate": hits.count("stop_loss") / len(hits) if hits else None,
+        "no_hit_rate": hits.count(None) / len(hits) if hits else None,
+    }
+
+
+def _time_exit_actual_stats(values: list[float]) -> dict[str, Any]:
+    return {
+        "avg_pnl": _mean_number(values),
+        "median_pnl": _median_number(values),
+        "win_rate": _positive_rate(values),
+    }
+
+
+def _time_exit_action(windows: dict[str, dict[str, Any]]) -> tuple[int | None, str, list[str]]:
+    qualified: list[tuple[int, dict[str, Any]]] = []
+    for raw_minutes, stats in windows.items():
+        coverage = int(stats.get("coverage") or 0)
+        avg_delta = _number(stats.get("avg_delta_vs_actual"))
+        improved_rate = _number(stats.get("improved_rate"))
+        if coverage >= DARKFLOW_TIME_EXIT_EXTENSION_MIN_SAMPLES and _at_least(avg_delta, DARKFLOW_TIME_EXIT_EXTENSION_MIN_DELTA) and _at_least(improved_rate, DARKFLOW_TIME_EXIT_EXTENSION_MIN_IMPROVED_RATE):
+            qualified.append((int(raw_minutes), stats))
+    if qualified:
+        minutes, stats = max(qualified, key=lambda item: (_number(item[1].get("avg_delta_vs_actual")) or -999.0, _number(item[1].get("improved_rate")) or 0.0))
+        return minutes, "extend_with_trailing_stop", [f"{minutes}m 继续持有的平均收益差和改善比例达到延长观察线。", "延长期必须带保护止损，不能裸持。"]
+    covered = [stats for stats in windows.values() if int(stats.get("coverage") or 0) >= DARKFLOW_TIME_EXIT_EXTENSION_MIN_SAMPLES]
+    harmful = [stats for stats in covered if (_number(stats.get("avg_delta_vs_actual")) or 0.0) < 0]
+    if covered and len(harmful) == len(covered):
+        return None, "keep_time_exit", ["当前已覆盖窗口继续持有平均表现更差，保留原时间退出。"]
+    return None, "collect_more", ["样本或改善幅度不足，继续只读观察。"]
+
+
+def _time_exit_action_text(action: str) -> str:
+    return {
+        "extend_with_trailing_stop": "允许延长但必须带保护止损",
+        "keep_time_exit": "保持当前时间退出",
+        "collect_more": "继续收集复盘样本",
+    }.get(action, action)
+
+
+def _time_exit_row_rank(row: dict[str, Any]) -> tuple[int, int, float]:
+    action_rank = {"extend_with_trailing_stop": 3, "collect_more": 2, "keep_time_exit": 1}.get(str(row.get("action")), 0)
+    best_window = row.get("best_window_minutes")
+    best_stats = row.get("windows", {}).get(str(best_window), {}) if best_window is not None else {}
+    return (action_rank, int(row.get("time_exit_trades") or 0), _number(best_stats.get("avg_delta_vs_actual")) or -999.0)
+
+
+def _mean_number(values: list[float | None]) -> float | None:
+    parsed = [float(value) for value in values if value is not None]
+    return mean(parsed) if parsed else None
+
+
+def _median_number(values: list[float | None]) -> float | None:
+    parsed = [float(value) for value in values if value is not None]
+    return median(parsed) if parsed else None
+
+
+def _positive_rate(values: list[float | None]) -> float | None:
+    parsed = [float(value) for value in values if value is not None]
+    return sum(1 for value in parsed if value > 0) / len(parsed) if parsed else None
+
+
+def _negative_rate(values: list[float | None]) -> float | None:
+    parsed = [float(value) for value in values if value is not None]
+    return sum(1 for value in parsed if value < 0) / len(parsed) if parsed else None
 
 
 def _exit_reason_share(counts: dict[str, int], reason: str) -> float | None:

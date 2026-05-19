@@ -10,6 +10,7 @@ from app.services.shadow_paper import (
     SHADOW_FEE_RATE,
     darkflow_playbook_attribution_report,
     darkflow_subportfolio_recommendations_report,
+    darkflow_time_exit_review_report,
     darkflow_trend_extension_exit_report,
     mark_shadow_paper_trades,
     shadow_paper_replay,
@@ -1065,6 +1066,73 @@ async def test_darkflow_subportfolio_recommendations_marks_paper_review_ready_af
     assert row["sample_stage"] == "validation"
 
 
+@pytest.mark.asyncio
+async def test_darkflow_time_exit_review_recommends_segmented_extension(session) -> None:
+    opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(3):
+        closed_at = opened_at + timedelta(hours=index)
+        session.add(
+            _darkflow_shadow_trade(
+                key=f"time-helped-{index}",
+                symbol="HYPEUSDT",
+                direction="long",
+                strategy_id="liquidity_sweep_reversal",
+                strategy_name="扫损反转",
+                market_state="liquidity_hunt_reversal",
+                pnl=-0.002,
+                exit_reason="shadow_forward_time_exit",
+                opened_at=closed_at - timedelta(minutes=120),
+            )
+        )
+        session.add(
+            PriceSnapshot(
+                symbol="HYPEUSDT",
+                price=104.0,
+                raw_payload={},
+                collected_at=closed_at + timedelta(minutes=120),
+                created_at=closed_at + timedelta(minutes=120),
+            )
+        )
+    for index in range(3):
+        closed_at = opened_at + timedelta(hours=6 + index)
+        session.add(
+            _darkflow_shadow_trade(
+                key=f"time-hurt-{index}",
+                symbol="TONUSDT",
+                direction="long",
+                strategy_id="pullback_to_cost",
+                strategy_name="成本带回踩",
+                market_state="cost_pullback",
+                pnl=0.004,
+                exit_reason="shadow_forward_time_exit",
+                opened_at=closed_at - timedelta(minutes=120),
+            )
+        )
+        session.add(
+            PriceSnapshot(
+                symbol="TONUSDT",
+                price=97.0,
+                raw_payload={},
+                collected_at=closed_at + timedelta(minutes=120),
+                created_at=closed_at + timedelta(minutes=120),
+            )
+        )
+    await session.commit()
+
+    report = await darkflow_time_exit_review_report(session)
+    by_key = {row["group_key"]: row for row in report["rows"]}
+    helped = by_key["liquidity_sweep_reversal|HYPEUSDT|long|liquidity_hunt_reversal"]
+    hurt = by_key["pullback_to_cost|TONUSDT|long|cost_pullback"]
+
+    assert report["time_exit_trade_count"] == 6
+    assert helped["action"] == "extend_with_trailing_stop"
+    assert helped["best_window_minutes"] == 120
+    assert helped["windows"]["120"]["avg_delta_vs_actual"] > 0
+    assert hurt["action"] == "keep_time_exit"
+    assert hurt["windows"]["120"]["avg_delta_vs_actual"] < 0
+    assert report["policy"]["mutates_trades"] is False
+
+
 def _darkflow_shadow_trade(
     *,
     key: str,
@@ -1090,6 +1158,7 @@ def _darkflow_shadow_trade(
         take_profit=103.0,
         position_size=1.0,
         status="closed",
+        exit_price=100.0,
         pnl=pnl,
         exit_reason=exit_reason,
         opened_at=opened_at,

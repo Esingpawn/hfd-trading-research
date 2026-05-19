@@ -671,6 +671,27 @@ button { color: inherit; }
 .progressMeta span { border: 1px solid #1f4c3a; border-radius: 6px; padding: 6px; color: #bdebd1; font-size: 12px; }
 .whitelistProgressCard p { margin: 8px 0 0; color: #a7f3d0; font-size: 12px; line-height: 1.5; }
 .emptyInline { display: block; border: 1px dashed #344155; border-radius: 7px; padding: 12px; color: var(--muted); font-size: 13px; }
+.timeExitColumns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
+.timeExitColumn { min-width: 0; display: grid; gap: 8px; align-content: start; }
+.timeExitColumn > strong { color: #dbeafe; font-size: 13px; }
+.timeExitList { display: grid; gap: 8px; }
+.timeExitCard {
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--blue);
+  background: #0b1118;
+  border-radius: 7px;
+  padding: 10px;
+  min-width: 0;
+}
+.timeExitCard.good { border-left-color: var(--green); background: #071512; }
+.timeExitCard.info { border-left-color: var(--blue); }
+.timeExitCard.bad { border-left-color: var(--red); background: #170b0b; }
+.timeExitTitle { display: flex; justify-content: space-between; align-items: start; gap: 10px; }
+.timeExitTitle strong { display: block; color: #e5e7eb; font-size: 14px; }
+.timeExitTitle span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.timeExitStats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-top: 9px; }
+.timeExitStats small { border: 1px solid var(--line-soft); background: #091018; border-radius: 6px; padding: 6px; color: #cbd5e1; font-size: 12px; }
+.timeExitCard p { margin: 8px 0 0; color: #cbd5e1; font-size: 12px; line-height: 1.55; }
 .strategyActionList { display: grid; gap: 8px; margin-top: 12px; }
 .strategyActionList > strong { font-size: 13px; color: #dbeafe; }
 .strategyAction {
@@ -886,7 +907,7 @@ button { color: inherit; }
   .mobileQuickLinks button.active { color: var(--text); border-color: #36526f; background: #121d2a; }
   .topbar { align-items: flex-start; flex-direction: column; }
   .statusRail { justify-content: flex-start; }
-  .metricGrid, .filterBar, .auditGrid, .safetyGrid, .priceGrid, .detailSection.twoPane, .definitionGrid, .stateBuckets, .candidateGroup, .indicatorRow, .playbookItem div, .loopSteps, .abCompareGrid, .alphaHeader, .alphaRow, .tradeLedgerRow, .tradeLevels, .tradeExcursion, .samplingSummary, .recommendationSummary, .recommendationColumns, .whitelistProgressList, .progressMeta, .strategyAction { grid-template-columns: 1fr; }
+  .metricGrid, .filterBar, .auditGrid, .safetyGrid, .priceGrid, .detailSection.twoPane, .definitionGrid, .stateBuckets, .candidateGroup, .indicatorRow, .playbookItem div, .loopSteps, .abCompareGrid, .alphaHeader, .alphaRow, .tradeLedgerRow, .tradeLevels, .tradeExcursion, .samplingSummary, .recommendationSummary, .recommendationColumns, .whitelistProgressList, .progressMeta, .timeExitColumns, .timeExitStats, .strategyAction { grid-template-columns: 1fr; }
   .alphaHeader { display: none; }
   .panelToolbar { align-items: stretch; flex-direction: column; }
   .panelToolbar button { justify-content: center; }

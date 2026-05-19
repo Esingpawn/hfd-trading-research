@@ -6,6 +6,7 @@ from app.api.deps import SessionDep
 from app.services.shadow_paper import (
     darkflow_playbook_attribution_report,
     darkflow_subportfolio_recommendations_report,
+    darkflow_time_exit_review_report,
     darkflow_trend_extension_exit_report,
     mark_shadow_paper_trades,
     shadow_paper_promotion_report,
@@ -102,3 +103,8 @@ async def get_darkflow_subportfolio_recommendations(session: SessionDep) -> dict
 @router.get("/shadow-paper/darkflow-trend-extension-exit")
 async def get_darkflow_trend_extension_exit(session: SessionDep) -> dict[str, object]:
     return await darkflow_trend_extension_exit_report(session)
+
+
+@router.get("/shadow-paper/darkflow-time-exit-review")
+async def get_darkflow_time_exit_review(session: SessionDep) -> dict[str, object]:
+    return await darkflow_time_exit_review_report(session)

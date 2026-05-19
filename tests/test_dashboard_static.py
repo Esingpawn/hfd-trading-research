@@ -139,3 +139,18 @@ def test_react_dashboard_exposes_trade_ledger_precision_and_exit_reason() -> Non
     assert "最大浮盈" in source
     assert "最大浮亏" in source
     assert "旧记录缺少出场原因" in source
+
+
+def test_react_dashboard_exposes_time_exit_review_report() -> None:
+    source = Path("web/src/main.tsx").read_text(encoding="utf-8")
+    styles = Path("web/src/styles.css").read_text(encoding="utf-8")
+
+    assert "/shadow-paper/darkflow-time-exit-review" in source
+    assert "时间退出复盘" in source
+    assert "只读报告" in source
+    assert "允许延长观察" in source
+    assert "继续收集样本" in source
+    assert "保持时间退出" in source
+    assert "mutates_exit_rules" in source
+    assert "TimeExitColumn" in source
+    assert "timeExitColumns" in styles

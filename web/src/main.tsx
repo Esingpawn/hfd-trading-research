@@ -712,6 +712,51 @@ type DarkflowStrategyActionRow = ShadowUniquePlanStats & {
   reasons?: string[];
 };
 
+type TimeExitWindowStats = {
+  coverage?: number;
+  coverage_rate?: number | null;
+  avg_total_pnl_if_held?: number | null;
+  median_total_pnl_if_held?: number | null;
+  win_rate_if_held?: number | null;
+  avg_incremental_after_exit?: number | null;
+  median_incremental_after_exit?: number | null;
+  avg_delta_vs_actual?: number | null;
+  median_delta_vs_actual?: number | null;
+  improved_rate?: number | null;
+  worsened_rate?: number | null;
+  target_first_rate?: number | null;
+  stop_first_rate?: number | null;
+  no_hit_rate?: number | null;
+};
+
+type DarkflowTimeExitReviewRow = {
+  group_key: string;
+  strategy_id: string;
+  strategy_name?: string;
+  symbol: string;
+  direction: string;
+  market_state: string;
+  time_exit_trades: number;
+  actual?: { avg_pnl?: number | null; median_pnl?: number | null; win_rate?: number | null };
+  windows: Record<string, TimeExitWindowStats>;
+  best_window_minutes?: number | null;
+  action: string;
+  action_text?: string;
+  reasons?: string[];
+};
+
+type DarkflowTimeExitReviewReport = {
+  strategy_name?: string;
+  generated_at?: string | null;
+  time_exit_trade_count?: number;
+  windows_minutes?: number[];
+  actual?: { avg_pnl?: number | null; median_pnl?: number | null; win_rate?: number | null };
+  windows?: Record<string, TimeExitWindowStats>;
+  rows: DarkflowTimeExitReviewRow[];
+  thresholds?: Record<string, number>;
+  policy?: Policy & { report_only?: boolean; mutates_trades?: boolean; mutates_exit_rules?: boolean };
+};
+
 type TrendExtensionExitReport = {
   strategy_name?: string;
   strategy_id?: string;
@@ -769,6 +814,7 @@ type LoadState = {
   alphaScoreboard: DarkflowAlphaScoreboard | null;
   playbookAttribution: DarkflowPlaybookAttributionReport | null;
   darkflowRecommendations: DarkflowSubportfolioRecommendationsReport | null;
+  timeExitReview: DarkflowTimeExitReviewReport | null;
   trendExtensionExit: TrendExtensionExitReport | null;
   rulebook: RulebookReport | null;
   playbooks: PlaybookCatalogReport | null;
@@ -804,6 +850,7 @@ const EMPTY_STATE: LoadState = {
   alphaScoreboard: null,
   playbookAttribution: null,
   darkflowRecommendations: null,
+  timeExitReview: null,
   trendExtensionExit: null,
   rulebook: null,
   playbooks: null,
@@ -972,6 +1019,9 @@ function App() {
     if (activePage === "shadow" && data.darkflowRecommendations === null && !errors.darkflowRecommendations) {
       void loadSection("darkflowRecommendations", () => fetchJson<DarkflowSubportfolioRecommendationsReport>("/shadow-paper/darkflow-subportfolio-recommendations", 16000));
     }
+    if (activePage === "shadow" && data.timeExitReview === null && !errors.timeExitReview) {
+      void loadSection("timeExitReview", () => fetchJson<DarkflowTimeExitReviewReport>("/shadow-paper/darkflow-time-exit-review", 20000));
+    }
     if (activePage === "shadow" && data.trendExtensionExit === null && !errors.trendExtensionExit) {
       void loadSection("trendExtensionExit", () => fetchJson<TrendExtensionExitReport>("/shadow-paper/darkflow-trend-extension-exit", 16000));
     }
@@ -988,7 +1038,7 @@ function App() {
       if (data.featurePaperAb === null && !errors.featurePaperAb) void loadSection("featurePaperAb", () => fetchJson<FeaturePaperAbReport>("/features/paper-ab/latest?horizon=30m", 16000));
       if (data.featureSegmentPaperAb === null && !errors.featureSegmentPaperAb) void loadSection("featureSegmentPaperAb", () => fetchJson<FeaturePaperAbReport>("/features/segment-paper-ab/latest?horizon=30m", 16000));
     }
-  }, [activePage, data.backtestsLatest, data.playbookBacktest, data.paperStats, data.paperTrades, data.shadow, data.shadowTrades, data.alphaScoreboard, data.playbookAttribution, data.darkflowRecommendations, data.trendExtensionExit, data.rulebook, data.playbooks, data.indicatorCoverage, data.experimentEffectiveness, data.featurePaperAb, data.featureSegmentPaperAb, errors.backtestsLatest, errors.playbookBacktest, errors.paperStats, errors.paperTrades, errors.shadow, errors.shadowTrades, errors.alphaScoreboard, errors.playbookAttribution, errors.darkflowRecommendations, errors.trendExtensionExit, errors.rulebook, errors.playbooks, errors.indicatorCoverage, errors.experimentEffectiveness, errors.featurePaperAb, errors.featureSegmentPaperAb]);
+  }, [activePage, data.backtestsLatest, data.playbookBacktest, data.paperStats, data.paperTrades, data.shadow, data.shadowTrades, data.alphaScoreboard, data.playbookAttribution, data.darkflowRecommendations, data.timeExitReview, data.trendExtensionExit, data.rulebook, data.playbooks, data.indicatorCoverage, data.experimentEffectiveness, data.featurePaperAb, data.featureSegmentPaperAb, errors.backtestsLatest, errors.playbookBacktest, errors.paperStats, errors.paperTrades, errors.shadow, errors.shadowTrades, errors.alphaScoreboard, errors.playbookAttribution, errors.darkflowRecommendations, errors.timeExitReview, errors.trendExtensionExit, errors.rulebook, errors.playbooks, errors.indicatorCoverage, errors.experimentEffectiveness, errors.featurePaperAb, errors.featureSegmentPaperAb]);
 
   async function queueDarkflowAlphaAcceleration() {
     setTaskMessage("正在排队暗流 Alpha 加速巡检...");
@@ -1467,6 +1517,11 @@ function ShadowPage({ data, rows, onAccelerate }: { data: LoadState; rows: CardR
   const blockedRows = recommendationRows.filter((item) => item.recommendation === "pause" || item.recommendation === "blacklist").slice(0, 6);
   const deweightRows = strategyActions.filter((item) => item.main_path_action === "deweight" || item.main_path_action === "review").slice(0, 4);
   const trendExit = data.trendExtensionExit;
+  const timeExit = data.timeExitReview;
+  const timeExitRows = timeExit?.rows ?? [];
+  const timeExitExtendRows = timeExitRows.filter((item) => item.action === "extend_with_trailing_stop").slice(0, 8);
+  const timeExitCollectRows = timeExitRows.filter((item) => item.action === "collect_more").slice(0, 6);
+  const timeExitKeepRows = timeExitRows.filter((item) => item.action === "keep_time_exit").slice(0, 5);
   return (
     <div className="pageStack">
       <section className="metricGrid compactMetrics">
@@ -1559,6 +1614,20 @@ function ShadowPage({ data, rows, onAccelerate }: { data: LoadState; rows: CardR
       </Panel>
       <Panel title="最近影子交易" subtitle="红绿显示真实收益，出场原因区分止盈、止损、时间退出和仍持仓">
         <TradeLedger trades={(data.shadowTrades ?? []).slice(0, 50)} empty="暂无影子交易记录。等待候选进入冻结入场区间后，系统会自动积累隔离样本。" />
+      </Panel>
+      <Panel title="时间退出复盘" subtitle={`只读报告，判断哪些子组合可以延长观察 · 更新时间 ${timeText(timeExit?.generated_at)}`}>
+        <div className="metricGrid compactMetrics">
+          <Metric title="时间退出样本" value={fmt(timeExit?.time_exit_trade_count, 0)} detail={`当前均值 ${precisePct(timeExit?.actual?.avg_pnl)}`} tone="info" />
+          <Metric title="4h 继续持有均值" value={precisePct(timeExit?.windows?.["240"]?.avg_total_pnl_if_held)} detail={`改善 ${precisePct(timeExit?.windows?.["240"]?.avg_delta_vs_actual)}`} tone="good" />
+          <Metric title="4h 改善比例" value={pct(timeExit?.windows?.["240"]?.improved_rate)} detail={`先到目标 ${pct(timeExit?.windows?.["240"]?.target_first_rate)} · 先到止损 ${pct(timeExit?.windows?.["240"]?.stop_first_rate)}`} tone="warn" />
+          <Metric title="可延长组合" value={fmt(timeExitExtendRows.length, 0)} detail={`待补样 ${fmt(timeExitCollectRows.length, 0)} · 保留原退出 ${fmt(timeExitKeepRows.length, 0)}`} tone={timeExitExtendRows.length ? "good" : "warn"} />
+        </div>
+        <div className="timeExitColumns">
+          <TimeExitColumn title="允许延长观察" rows={timeExitExtendRows} empty="暂无达到延长门槛的子组合。" />
+          <TimeExitColumn title="继续收集样本" rows={timeExitCollectRows} empty="暂无处于中间态的时间退出组合。" />
+          <TimeExitColumn title="保持时间退出" rows={timeExitKeepRows} empty="暂无明确需要保持短窗口的子组合。" />
+        </div>
+        {!timeExitRows.length && <StateBox type="empty" title="暂无时间退出复盘" text="等待更多 shadow_forward_time_exit 样本和平仓后的价格路径。" />}
       </Panel>
       <Panel title="候选策略表现" subtitle="按候选来源聚合，优先看样本数、盈利因子和回撤">
         <div className="tableList">
@@ -1690,6 +1759,43 @@ function WhitelistProgressCard({ row }: { row: DarkflowRecommendationRow }) {
         <span>{sampleStageText(row.sample_stage)}</span>
       </div>
       <p>{row.paper_review_ready ? "已达到第一复核样本线，但真实纸上复核仍需人工确认。" : "还没达到 30 笔第一复核线，不能拿它判断长期胜率。"}</p>
+    </div>
+  );
+}
+
+function TimeExitColumn({ title, rows, empty }: { title: string; rows: DarkflowTimeExitReviewRow[]; empty: string }) {
+  return (
+    <div className="timeExitColumn">
+      <strong>{title}</strong>
+      <div className="timeExitList">
+        {rows.map((row) => {
+          const bestKey = row.best_window_minutes ? String(row.best_window_minutes) : "240";
+          const best = row.windows?.[bestKey] ?? row.windows?.["240"] ?? {};
+          return (
+            <div className={`timeExitCard ${timeExitActionTone(row.action)}`} key={row.group_key}>
+              <div className="timeExitTitle">
+                <div>
+                  <strong>{row.symbol} · {directionText(row.direction)}</strong>
+                  <span>{strategyText(row.strategy_id)} · {marketStateText(row.market_state)}</span>
+                </div>
+                <StatusBadge tone={timeExitActionTone(row.action)} label={timeExitActionText(row.action)} />
+              </div>
+              <div className="timeExitStats">
+                <small>样本 {fmt(row.time_exit_trades, 0)}</small>
+                <small>当前均值 {precisePct(row.actual?.avg_pnl)}</small>
+                <small>最佳窗口 {row.best_window_minutes ? `${row.best_window_minutes} 分钟` : "未定"}</small>
+                <small>覆盖 {fmt(best.coverage, 0)}</small>
+                <small>持有后均值 {precisePct(best.avg_total_pnl_if_held)}</small>
+                <small>改善差 {precisePct(best.avg_delta_vs_actual)}</small>
+                <small>改善比例 {pct(best.improved_rate)}</small>
+                <small>先到目标 {pct(best.target_first_rate)}</small>
+              </div>
+              <p>{(row.reasons ?? [row.action_text ?? "继续等待更多时间退出复盘证据。"]).join(" ")}</p>
+            </div>
+          );
+        })}
+        {!rows.length && <span className="emptyInline">{empty}</span>}
+      </div>
     </div>
   );
 }
@@ -2447,7 +2553,7 @@ function relevantLoadErrors(page: PageId, errors: LoadErrors): LoadErrors {
     experimentLab: ["indicatorCoverage", "experimentEffectiveness", "alphaScoreboard", "featurePaperAb", "featureSegmentPaperAb"],
     backtest: ["darkflow", "backtestsLatest", "playbookBacktest"],
     paperTrading: ["paperStats", "paperTrades"],
-    shadow: ["shadow", "shadowTrades", "alphaScoreboard", "playbookAttribution", "darkflowRecommendations", "trendExtensionExit"],
+    shadow: ["shadow", "shadowTrades", "alphaScoreboard", "playbookAttribution", "darkflowRecommendations", "timeExitReview", "trendExtensionExit"],
     indicatorMap: ["rulebook", "playbooks", "indicatorCoverage"],
     legacyLab: ["featurePaperAb", "featureSegmentPaperAb"],
     dataFreshness: ["entryStates"],
@@ -2640,6 +2746,8 @@ function alphaSamplingText(row: DarkflowAlphaRow) { return ({ prioritize: "优�
 function sampleStageText(value?: string) { return ({ first_review: "第一复核线", validation: "验证线", pre_paper: "实盘前观察线", mature: "样本成熟" } as Record<string, string>)[value || ""] ?? "补样中"; }
 function recommendationText(value: string) { return ({ whitelist: "白名单补样", keep_sampling: "继续补样", observe: "继续观察", pause: "暂停补样", blacklist: "黑名单隔离" } as Record<string, string>)[value] ?? readableCode(value); }
 function recommendationTone(value: string) { return ({ whitelist: "good", keep_sampling: "info", observe: "warn", pause: "bad", blacklist: "bad" } as Record<string, string>)[value] ?? "info"; }
+function timeExitActionText(value: string) { return ({ extend_with_trailing_stop: "允许延长观察", keep_time_exit: "保持时间退出", collect_more: "继续收集样本" } as Record<string, string>)[value] ?? readableCode(value); }
+function timeExitActionTone(value: string) { return ({ extend_with_trailing_stop: "good", keep_time_exit: "bad", collect_more: "info" } as Record<string, string>)[value] ?? "info"; }
 function mainPathActionText(value: string) { return ({ keep: "主路径保留", collect_more: "继续补样", review: "人工复核", deweight: "主路径降权" } as Record<string, string>)[value] ?? readableCode(value); }
 function signalText(value: string) { return signalDetail(value).title; }
 function signalDetail(value: string): ReasonItem {
@@ -2687,7 +2795,7 @@ function auditText(value: string) { return ({ missing: "缺失", passed: "通过
 function shadowText(value: string) { return ({ not_started: "未开始", collecting: "采集中", retired: "已退休", failed: "未达标", passed: "已达标", closed: "已结束" } as Record<string, string>)[value] ?? value; }
 function entryStateText(value: string) { return ({ triggered: "已触发", waiting: "等待入场", missed: "已错过", expired: "时间过期", invalidated: "条件作废", missing_price: "缺少价格", invalid_shape: "形态异常", entry_plan_retired: "入场计划已退休", blocked: "研究阻断", shadow_candidate: "影子候选" } as Record<string, string>)[value] ?? value.replace(/_/g, " "); }
 function stateReasonText(value: string) { return ({ mark_price_inside_frozen_entry_range: "价格进入冻结入场区间", awaiting_frozen_entry_range: "尚未进入冻结入场区间", entry_range_missed: "价格已越过入场区间", valid_until_passed: "超过有效期", price_crosses_invalidation: "触发失效价", missing_latest_price: "缺少最新价格", invalid_long_frozen_entry_range: "多头入场区间异常", invalid_short_frozen_entry_range: "空头入场区间异常" } as Record<string, string>)[value] ?? blockerText(value); }
-function sectionLabel(key: SectionKey) { return ({ summary: "系统摘要", quality: "数据质量", cards: "交易卡片", candidates: "候选池", promotionGate: "晋级闸门", entryStates: "入场计划", darkflow: "暗流交互回测", backtestsLatest: "批量回测", playbookBacktest: "剧本回测", paperStats: "纸上统计", paperTrades: "纸上交易明细", shadow: "影子纸上", shadowTrades: "影子交易明细", alphaScoreboard: "暗流 Alpha 记分牌", playbookAttribution: "剧本级前向归因", darkflowRecommendations: "子组合推荐", trendExtensionExit: "趋势延展退出评估", rulebook: "教程规则", playbooks: "策略剧本", indicatorCoverage: "指标覆盖", experimentEffectiveness: "实验有效性", featurePaperAb: "特征纸上 A/B", featureSegmentPaperAb: "分段纸上 A/B", safety: "安全开关" } as Record<SectionKey, string>)[key]; }
+function sectionLabel(key: SectionKey) { return ({ summary: "系统摘要", quality: "数据质量", cards: "交易卡片", candidates: "候选池", promotionGate: "晋级闸门", entryStates: "入场计划", waitingCandidates: "等待入场候选", darkflow: "暗流交互回测", backtestsLatest: "批量回测", playbookBacktest: "剧本回测", paperStats: "纸上统计", paperTrades: "纸上交易明细", shadow: "影子纸上", shadowTrades: "影子交易明细", alphaScoreboard: "暗流 Alpha 记分牌", playbookAttribution: "剧本级前向归因", darkflowRecommendations: "子组合推荐", timeExitReview: "时间退出复盘", trendExtensionExit: "趋势延展退出评估", rulebook: "教程规则", playbooks: "策略剧本", indicatorCoverage: "指标覆盖", experimentEffectiveness: "实验有效性", featurePaperAb: "特征纸上 A/B", featureSegmentPaperAb: "分段纸上 A/B", safety: "安全开关" } as Record<SectionKey, string>)[key]; }
 function pageLabel(page: PageId) { return NAV_GROUPS.flatMap((group) => group.items).find((item) => item.id === page)?.label ?? page; }
 function pageTitleFromHash() { return pageLabel(pageFromHash()); }
 function pageFromHash(): PageId { const raw = window.location.hash.replace("#", ""); return NAV_GROUPS.flatMap((group) => group.items).some((item) => item.id === raw) ? raw as PageId : "overview"; }
