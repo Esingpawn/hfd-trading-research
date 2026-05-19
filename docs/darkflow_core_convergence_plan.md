@@ -158,6 +158,44 @@ Acceptance:
 - Darkflow v2 shadow report has its own strategy name and promotion gates.
 - Real paper remains disabled until v2 shadow gates pass.
 
+### 2026-05-19 Time-Exit Evidence Note
+
+Production shadow-forward samples showed that most closed v2 shadow trades were exiting via `shadow_forward_time_exit`. A read-only production review of 160 time-exit trades compared actual time-exit PnL against hypothetical continued holding after exit:
+
+| Continued hold after time exit | Avg PnL if held | Median PnL if held | Win rate if held | Avg delta vs actual exit | Improved share |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 30m | -0.0374% | -0.1083% | 44.4% | +0.0417% | 45.6% |
+| 60m | -0.0684% | +0.0047% | 50.6% | +0.0106% | 61.3% |
+| 120m | -0.0242% | -0.1340% | 45.6% | +0.0549% | 46.9% |
+| 240m | +0.1651% | +0.0046% | 50.0% | +0.2441% | 53.1% |
+
+Actual time-exit baseline: average PnL -0.0791%, median PnL -0.1442%, win rate 29.4%.
+
+Decision: the fixed time-exit window is likely too tight for some sub-portfolios, but it must not be globally loosened. Time-exit extension must be segmented by `strategy_id + symbol + direction + market_state`, because several groups benefit from holding while others deteriorate sharply.
+
+Observed groups where extending looked useful:
+
+- `liquidity_sweep_reversal|ZECUSDT|long|liquidity_hunt_reversal`
+- `liquidity_sweep_reversal|HYPEUSDT|long|liquidity_hunt_reversal`
+- `trend_ride_extension|TONUSDT|long|trend_extension`
+- `trend_ride_extension|ETHUSDT|short|trend_extension`
+- `pullback_to_cost|ETHUSDT|short|cost_pullback`
+
+Observed groups where extending looked harmful:
+
+- `pullback_to_cost|TONUSDT|long|cost_pullback`
+- `liquidity_sweep_reversal|HYPEUSDT|short|liquidity_hunt_reversal`
+- `liquidity_sweep_reversal|ZECUSDT|short|liquidity_hunt_reversal`
+- `trend_ride_extension|BTCUSDT|long|trend_extension`
+
+Required implementation direction:
+
+- Replace blind `shadow_forward_time_exit` with `time_exit_review` for eligible strong/whitelisted sub-portfolios.
+- Allow 120m or 240m continuation only when sub-portfolio evidence supports it.
+- Attach a protective trailing stop during extension; never extend naked exposure.
+- Add a dashboard report for time-exit post-exit PnL by sub-portfolio.
+- Keep weak or harmful extension groups on the current shorter exit window.
+
 ## Phase 6: Dashboard Convergence
 
 Goal: make the product reflect the new core path.
