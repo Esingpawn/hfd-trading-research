@@ -558,6 +558,40 @@ button { color: inherit; }
 .researchRow, .compactRow, .paperTradeRow { cursor: default; }
 .researchRow:hover, .compactRow:hover, .paperTradeRow:hover { border-color: var(--line-soft); background: #0b1118; }
 
+.tradeLedger { display: grid; gap: 8px; }
+.tradeLedgerRow {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(100px, 0.6fr) minmax(150px, 0.9fr) minmax(220px, 1.2fr) minmax(220px, 1.2fr);
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line-soft);
+  border-left: 4px solid #64748b;
+  background: #0b1118;
+  border-radius: 7px;
+  padding: 10px;
+}
+.tradeLedgerRow.profit { border-left-color: var(--green); background: #071511; }
+.tradeLedgerRow.loss { border-left-color: var(--red); background: #180b0b; }
+.tradeLedgerRow.open { border-left-color: var(--blue); background: #09111b; }
+.tradeLedgerRow.flat { border-left-color: var(--amber); }
+.tradeIdentity strong { display: block; font-family: "Cascadia Mono", Consolas, monospace; font-size: 15px; }
+.tradeIdentity span, .tradeExitBlock span { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.tradeResultBlock strong { display: block; font-family: "Cascadia Mono", Consolas, monospace; font-size: 18px; }
+.tradeLedgerRow.profit .tradeResultBlock strong { color: var(--green); }
+.tradeLedgerRow.loss .tradeResultBlock strong { color: var(--red); }
+.tradeLedgerRow.open .tradeResultBlock strong { color: var(--blue); }
+.tradeResultBlock span { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+.tradeLevels, .tradeExcursion { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.tradeLevels span, .tradeExcursion span {
+  border: 1px solid var(--line-soft);
+  background: #091018;
+  border-radius: 6px;
+  padding: 6px;
+  color: #cbd5e1;
+  font-size: 12px;
+}
+.tradeExcursion small { grid-column: 1 / -1; color: var(--faint); font-size: 12px; line-height: 1.45; }
+
 .alphaTable { display: grid; gap: 8px; }
 .samplingSummary {
   display: grid;
@@ -852,7 +886,7 @@ button { color: inherit; }
   .mobileQuickLinks button.active { color: var(--text); border-color: #36526f; background: #121d2a; }
   .topbar { align-items: flex-start; flex-direction: column; }
   .statusRail { justify-content: flex-start; }
-  .metricGrid, .filterBar, .auditGrid, .safetyGrid, .priceGrid, .detailSection.twoPane, .definitionGrid, .stateBuckets, .candidateGroup, .indicatorRow, .playbookItem div, .loopSteps, .abCompareGrid, .alphaHeader, .alphaRow, .samplingSummary, .recommendationSummary, .recommendationColumns, .whitelistProgressList, .progressMeta, .strategyAction { grid-template-columns: 1fr; }
+  .metricGrid, .filterBar, .auditGrid, .safetyGrid, .priceGrid, .detailSection.twoPane, .definitionGrid, .stateBuckets, .candidateGroup, .indicatorRow, .playbookItem div, .loopSteps, .abCompareGrid, .alphaHeader, .alphaRow, .tradeLedgerRow, .tradeLevels, .tradeExcursion, .samplingSummary, .recommendationSummary, .recommendationColumns, .whitelistProgressList, .progressMeta, .strategyAction { grid-template-columns: 1fr; }
   .alphaHeader { display: none; }
   .panelToolbar { align-items: stretch; flex-direction: column; }
   .panelToolbar button { justify-content: center; }

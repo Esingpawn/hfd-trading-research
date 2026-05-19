@@ -51,6 +51,8 @@ async def paper_trades(
             "stop_loss": trade.stop_loss,
             "take_profit": trade.take_profit,
             "status": trade.status,
+            "exit_price": trade.exit_price,
+            "exit_reason": trade.exit_reason,
             "pnl": trade.pnl,
             "r_multiple": trade.r_multiple,
             "mfe": trade.mfe,

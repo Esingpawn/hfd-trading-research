@@ -127,3 +127,15 @@ def test_react_dashboard_exposes_darkflow_subportfolio_recommendations() -> None
     assert "白名单样本进度" in source
     assert "距离下一档" in source
     assert "真实纸上复核仍关闭" in source
+
+
+def test_react_dashboard_exposes_trade_ledger_precision_and_exit_reason() -> None:
+    source = Path("web/src/main.tsx").read_text(encoding="utf-8")
+
+    assert "TradeLedger" in source
+    assert "precisePct" in source
+    assert "最近影子交易" in source
+    assert "红绿显示真实收益" in source
+    assert "最大浮盈" in source
+    assert "最大浮亏" in source
+    assert "旧记录缺少出场原因" in source

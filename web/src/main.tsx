@@ -515,6 +515,8 @@ type PaperTrade = {
   stop_loss: number;
   take_profit: number;
   status: string;
+  exit_price?: number | null;
+  exit_reason?: string | null;
   pnl?: number | null;
   r_multiple?: number | null;
   mfe?: number | null;
@@ -1555,6 +1557,9 @@ function ShadowPage({ data, rows, onAccelerate }: { data: LoadState; rows: CardR
       <Panel title="影子权益曲线" subtitle="根据最近影子交易的已平仓盈亏重建，不代表实盘账户">
         {equity.length > 1 ? <EquityChart points={equity} /> : <StateBox type="empty" title="权益曲线样本不足" text="当前影子交易还没有足够的已平仓记录，先展示聚合统计。" />}
       </Panel>
+      <Panel title="最近影子交易" subtitle="红绿显示真实收益，出场原因区分止盈、止损、时间退出和仍持仓">
+        <TradeLedger trades={(data.shadowTrades ?? []).slice(0, 50)} empty="暂无影子交易记录。等待候选进入冻结入场区间后，系统会自动积累隔离样本。" />
+      </Panel>
       <Panel title="候选策略表现" subtitle="按候选来源聚合，优先看样本数、盈利因子和回撤">
         <div className="tableList">
           {topGroups.map((item) => (
@@ -1896,18 +1901,45 @@ function PaperTradingPage({ stats, trades }: { stats: PaperStats | null; trades:
         </Panel>
       </section>
       <Panel title="最近纸上交易" subtitle="真实纸上前向验证，不等于实盘订单">
-        <div className="tableList">
-          {(trades ?? []).slice(0, 50).map((trade) => (
-            <div className="tableRow paperTradeRow" key={trade.id}>
-              <strong>{trade.symbol}</strong>
-              <span>{directionText(trade.direction)} · {tradeStatusText(trade.status)} · {timeShort(trade.opened_at)}</span>
-              <span>入场 {fmt(trade.entry_price, 4)} · 止损 {fmt(trade.stop_loss, 4)}</span>
-              <span>目标 {fmt(trade.take_profit, 4)} · PnL {pct(trade.pnl)} · R {fmt(trade.r_multiple, 2)}</span>
-            </div>
-          ))}
-          {!trades?.length && <StateBox type="empty" title="暂无纸上交易记录" text="需要 paper scan 和 mark 正常运行，才会继续积累前向样本。" />}
-        </div>
+        <TradeLedger trades={(trades ?? []).slice(0, 50)} empty="暂无纸上交易记录。需要 paper scan 和 mark 正常运行，才会继续积累前向样本。" />
       </Panel>
+    </div>
+  );
+}
+
+type LedgerTrade = Pick<PaperTrade, "id" | "symbol" | "direction" | "entry_price" | "stop_loss" | "take_profit" | "status" | "exit_price" | "exit_reason" | "pnl" | "r_multiple" | "mfe" | "mae" | "opened_at" | "closed_at">;
+
+function TradeLedger({ trades, empty }: { trades: LedgerTrade[]; empty: string }) {
+  return (
+    <div className="tradeLedger">
+      {trades.map((trade) => (
+        <div className={`tradeLedgerRow ${tradeOutcomeTone(trade)}`} key={trade.id}>
+          <div className="tradeIdentity">
+            <strong>{trade.symbol}</strong>
+            <span>{directionText(trade.direction)} · {tradeStatusText(trade.status)} · {timeShort(trade.opened_at)}</span>
+          </div>
+          <div className="tradeResultBlock">
+            <strong>{tradePnlText(trade)}</strong>
+            <span>R {fmt(trade.r_multiple, 2)}</span>
+          </div>
+          <div className="tradeExitBlock">
+            <StatusBadge tone={exitReasonTone(trade.exit_reason, trade.status)} label={exitReasonText(trade.exit_reason || trade.status)} />
+            <span>{tradeExitHint(trade)}</span>
+          </div>
+          <div className="tradeLevels">
+            <span>入场 {fmt(trade.entry_price, 4)}</span>
+            <span>止损 {fmt(trade.stop_loss, 4)}</span>
+            <span>目标 {fmt(trade.take_profit, 4)}</span>
+            <span>出场 {fmt(trade.exit_price, 4)}</span>
+          </div>
+          <div className="tradeExcursion">
+            <span>最大浮盈 {signedPct(trade.mfe)}</span>
+            <span>最大浮亏 {signedPct(trade.mae)}</span>
+            <small>{tradePostExitHint(trade)}</small>
+          </div>
+        </div>
+      ))}
+      {!trades.length && <StateBox type="empty" title="暂无交易记录" text={empty} />}
     </div>
   );
 }
@@ -2555,6 +2587,48 @@ function SegmentedControl({ label, value, options, onChange }: { label: string; 
 function errorText(err: unknown): string { return err instanceof Error ? err.message : String(err); }
 function fmt(value: unknown, digits = 2): string { return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("zh-CN", { maximumFractionDigits: digits }) : "--"; }
 function pct(value: unknown): string { return typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : "--"; }
+function precisePct(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "--";
+  const pctValue = value * 100;
+  const abs = Math.abs(pctValue);
+  const digits = abs > 10 ? 2 : abs >= 1 ? 2 : abs >= 0.1 ? 3 : 4;
+  return `${pctValue >= 0 ? "+" : ""}${pctValue.toFixed(digits)}%`;
+}
+function signedPct(value: unknown): string { return typeof value === "number" && Number.isFinite(value) ? precisePct(value) : "--"; }
+function tradePnlText(trade: LedgerTrade): string {
+  if (typeof trade.pnl === "number" && Number.isFinite(trade.pnl)) return precisePct(trade.pnl);
+  if (trade.status === "open") return "持仓中";
+  return "--";
+}
+function tradeOutcomeTone(trade: LedgerTrade): string {
+  if (trade.status === "open") return "open";
+  if (typeof trade.pnl !== "number" || !Number.isFinite(trade.pnl)) return "flat";
+  if (trade.pnl > 0) return "profit";
+  if (trade.pnl < 0) return "loss";
+  return "flat";
+}
+function exitReasonTone(reason?: string | null, status?: string): "good" | "warn" | "bad" | "info" | "normal" {
+  if (status === "open" || reason === "open") return "info";
+  if (reason === "take_profit") return "good";
+  if (reason === "stop_loss") return "bad";
+  if (reason === "trailing_stop") return "warn";
+  if (reason === "shadow_forward_time_exit") return "warn";
+  return "normal";
+}
+function tradeExitHint(trade: LedgerTrade): string {
+  if (trade.status === "open") return "未平仓，当前不显示最终 PnL";
+  if (trade.exit_reason === "take_profit") return "达到目标价或系统确认止盈";
+  if (trade.exit_reason === "stop_loss") return "触发止损价";
+  if (trade.exit_reason === "trailing_stop") return "移动止损保护利润";
+  if (trade.exit_reason === "shadow_forward_time_exit") return "影子前向观察时间结束";
+  return "旧记录缺少出场原因，需要后续复盘补标";
+}
+function tradePostExitHint(trade: LedgerTrade): string {
+  if (trade.status === "open") return "先看 MFE/MAE 判断当前浮盈浮亏范围";
+  if (trade.exit_reason === "stop_loss" && Number(trade.mfe ?? 0) > Math.abs(Number(trade.mae ?? 0))) return "止损前曾有浮盈，需复盘是否入场/止损过紧";
+  if (trade.exit_reason === "take_profit" && Number(trade.mfe ?? 0) > Math.abs(Number(trade.pnl ?? 0)) * 1.5) return "止盈后可能仍有延展空间";
+  return "后续会接入出场后价格路径复盘";
+}
 function qualityText(value?: string) { return value === "ok" ? "正常" : value === "warning" ? "警告" : value === "error" ? "异常" : "未知"; }
 function directionText(value: string) { return value === "long" ? "做多" : value === "short" ? "做空" : value; }
 function timeframeText(value: string) { return value === "30m" ? "30分钟" : value === "1h" ? "1小时" : value === "4h" ? "4小时" : value; }
