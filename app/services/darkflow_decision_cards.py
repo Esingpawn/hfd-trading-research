@@ -14,6 +14,7 @@ from app.domain.trade_candidates.lifecycle import (
     PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING,
     PROMOTION_BLOCKER_SHADOW_FORWARD_FAILED,
     PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING,
+    PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED,
     candidate_promotion_status,
     lifecycle_blockers,
     normalized_promotion_blockers,
@@ -186,6 +187,10 @@ async def materialize_darkflow_trade_candidates(
     min_quality_score: float = DEFAULT_MIN_DECISION_CARD_QUALITY,
     min_rr_ratio: float = DEFAULT_MIN_RR_RATIO,
     retire_expired_entry_plans: bool = False,
+    priority_subportfolio_keys: list[str] | set[str] | tuple[str, ...] | None = None,
+    paused_subportfolio_keys: list[str] | set[str] | tuple[str, ...] | None = None,
+    whitelist_subportfolio_keys: list[str] | set[str] | tuple[str, ...] | None = None,
+    deweighted_strategy_ids: list[str] | set[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     requested_limit = max(1, int(limit))
     card_fetch_limit = _materialize_card_fetch_limit(requested_limit)
@@ -200,10 +205,24 @@ async def materialize_darkflow_trade_candidates(
     unchanged = 0
     skipped_non_opening = 0
     expired_entry_plan_retired = 0
+    sampling_policy_skipped = 0
+    sampling_policy_retired = 0
+    sampling_policy_prioritized = 0
     rows: list[dict[str, Any]] = []
     now = utc_now()
-    representatives = _representative_exposure_candidates(report["cards"])
-    for card in report["cards"]:
+    priority_subportfolios = _normalized_group_keys(priority_subportfolio_keys)
+    paused_subportfolios = _normalized_group_keys(paused_subportfolio_keys)
+    whitelist_subportfolios = _normalized_group_keys(whitelist_subportfolio_keys)
+    deweighted_strategies = _normalized_group_keys(deweighted_strategy_ids)
+    cards = _sort_cards_by_materialization_policy(
+        list(report["cards"]),
+        priority_subportfolio_keys=priority_subportfolios,
+        paused_subportfolio_keys=paused_subportfolios,
+        whitelist_subportfolio_keys=whitelist_subportfolios,
+        deweighted_strategy_ids=deweighted_strategies,
+    )
+    representatives = _representative_exposure_candidates(cards)
+    for card in cards:
         existing = await session.scalar(
             select(TradeCandidate).where(TradeCandidate.candidate_key == card["card_id"])
         )
@@ -227,6 +246,38 @@ async def materialize_darkflow_trade_candidates(
                     "duplicate_of": None,
                 })
             continue
+        sampling_gate = _materialization_sampling_gate(
+            card,
+            priority_subportfolio_keys=priority_subportfolios,
+            paused_subportfolio_keys=paused_subportfolios,
+            whitelist_subportfolio_keys=whitelist_subportfolios,
+            deweighted_strategy_ids=deweighted_strategies,
+        )
+        if sampling_gate["decision"] in {"blocked", "deweighted"}:
+            sampling_policy_skipped += 1
+            if existing is not None and _retire_sampling_policy_candidate(existing, card=card, gate=sampling_gate, now=now):
+                updated += 1
+                sampling_policy_retired += 1
+                rows.append({
+                    "candidate_key": card["card_id"],
+                    "action": "retired_sampling_policy",
+                    "status": existing.status,
+                    "promotion_status": existing.promotion_status,
+                    "duplicate_of": None,
+                    "sampling_gate": sampling_gate,
+                })
+            else:
+                rows.append({
+                    "candidate_key": card["card_id"],
+                    "action": "skipped_sampling_policy",
+                    "status": "not_materialized" if existing is None else existing.status,
+                    "promotion_status": "not_materialized" if existing is None else existing.promotion_status,
+                    "duplicate_of": None,
+                    "sampling_gate": sampling_gate,
+                })
+            continue
+        if sampling_gate["decision"] == "prioritize":
+            sampling_policy_prioritized += 1
         exposure_fingerprint = _exposure_plan_fingerprint(card)
         duplicate_of = None
         if exposure_fingerprint is not None:
@@ -240,6 +291,7 @@ async def materialize_darkflow_trade_candidates(
             duplicate_of=duplicate_of,
             exposure_fingerprint=exposure_fingerprint,
         )
+        payload = _attach_sampling_gate(payload, sampling_gate)
         if retire_expired_entry_plans and _entry_plan_expired(card.get("entry_plan"), now=now):
             payload = _retired_entry_plan_payload(payload, reason="entry_plan_expired", entry_plan_state=None, now=now)
             expired_entry_plan_retired += 1
@@ -296,10 +348,20 @@ async def materialize_darkflow_trade_candidates(
         "unchanged": unchanged,
         "skipped_non_opening_count": skipped_non_opening,
         "expired_entry_plan_retired_count": expired_entry_plan_retired,
+        "sampling_policy_skipped_count": sampling_policy_skipped,
+        "sampling_policy_retired_count": sampling_policy_retired,
+        "sampling_policy_prioritized_count": sampling_policy_prioritized,
         "duplicate_exposure_count": sum(1 for row in rows if row.get("duplicate_of")),
         "rows": rows,
         "thresholds": report["thresholds"],
-        "policy": _policy(),
+        "policy": _policy() | {
+            "uses_subportfolio_sampling_policy": True,
+            "sampling_policy_report_only": False,
+            "sampling_policy_blocks_paused_subportfolios": True,
+            "sampling_policy_blocks_deweighted_non_whitelist": True,
+            "sampling_policy_opens_paper_trades": False,
+            "sampling_policy_opens_live_orders": False,
+        },
 }
 
 
@@ -689,6 +751,97 @@ def _entry_plan_expired(plan: Any, *, now: datetime) -> bool:
     return valid_until is not None and _aware(now) > _aware(valid_until)
 
 
+def _sort_cards_by_materialization_policy(
+    cards: list[dict[str, Any]],
+    *,
+    priority_subportfolio_keys: set[str],
+    paused_subportfolio_keys: set[str],
+    whitelist_subportfolio_keys: set[str],
+    deweighted_strategy_ids: set[str],
+) -> list[dict[str, Any]]:
+    def rank(card: dict[str, Any]) -> tuple[int, datetime, str]:
+        gate = _materialization_sampling_gate(
+            card,
+            priority_subportfolio_keys=priority_subportfolio_keys,
+            paused_subportfolio_keys=paused_subportfolio_keys,
+            whitelist_subportfolio_keys=whitelist_subportfolio_keys,
+            deweighted_strategy_ids=deweighted_strategy_ids,
+        )
+        decision_rank = {
+            "prioritize": 3,
+            "neutral": 2,
+            "deweighted": 1,
+            "blocked": 0,
+        }.get(str(gate["decision"]), 2)
+        return (
+            decision_rank,
+            _parse_iso_datetime(card.get("setup_time")) or datetime.min.replace(tzinfo=timezone.utc),
+            str(card.get("card_id") or ""),
+        )
+
+    return sorted(cards, key=rank, reverse=True)
+
+
+def _materialization_sampling_gate(
+    card: dict[str, Any],
+    *,
+    priority_subportfolio_keys: set[str],
+    paused_subportfolio_keys: set[str],
+    whitelist_subportfolio_keys: set[str],
+    deweighted_strategy_ids: set[str],
+) -> dict[str, Any]:
+    subportfolio_key = _card_subportfolio_key(card)
+    strategy_id = str(card.get("strategy_id") or "")
+    if subportfolio_key in paused_subportfolio_keys:
+        return {
+            "decision": "blocked",
+            "reason": "darkflow_subportfolio_recommendation_paused",
+            "subportfolio_key": subportfolio_key,
+            "strategy_id": strategy_id,
+        }
+    if strategy_id in deweighted_strategy_ids and subportfolio_key not in whitelist_subportfolio_keys:
+        return {
+            "decision": "deweighted",
+            "reason": "darkflow_strategy_deweighted_non_whitelist",
+            "subportfolio_key": subportfolio_key,
+            "strategy_id": strategy_id,
+        }
+    if subportfolio_key in priority_subportfolio_keys:
+        return {
+            "decision": "prioritize",
+            "reason": "darkflow_subportfolio_whitelist",
+            "subportfolio_key": subportfolio_key,
+            "strategy_id": strategy_id,
+        }
+    return {
+        "decision": "neutral",
+        "reason": "darkflow_subportfolio_unclassified",
+        "subportfolio_key": subportfolio_key,
+        "strategy_id": strategy_id,
+    }
+
+
+def _card_subportfolio_key(card: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(card.get("strategy_id") or ""),
+            str(card.get("symbol") or ""),
+            str(card.get("direction") or ""),
+            str(card.get("market_state") or ""),
+        ]
+    )
+
+
+def _attach_sampling_gate(payload: dict[str, Any], gate: dict[str, Any]) -> dict[str, Any]:
+    if gate.get("decision") == "neutral":
+        return payload
+    updated = dict(payload)
+    decision_payload = dict(updated.get("decision_payload") or {})
+    decision_payload["darkflow_materialization_gate"] = gate
+    updated["decision_payload"] = decision_payload
+    return updated
+
+
 def _candidate_needs_update(existing: TradeCandidate, payload: dict[str, Any]) -> bool:
     fields = [
         "source_interaction_id",
@@ -735,6 +888,46 @@ def _retire_non_opening_candidate(existing: TradeCandidate, *, card: dict[str, A
     existing.anti_repaint_status = "passed"
     existing.shadow_status = "retired"
     existing.blockers = sorted(blockers)
+    existing.promotion_blockers = _normalized_promotion_blockers(list(promotion_blockers))
+    existing.promotion_status = _promotion_status(
+        status=existing.status,
+        anti_repaint_status=existing.anti_repaint_status,
+        shadow_status=existing.shadow_status,
+        promotion_blockers=existing.promotion_blockers,
+    )
+    existing.decision_payload = payload
+    existing.updated_at = now
+    return previous != (
+        existing.status,
+        existing.promotion_status,
+        existing.anti_repaint_status,
+        existing.shadow_status,
+        tuple(existing.blockers or []),
+        tuple(existing.promotion_blockers or []),
+        existing.decision_payload,
+    )
+
+
+def _retire_sampling_policy_candidate(existing: TradeCandidate, *, card: dict[str, Any], gate: dict[str, Any], now: datetime) -> bool:
+    previous = (
+        existing.status,
+        existing.promotion_status,
+        existing.anti_repaint_status,
+        existing.shadow_status,
+        tuple(existing.blockers or []),
+        tuple(existing.promotion_blockers or []),
+        existing.decision_payload,
+    )
+    payload = dict(existing.decision_payload or {})
+    payload.update(dict(card))
+    payload["darkflow_materialization_gate"] = gate | {"retired_at": _iso(now)}
+    promotion_blockers = set(str(item) for item in (existing.promotion_blockers or []))
+    promotion_blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING)
+    promotion_blockers.discard(PROMOTION_BLOCKER_SHADOW_FORWARD_COLLECTING)
+    promotion_blockers.add(PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED)
+    existing.status = "entry_plan_retired"
+    existing.anti_repaint_status = "passed"
+    existing.shadow_status = "retired"
     existing.promotion_blockers = _normalized_promotion_blockers(list(promotion_blockers))
     existing.promotion_status = _promotion_status(
         status=existing.status,
@@ -814,6 +1007,10 @@ def _rounded_price_bucket(price: float) -> str:
     else:
         digits = 6
     return f"{round(float(price), digits):.{digits}f}"
+
+
+def _normalized_group_keys(values: list[str] | set[str] | tuple[str, ...] | None) -> set[str]:
+    return {str(item) for item in (values or []) if str(item)}
 
 
 def _preserve_candidate_lifecycle(existing: TradeCandidate, payload: dict[str, Any]) -> dict[str, Any]:

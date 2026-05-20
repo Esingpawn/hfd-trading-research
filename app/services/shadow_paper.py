@@ -8,6 +8,14 @@ from typing import Any
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.shadow_forward_samples import (
+    candidate_snapshot as _candidate_snapshot,
+    shadow_plan_horizon as _trade_horizon,
+    unique_shadow_plans,
+)
+from app.domain.setup_expectancy import setup_expectancy_rows
+from app.domain.trade_outcomes import build_trade_outcome, max_drawdown, summarize_trade_outcomes
+from app.domain.whitelist_blacklist_policy import classify_setup_expectancy, strategy_action_from_expectancy
 from app.models import FeatureEvent, FeatureLabel, PriceSnapshot, ShadowPaperTrade
 from app.services.feature_candidates import latest_feature_segment_candidate_screen
 from app.services.features import FEATURE_HORIZONS
@@ -543,32 +551,70 @@ async def darkflow_subportfolio_recommendations_report(session: AsyncSession) ->
     }
 
 
+async def darkflow_setup_expectancy_report(session: AsyncSession) -> dict[str, Any]:
+    rows = await session.execute(
+        select(ShadowPaperTrade)
+        .where(ShadowPaperTrade.strategy_name == DARKFLOW_V2_SHADOW_STRATEGY_NAME)
+        .order_by(ShadowPaperTrade.opened_at.desc())
+    )
+    trades = _unique_plan_trades(list(rows.scalars().all()))
+    expectancy_rows = setup_expectancy_rows(trades, evidence_source="shadow_forward")
+    return {
+        "strategy_name": DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "dimension": "strategy_family+setup_type+strategy_id+symbol+direction+timeframe+market_state+evidence_source",
+        "rows": expectancy_rows,
+        "evidence_sources": {
+            "shadow_forward": "Core Darkflow v2 影子前向样本",
+            "paper": "真实纸上交易",
+            "backtest": "回测证据",
+            "legacy_control": "Legacy/Control Research 对照，不可用于开仓晋级",
+        },
+        "policy": _shadow_policy()
+        | {
+            "report_only": True,
+            "lineage": "core_darkflow_v2",
+            "mutates_candidates": False,
+            "mutates_weights": False,
+            "opens_paper_trades": False,
+            "opens_live_orders": False,
+            "legacy_control_can_promote": False,
+            "purpose": "aggregate Core Darkflow v2 setup expectancy evidence before whitelist or paper review",
+        },
+    }
+
+
 def _darkflow_subportfolio_rows(trades: list[ShadowPaperTrade]) -> list[dict[str, Any]]:
-    buckets: dict[tuple[str, str, str, str], list[ShadowPaperTrade]] = {}
-    for trade in trades:
-        snapshot = _candidate_snapshot(trade)
-        strategy_id = str(snapshot.get("strategy_id") or "unknown")
-        market_state = str(snapshot.get("market_state") or "unknown")
-        buckets.setdefault((strategy_id, trade.symbol, trade.direction, market_state), []).append(trade)
+    expectancy_rows = setup_expectancy_rows(trades, evidence_source="shadow_forward")
     rows: list[dict[str, Any]] = []
-    for (strategy_id, symbol, direction, market_state), items in buckets.items():
-        stats = _trade_stats(items)
-        exit_counts = _exit_reason_counts(items)
+    for expectancy in expectancy_rows:
+        stats = dict(expectancy)
+        exit_counts = dict(expectancy.get("exit_reason_counts") or {})
         recommendation, reasons = _darkflow_subportfolio_recommendation(stats, exit_counts)
         sample_progress = _darkflow_sample_progress(int(stats.get("closed_trades") or 0), recommendation=recommendation)
+        subportfolio_key = "|".join(
+            [
+                str(expectancy["strategy_id"]),
+                str(expectancy["symbol"]),
+                str(expectancy["direction"]),
+                str(expectancy["market_state"]),
+            ]
+        )
         rows.append(
             {
-                "group_key": "|".join([strategy_id, symbol, direction, market_state]),
-                "strategy_id": strategy_id,
-                "strategy_name": str(_candidate_snapshot(items[0]).get("strategy_name") or strategy_id),
-                "symbol": symbol,
-                "direction": direction,
-                "market_state": market_state,
                 **stats,
+                "group_key": subportfolio_key,
+                "setup_expectancy_key": expectancy["group_key"],
+                "strategy_id": expectancy["strategy_id"],
+                "strategy_name": expectancy["strategy_name"],
+                "symbol": expectancy["symbol"],
+                "direction": expectancy["direction"],
+                "timeframe": expectancy["timeframe"],
+                "strategy_family": expectancy["strategy_family"],
+                "setup_type": expectancy["setup_type"],
+                "market_state": expectancy["market_state"],
+                "evidence_source": expectancy["evidence_source"],
                 "exit_reason_counts": exit_counts,
-                "time_exit_share": _exit_reason_share(exit_counts, DARKFLOW_TIME_EXIT_REASON),
-                "take_profit_share": _exit_reason_share(exit_counts, "take_profit"),
-                "stop_loss_share": _exit_reason_share(exit_counts, "stop_loss"),
                 "recommendation": recommendation,
                 "recommendation_text": _darkflow_recommendation_text(recommendation),
                 "sampling_action": _darkflow_sampling_action(recommendation),
@@ -597,7 +643,14 @@ def _darkflow_strategy_action_rows(trades: list[ShadowPaperTrade]) -> list[dict[
     for strategy_id, items in buckets.items():
         stats = _trade_stats(items)
         exit_counts = _exit_reason_counts(items)
-        action, reasons = _darkflow_strategy_action(stats, exit_counts)
+        action = strategy_action_from_expectancy(
+            {
+                **stats,
+                "exit_reason_counts": exit_counts,
+                "time_exit_share": _exit_reason_share(exit_counts, DARKFLOW_TIME_EXIT_REASON),
+                "evidence_source": "shadow_forward",
+            }
+        )
         rows.append(
             {
                 "strategy_id": strategy_id,
@@ -605,10 +658,11 @@ def _darkflow_strategy_action_rows(trades: list[ShadowPaperTrade]) -> list[dict[
                 **stats,
                 "exit_reason_counts": exit_counts,
                 "time_exit_share": _exit_reason_share(exit_counts, DARKFLOW_TIME_EXIT_REASON),
-                "main_path_action": action,
-                "action_text": _darkflow_strategy_action_text(action),
-                "weight_multiplier": _darkflow_strategy_weight_multiplier(action),
-                "reasons": reasons,
+                "main_path_action": action["main_path_action"],
+                "action_text": action["action_text"],
+                "weight_multiplier": action["weight_multiplier"],
+                "reason_codes": action["reason_codes"],
+                "reasons": action["reasons"],
             }
         )
     return sorted(
@@ -623,39 +677,9 @@ def _darkflow_strategy_action_rows(trades: list[ShadowPaperTrade]) -> list[dict[
 
 
 def _darkflow_subportfolio_recommendation(stats: dict[str, Any], exit_counts: dict[str, int]) -> tuple[str, list[str]]:
-    closed = int(stats.get("closed_trades") or 0)
-    win_rate = _number(stats.get("win_rate"))
-    profit_factor = _number(stats.get("profit_factor"))
-    max_drawdown = _number(stats.get("max_drawdown"))
-    time_exit_share = _exit_reason_share(exit_counts, DARKFLOW_TIME_EXIT_REASON)
-    reasons: list[str] = []
-    if closed <= 0:
-        return "keep_sampling", ["还没有平仓样本，继续只在影子环境补样。"]
-    if closed >= DARKFLOW_RECOMMENDATION_WHITELIST_MIN_CLOSED and _at_least(win_rate, 0.60) and _at_least(profit_factor, 1.50) and _at_most(max_drawdown, 0.08):
-        if time_exit_share is None or time_exit_share <= 0.55:
-            reasons.append("胜率、盈利因子和回撤同时达标。")
-            reasons.append("时间退出占比没有异常升高，说明不是靠拖到结束维持结果。")
-            return "whitelist", reasons
-    if closed >= DARKFLOW_RECOMMENDATION_PAUSE_MIN_CLOSED:
-        weak_edge = _at_most(win_rate, 0.35) and _at_most(profit_factor, 0.85)
-        severe_edge = _at_most(profit_factor, 0.50) or (_at_most(win_rate, 0.25) and _at_most(profit_factor, 0.75))
-        time_exit_problem = time_exit_share is not None and time_exit_share >= 0.70 and (profit_factor is None or profit_factor < 1.05)
-        drawdown_problem = max_drawdown is not None and max_drawdown > 0.12 and (profit_factor is None or profit_factor < 1.10)
-        if severe_edge or (closed >= 5 and weak_edge and time_exit_problem):
-            reasons.append("前向胜率或盈利因子已经明显低于保留门槛。")
-            if time_exit_problem:
-                reasons.append("大量持仓拖到时间退出，说明入场或止盈逻辑没有形成有效边际。")
-            return "blacklist", reasons
-        if weak_edge or time_exit_problem or drawdown_problem:
-            reasons.append("当前前向表现偏弱，继续补样会污染主路径统计。")
-            if time_exit_problem:
-                reasons.append("时间退出占比过高，需要先复核规则。")
-            if drawdown_problem:
-                reasons.append("回撤压力超过保守观察线。")
-            return "pause", reasons
-    if closed < DARKFLOW_RECOMMENDATION_WHITELIST_MIN_CLOSED:
-        return "keep_sampling", [f"只有 {closed} 笔平仓样本，尚不足以进入白名单或黑名单。"]
-    return "observe", ["样本已有一定数量，但胜率、盈利因子或回撤没有同时给出明确方向。"]
+    decision = classify_setup_expectancy({**stats, "exit_reason_counts": exit_counts})
+    recommendation = "keep_sampling" if decision["classification"] == "collecting" else str(decision["classification"])
+    return recommendation, list(decision["reasons"])
 
 
 def _darkflow_sample_progress(closed: int, *, recommendation: str) -> dict[str, Any]:
@@ -985,26 +1009,17 @@ def _darkflow_strategy_action_rank(action: str) -> int:
 
 
 def _trade_stats(trades: list[ShadowPaperTrade]) -> dict[str, Any]:
-    closed = sorted(
-        [item for item in trades if item.status == "closed" and isinstance(item.pnl, (int, float))],
-        key=lambda item: _aware(item.closed_at or item.opened_at or datetime.min.replace(tzinfo=timezone.utc)),
+    stats = summarize_trade_outcomes(
+        trades,
+        no_loss_profit_factor=999.0,
+        drawdown_mode="compound",
     )
-    wins = [float(item.pnl) for item in closed if item.pnl and item.pnl > 0]
-    losses = [float(item.pnl) for item in closed if item.pnl and item.pnl < 0]
-    gross_win = sum(wins)
-    gross_loss = abs(sum(losses))
     opened_times = [item.opened_at for item in trades if item.opened_at]
-    closed_times = [item.closed_at for item in closed if item.closed_at]
+    closed_times = [item.closed_at for item in trades if item.status == "closed" and isinstance(item.pnl, (int, float)) and item.closed_at]
     return {
-        "open_trades": sum(1 for item in trades if item.status == "open"),
-        "closed_trades": len(closed),
-        "total_trades": len(trades),
-        "win_rate": len(wins) / len(closed) if closed else None,
-        "avg_pnl": mean([float(item.pnl) for item in closed]) if closed else None,
-        "profit_factor": gross_win / gross_loss if gross_loss else (999.0 if gross_win else None),
-        "gross_win": gross_win,
-        "gross_loss": gross_loss,
-        "max_drawdown": _max_drawdown([float(item.pnl or 0.0) for item in closed]),
+        **stats,
+        "gross_win": stats["gross_profit"],
+        "gross_loss": stats["gross_loss"],
         "execution_model": _execution_model("mixed"),
         "latest_opened_at": max(opened_times) if opened_times else None,
         "latest_closed_at": max(closed_times) if closed_times else None,
@@ -1012,67 +1027,7 @@ def _trade_stats(trades: list[ShadowPaperTrade]) -> dict[str, Any]:
 
 
 def _unique_plan_trades(trades: list[ShadowPaperTrade]) -> list[ShadowPaperTrade]:
-    best_by_plan: dict[str, ShadowPaperTrade] = {}
-    for trade in trades:
-        key = _trade_plan_fingerprint(trade)
-        current = best_by_plan.get(key)
-        if current is None or _trade_plan_rank(trade) > _trade_plan_rank(current):
-            best_by_plan[key] = trade
-    return list(best_by_plan.values())
-
-
-def _trade_plan_rank(trade: ShadowPaperTrade) -> tuple[int, datetime, str]:
-    closed_rank = 1 if trade.status == "closed" and isinstance(trade.pnl, (int, float)) else 0
-    observed_at = trade.closed_at or trade.opened_at or datetime.min.replace(tzinfo=timezone.utc)
-    return (closed_rank, _aware(observed_at), trade.id)
-
-
-def _trade_plan_fingerprint(trade: ShadowPaperTrade) -> str:
-    context = trade.context if isinstance(trade.context, dict) else {}
-    explicit = context.get("shadow_plan_fingerprint")
-    if explicit:
-        return f"explicit:{explicit}"
-    snapshot = _candidate_snapshot(trade)
-    strategy_id = str(snapshot.get("strategy_id") or trade.strategy_name)
-    entry = _number(snapshot.get("entry_price")) or float(trade.entry_price)
-    stop = _number(snapshot.get("stop_price")) or float(trade.stop_loss)
-    target = _number(snapshot.get("target_price")) or float(trade.take_profit)
-    opened_slot = _aware(trade.opened_at).replace(minute=0, second=0, microsecond=0).isoformat() if trade.opened_at else "unknown"
-    return ":".join(
-        [
-            "bucket",
-            trade.strategy_name,
-            strategy_id,
-            trade.symbol,
-            trade.timeframe,
-            trade.direction,
-            _trade_horizon(trade),
-            opened_slot,
-            _rounded_price_bucket(entry),
-            _rounded_price_bucket(stop),
-            _rounded_price_bucket(target),
-        ]
-    )
-
-
-def _rounded_price_bucket(price: float) -> str:
-    if price >= 1000:
-        digits = 0
-    elif price >= 100:
-        digits = 1
-    elif price >= 10:
-        digits = 2
-    elif price >= 1:
-        digits = 4
-    else:
-        digits = 6
-    return f"{round(float(price), digits):.{digits}f}"
-
-
-def _candidate_snapshot(trade: ShadowPaperTrade) -> dict[str, Any]:
-    context = trade.context if isinstance(trade.context, dict) else {}
-    snapshot = context.get("candidate_snapshot")
-    return snapshot if isinstance(snapshot, dict) else {}
+    return unique_shadow_plans(trades, include_horizon=True)
 
 
 def _grouped_trade_stats(
@@ -1152,12 +1107,6 @@ def _horizon_group_key(trade: ShadowPaperTrade) -> tuple[str]:
 
 def _symbol_group_key(trade: ShadowPaperTrade) -> tuple[str, str]:
     return (trade.symbol, trade.direction)
-
-
-def _trade_horizon(trade: ShadowPaperTrade) -> str:
-    context = trade.context or {}
-    horizon = context.get("horizon")
-    return str(horizon) if horizon else "live"
 
 
 def _shadow_candidate_rows(
@@ -1537,15 +1486,7 @@ def _merge_context(current: dict[str, Any] | None, updates: dict[str, Any]) -> d
 
 
 def _max_drawdown(returns: list[float]) -> float:
-    equity = 1.0
-    peak = 1.0
-    drawdown = 0.0
-    for value in returns:
-        equity *= 1 + value
-        peak = max(peak, equity)
-        if peak:
-            drawdown = max(drawdown, (peak - equity) / peak)
-    return drawdown
+    return max_drawdown(returns)
 
 
 def _promotion_report(candidate_rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1751,6 +1692,7 @@ def _trade_payload(trade: ShadowPaperTrade) -> dict[str, Any]:
         "r_multiple": trade.r_multiple,
         "mfe": trade.mfe,
         "mae": trade.mae,
+        "outcome": build_trade_outcome(trade, source="shadow"),
         "opened_at": trade.opened_at,
         "closed_at": trade.closed_at,
         "source_experiment_run_id": trade.source_experiment_run_id,

@@ -89,6 +89,24 @@ type PromotionGateSample = {
   blocker_groups?: Record<string, PromotionGateBlocker[]>;
   raw_blockers?: string[];
   evidence_summary?: Record<string, unknown>;
+  setup_expectancy?: SetupExpectancyEvidence | Record<string, unknown>;
+};
+
+type SetupExpectancyEvidence = {
+  classification?: string | null;
+  display_text?: string | null;
+  reason_codes?: string[];
+  reasons?: string[];
+  evidence_source?: string | null;
+  sample_count?: number | null;
+  closed_trades?: number | null;
+  invalid_outcome_trades?: number | null;
+  win_rate?: number | null;
+  profit_factor?: number | null;
+  avg_r_multiple?: number | null;
+  median_r_multiple?: number | null;
+  max_drawdown?: number | null;
+  time_exit_share?: number | null;
 };
 
 type PromotionGateBlocker = {
@@ -308,6 +326,7 @@ type ShadowTrade = {
   r_multiple?: number | null;
   mfe?: number | null;
   mae?: number | null;
+  outcome?: TradeOutcome | null;
   opened_at?: string | null;
   closed_at?: string | null;
 };
@@ -483,6 +502,8 @@ type PaperStatsGroup = {
   total_trades?: number;
   open_trades?: number;
   closed_trades?: number;
+  valid_outcome_trades?: number;
+  invalid_outcome_trades?: number;
   win_count?: number;
   loss_count?: number;
   win_rate?: number | null;
@@ -521,8 +542,23 @@ type PaperTrade = {
   r_multiple?: number | null;
   mfe?: number | null;
   mae?: number | null;
+  outcome?: TradeOutcome | null;
   opened_at?: string | null;
   closed_at?: string | null;
+};
+
+type TradeOutcome = {
+  source?: string;
+  valid?: boolean;
+  missing_fields?: string[];
+  exit_reason?: string | null;
+  exit_reason_label?: string | null;
+  gross_pnl?: number | null;
+  net_pnl?: number | null;
+  cost_impact?: number | null;
+  r_multiple?: number | null;
+  mfe?: number | null;
+  mae?: number | null;
 };
 
 type ExperimentIndicator = {
@@ -668,6 +704,38 @@ type DarkflowSubportfolioRecommendationsReport = {
   policy?: Policy & { report_only?: boolean; mutates_candidates?: boolean; mutates_weights?: boolean };
 };
 
+type DarkflowSetupExpectancyReport = {
+  strategy_name?: string;
+  generated_at?: string | null;
+  dimension?: string;
+  evidence_sources?: Record<string, string>;
+  rows: DarkflowSetupExpectancyRow[];
+  policy?: Policy & { report_only?: boolean; mutates_candidates?: boolean; mutates_weights?: boolean; legacy_control_can_promote?: boolean };
+};
+
+type DarkflowSetupExpectancyRow = ShadowUniquePlanStats & {
+  group_key: string;
+  strategy_family: string;
+  setup_type: string;
+  strategy_id: string;
+  strategy_name?: string;
+  symbol: string;
+  direction: string;
+  timeframe: string;
+  market_state: string;
+  evidence_source: string;
+  source_trade_count?: number;
+  sample_count?: number;
+  avg_r_multiple?: number | null;
+  median_r_multiple?: number | null;
+  avg_mfe?: number | null;
+  avg_mae?: number | null;
+  time_exit_share?: number | null;
+  take_profit_share?: number | null;
+  stop_loss_share?: number | null;
+  exit_reason_counts: Record<string, number>;
+};
+
 type DarkflowSampleTargets = {
   first_review?: number;
   validation?: number;
@@ -774,6 +842,8 @@ type ShadowUniquePlanStats = {
   total_trades?: number;
   open_trades?: number;
   closed_trades?: number;
+  valid_outcome_trades?: number;
+  invalid_outcome_trades?: number;
   win_rate?: number | null;
   profit_factor?: number | null;
   avg_pnl?: number | null;
@@ -814,6 +884,7 @@ type LoadState = {
   alphaScoreboard: DarkflowAlphaScoreboard | null;
   playbookAttribution: DarkflowPlaybookAttributionReport | null;
   darkflowRecommendations: DarkflowSubportfolioRecommendationsReport | null;
+  setupExpectancy: DarkflowSetupExpectancyReport | null;
   timeExitReview: DarkflowTimeExitReviewReport | null;
   trendExtensionExit: TrendExtensionExitReport | null;
   rulebook: RulebookReport | null;
@@ -850,6 +921,7 @@ const EMPTY_STATE: LoadState = {
   alphaScoreboard: null,
   playbookAttribution: null,
   darkflowRecommendations: null,
+  setupExpectancy: null,
   timeExitReview: null,
   trendExtensionExit: null,
   rulebook: null,
@@ -1019,6 +1091,9 @@ function App() {
     if (activePage === "shadow" && data.darkflowRecommendations === null && !errors.darkflowRecommendations) {
       void loadSection("darkflowRecommendations", () => fetchJson<DarkflowSubportfolioRecommendationsReport>("/shadow-paper/darkflow-subportfolio-recommendations", 16000));
     }
+    if (activePage === "shadow" && data.setupExpectancy === null && !errors.setupExpectancy) {
+      void loadSection("setupExpectancy", () => fetchJson<DarkflowSetupExpectancyReport>("/shadow-paper/darkflow-setup-expectancy", 16000));
+    }
     if (activePage === "shadow" && data.timeExitReview === null && !errors.timeExitReview) {
       void loadSection("timeExitReview", () => fetchJson<DarkflowTimeExitReviewReport>("/shadow-paper/darkflow-time-exit-review", 20000));
     }
@@ -1038,7 +1113,7 @@ function App() {
       if (data.featurePaperAb === null && !errors.featurePaperAb) void loadSection("featurePaperAb", () => fetchJson<FeaturePaperAbReport>("/features/paper-ab/latest?horizon=30m", 16000));
       if (data.featureSegmentPaperAb === null && !errors.featureSegmentPaperAb) void loadSection("featureSegmentPaperAb", () => fetchJson<FeaturePaperAbReport>("/features/segment-paper-ab/latest?horizon=30m", 16000));
     }
-  }, [activePage, data.backtestsLatest, data.playbookBacktest, data.paperStats, data.paperTrades, data.shadow, data.shadowTrades, data.alphaScoreboard, data.playbookAttribution, data.darkflowRecommendations, data.timeExitReview, data.trendExtensionExit, data.rulebook, data.playbooks, data.indicatorCoverage, data.experimentEffectiveness, data.featurePaperAb, data.featureSegmentPaperAb, errors.backtestsLatest, errors.playbookBacktest, errors.paperStats, errors.paperTrades, errors.shadow, errors.shadowTrades, errors.alphaScoreboard, errors.playbookAttribution, errors.darkflowRecommendations, errors.timeExitReview, errors.trendExtensionExit, errors.rulebook, errors.playbooks, errors.indicatorCoverage, errors.experimentEffectiveness, errors.featurePaperAb, errors.featureSegmentPaperAb]);
+  }, [activePage, data.backtestsLatest, data.playbookBacktest, data.paperStats, data.paperTrades, data.shadow, data.shadowTrades, data.alphaScoreboard, data.playbookAttribution, data.darkflowRecommendations, data.setupExpectancy, data.timeExitReview, data.trendExtensionExit, data.rulebook, data.playbooks, data.indicatorCoverage, data.experimentEffectiveness, data.featurePaperAb, data.featureSegmentPaperAb, errors.backtestsLatest, errors.playbookBacktest, errors.paperStats, errors.paperTrades, errors.shadow, errors.shadowTrades, errors.alphaScoreboard, errors.playbookAttribution, errors.darkflowRecommendations, errors.setupExpectancy, errors.timeExitReview, errors.trendExtensionExit, errors.rulebook, errors.playbooks, errors.indicatorCoverage, errors.experimentEffectiveness, errors.featurePaperAb, errors.featureSegmentPaperAb]);
 
   async function queueDarkflowAlphaAcceleration() {
     setTaskMessage("正在排队暗流 Alpha 加速巡检...");
@@ -1361,6 +1436,7 @@ function TradeDetailPane({ row }: { row: CardRow | null }) {
         <h3>交易结论</h3>
         <p>{tradeConclusion(row)}</p>
         {row.gateStatus && <div className="gateNotice"><strong>晋级闸门：{gateStatusText(row.gateStatus)}</strong><span>下一步：{gateNextActionText(row.gateNextAction)}</span></div>}
+        {row.promotionGate && <SetupExpectancyNotice sample={row.promotionGate} />}
         {row.duplicateCount > 1 && <div className="mergeNotice"><strong>同计划已折叠：</strong>{row.variantSummary}</div>}
         <div className="auditGrid">
           <AuditItem label="纸上交易" ok={row.paperEligible} text={row.paperEligible ? "允许" : "未允许"} />
@@ -1389,6 +1465,7 @@ function TradeDetailPane({ row }: { row: CardRow | null }) {
         <div>
           <h3>信号理由</h3>
           <ReasonList title="支持理由" items={row.supportingSignals.map(signalDetail)} empty="暂无支持信号，等待更多确认。" />
+          <ReasonList title="正期望证据" items={setupExpectancyReasonItems(row.promotionGate)} empty="该候选尚未匹配到同类暗流子组合的正期望证据。" />
           <ReasonList title="晋级闸门阻塞" items={row.gateBlockers.map(gateBlockerDetail)} empty="当前闸门没有阻塞项，等待人工复核。" warn />
           <ReasonList title="阻断风险" items={[...row.blockers, ...row.promotionBlockers].map(blockerDetail)} empty="暂无阻断风险。" warn />
         </div>
@@ -1510,6 +1587,7 @@ function ShadowPage({ data, rows, onAccelerate }: { data: LoadState; rows: CardR
   const alphaTotals = data.alphaScoreboard?.totals;
   const attributionRows = data.playbookAttribution?.rows ?? [];
   const recommendationRows = data.darkflowRecommendations?.rows ?? [];
+  const expectancyRows = data.setupExpectancy?.rows ?? [];
   const strategyActions = data.darkflowRecommendations?.strategy_actions ?? [];
   const whitelistRows = recommendationRows.filter((item) => item.recommendation === "whitelist").slice(0, 6);
   const whitelistProgressRows = recommendationRows.filter((item) => item.recommendation === "whitelist").slice(0, 8);
@@ -1605,6 +1683,10 @@ function ShadowPage({ data, rows, onAccelerate }: { data: LoadState; rows: CardR
           </div>
         )}
         {!recommendationRows.length && <StateBox type="empty" title="暂无子组合推荐" text="等待影子前向样本平仓后，系统会按玩法、币种、方向和市场状态给出白名单/黑名单建议。" />}
+      </Panel>
+      <Panel title="正期望证据表" subtitle={`按教程玩法、币种、方向、周期和市场状态聚合 · 更新时间 ${timeText(data.setupExpectancy?.generated_at)}`}>
+        <SetupExpectancyRows rows={expectancyRows} />
+        {!expectancyRows.length && <StateBox type="empty" title="暂无正期望证据" text="等待 Core Darkflow v2 影子前向样本闭合后，系统会显示胜率、盈利因子、R 倍数、时间退场占比和无效结果数量。" />}
       </Panel>
       <Panel title="影子统计口径" subtitle="默认看去重后的唯一市场暴露，原始交易记录仍完整保留">
         <p className="bodyText">唯一计划口径会把同一策略、币种、方向和相近入场计划的重复影子样本折叠后再计算胜率、盈利因子和回撤；原始口径用于审计数据库记录，不能单独作为晋级依据。</p>
@@ -1739,6 +1821,45 @@ function RecommendationColumn({ title, rows, empty }: { title: string; rows: Dar
   );
 }
 
+function SetupExpectancyRows({ rows }: { rows: DarkflowSetupExpectancyRow[] }) {
+  if (!rows.length) return null;
+  return (
+    <div className="alphaTable">
+      <div className="alphaHeader">
+        <span>教程玩法</span>
+        <span>市场分组</span>
+        <span>样本口径</span>
+        <span>收益质量</span>
+        <span>退出结构</span>
+      </div>
+      {rows.slice(0, 12).map((row) => (
+        <div className="alphaRow" key={row.group_key}>
+          <div>
+            <strong>{strategyText(row.strategy_id)}</strong>
+            <span>{setupTypeText(row.setup_type)} · {evidenceSourceText(row.evidence_source)}</span>
+          </div>
+          <div>
+            <strong>{row.symbol} · {directionText(row.direction)}</strong>
+            <span>{timeframeText(row.timeframe)} · {marketStateText(row.market_state)}</span>
+          </div>
+          <div>
+            <strong>有效 {fmt(row.sample_count ?? row.valid_outcome_trades, 0)} / 平仓 {fmt(row.closed_trades, 0)}</strong>
+            <span>无效结果 {fmt(row.invalid_outcome_trades, 0)} · 原始 {fmt(row.source_trade_count ?? row.total_trades, 0)}</span>
+          </div>
+          <div>
+            <strong>胜率 {pct(row.win_rate)} · PF {fmt(row.profit_factor, 2)}</strong>
+            <span>平均R {fmt(row.avg_r_multiple, 2)} · 中位R {fmt(row.median_r_multiple, 2)} · 回撤 {pct(row.max_drawdown)}</span>
+          </div>
+          <div>
+            <StatusBadge tone={(row.profit_factor ?? 0) >= 1.5 && (row.win_rate ?? 0) >= 0.6 ? "good" : row.invalid_outcome_trades ? "warn" : "info"} label={row.invalid_outcome_trades ? "含无效结果" : "结果有效"} />
+            <span>时间退场 {pct(row.time_exit_share)} · 止盈 {pct(row.take_profit_share)} · 止损 {pct(row.stop_loss_share)}</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function WhitelistProgressCard({ row }: { row: DarkflowRecommendationRow }) {
   const nextTarget = row.next_sample_target ?? row.sample_targets?.pre_paper ?? 200;
   const closed = Number(row.closed_trades ?? 0);
@@ -1759,6 +1880,23 @@ function WhitelistProgressCard({ row }: { row: DarkflowRecommendationRow }) {
         <span>{sampleStageText(row.sample_stage)}</span>
       </div>
       <p>{row.paper_review_ready ? "已达到第一复核样本线，但真实纸上复核仍需人工确认。" : "还没达到 30 笔第一复核线，不能拿它判断长期胜率。"}</p>
+    </div>
+  );
+}
+
+function SetupExpectancyNotice({ sample }: { sample: PromotionGateSample }) {
+  const evidence = setupExpectancyEvidence(sample);
+  if (!evidence) return null;
+  return (
+    <div className="gateNotice">
+      <strong>正期望：{setupExpectationText(String(evidence.classification || ""))}</strong>
+      <span>
+        样本 {fmt(evidence.sample_count ?? evidence.closed_trades, 0)}
+        {" · "}胜率 {pct(evidence.win_rate)}
+        {" · "}PF {fmt(evidence.profit_factor, 2)}
+        {" · "}时间退场 {pct(evidence.time_exit_share)}
+        {" · "}无效 {fmt(evidence.invalid_outcome_trades, 0)}
+      </span>
     </div>
   );
 }
@@ -1987,7 +2125,7 @@ function PaperTradingPage({ stats, trades }: { stats: PaperStats | null; trades:
         <Metric title="纸上盈利因子" value={fmt(stats?.profit_factor, 2)} detail={`目标样本 ${fmt(stats?.minimum_sample, 0)}-${fmt(stats?.sample_target, 0)}`} tone={Number(stats?.profit_factor ?? 0) >= 1.2 ? "good" : "warn"} />
         <Metric title="最大回撤" value={pct(stats?.max_drawdown)} detail={`平均 R ${fmt(stats?.avg_r_multiple, 2)}`} tone="warn" />
       </section>
-      {!stats?.sample_ready && <StateBox type="empty" title="纸上样本还不够定结论" text={`当前已平仓 ${fmt(stats?.closed_trades, 0)}，至少需要 ${fmt(stats?.minimum_sample, 0)} 条前向样本后，胜率和盈利因子才更可信。`} />}
+      {!stats?.sample_ready && <StateBox type="empty" title="纸上样本还不够定结论" text={`当前已平仓 ${fmt(stats?.closed_trades, 0)}，有效结果 ${fmt(stats?.valid_outcome_trades, 0)}，至少需要 ${fmt(stats?.minimum_sample, 0)} 条前向样本后，胜率和盈利因子才更可信。`} />}
       <section className="twoColumn">
         <Panel title="纸上权益曲线" subtitle="按已平仓纸上交易重建，仅用于前向验证">
           {equity.length > 1 ? <EquityChart points={equity} /> : <StateBox type="empty" title="权益曲线样本不足" text="等待更多纸上交易平仓后显示趋势。" />}
@@ -2013,7 +2151,7 @@ function PaperTradingPage({ stats, trades }: { stats: PaperStats | null; trades:
   );
 }
 
-type LedgerTrade = Pick<PaperTrade, "id" | "symbol" | "direction" | "entry_price" | "stop_loss" | "take_profit" | "status" | "exit_price" | "exit_reason" | "pnl" | "r_multiple" | "mfe" | "mae" | "opened_at" | "closed_at">;
+type LedgerTrade = Pick<PaperTrade, "id" | "symbol" | "direction" | "entry_price" | "stop_loss" | "take_profit" | "status" | "exit_price" | "exit_reason" | "pnl" | "r_multiple" | "mfe" | "mae" | "outcome" | "opened_at" | "closed_at">;
 
 function TradeLedger({ trades, empty }: { trades: LedgerTrade[]; empty: string }) {
   return (
@@ -2026,10 +2164,10 @@ function TradeLedger({ trades, empty }: { trades: LedgerTrade[]; empty: string }
           </div>
           <div className="tradeResultBlock">
             <strong>{tradePnlText(trade)}</strong>
-            <span>R {fmt(trade.r_multiple, 2)}</span>
+            <span>毛盈亏 {precisePct(tradeOutcome(trade).gross_pnl)} · R {fmt(tradeOutcome(trade).r_multiple ?? trade.r_multiple, 2)}</span>
           </div>
           <div className="tradeExitBlock">
-            <StatusBadge tone={exitReasonTone(trade.exit_reason, trade.status)} label={exitReasonText(trade.exit_reason || trade.status)} />
+            <StatusBadge tone={exitReasonTone(tradeOutcome(trade).exit_reason || trade.exit_reason, trade.status, tradeOutcome(trade).valid)} label={tradeExitReasonLabel(trade)} />
             <span>{tradeExitHint(trade)}</span>
           </div>
           <div className="tradeLevels">
@@ -2039,8 +2177,8 @@ function TradeLedger({ trades, empty }: { trades: LedgerTrade[]; empty: string }
             <span>出场 {fmt(trade.exit_price, 4)}</span>
           </div>
           <div className="tradeExcursion">
-            <span>最大浮盈 {signedPct(trade.mfe)}</span>
-            <span>最大浮亏 {signedPct(trade.mae)}</span>
+            <span>最大浮盈 {signedPct(tradeOutcome(trade).mfe ?? trade.mfe)}</span>
+            <span>最大浮亏 {signedPct(tradeOutcome(trade).mae ?? trade.mae)}</span>
             <small>{tradePostExitHint(trade)}</small>
           </div>
         </div>
@@ -2553,7 +2691,7 @@ function relevantLoadErrors(page: PageId, errors: LoadErrors): LoadErrors {
     experimentLab: ["indicatorCoverage", "experimentEffectiveness", "alphaScoreboard", "featurePaperAb", "featureSegmentPaperAb"],
     backtest: ["darkflow", "backtestsLatest", "playbookBacktest"],
     paperTrading: ["paperStats", "paperTrades"],
-    shadow: ["shadow", "shadowTrades", "alphaScoreboard", "playbookAttribution", "darkflowRecommendations", "timeExitReview", "trendExtensionExit"],
+    shadow: ["shadow", "shadowTrades", "alphaScoreboard", "playbookAttribution", "darkflowRecommendations", "setupExpectancy", "timeExitReview", "trendExtensionExit"],
     indicatorMap: ["rulebook", "playbooks", "indicatorCoverage"],
     legacyLab: ["featurePaperAb", "featureSegmentPaperAb"],
     dataFreshness: ["entryStates"],
@@ -2701,44 +2839,73 @@ function precisePct(value: unknown): string {
   return `${pctValue >= 0 ? "+" : ""}${pctValue.toFixed(digits)}%`;
 }
 function signedPct(value: unknown): string { return typeof value === "number" && Number.isFinite(value) ? precisePct(value) : "--"; }
+function tradeOutcome(trade: LedgerTrade): TradeOutcome {
+  return trade.outcome ?? {};
+}
 function tradePnlText(trade: LedgerTrade): string {
-  if (typeof trade.pnl === "number" && Number.isFinite(trade.pnl)) return precisePct(trade.pnl);
+  const outcome = tradeOutcome(trade);
+  if (outcome.valid === false) return "结果缺失";
+  const net = outcome.net_pnl ?? trade.pnl;
+  if (typeof net === "number" && Number.isFinite(net)) return precisePct(net);
   if (trade.status === "open") return "持仓中";
   return "--";
 }
 function tradeOutcomeTone(trade: LedgerTrade): string {
   if (trade.status === "open") return "open";
-  if (typeof trade.pnl !== "number" || !Number.isFinite(trade.pnl)) return "flat";
-  if (trade.pnl > 0) return "profit";
-  if (trade.pnl < 0) return "loss";
+  const outcome = tradeOutcome(trade);
+  if (outcome.valid === false) return "flat";
+  const net = outcome.net_pnl ?? trade.pnl;
+  if (typeof net !== "number" || !Number.isFinite(net)) return "flat";
+  if (net > 0) return "profit";
+  if (net < 0) return "loss";
   return "flat";
 }
-function exitReasonTone(reason?: string | null, status?: string): "good" | "warn" | "bad" | "info" | "normal" {
+function exitReasonTone(reason?: string | null, status?: string, valid?: boolean): "good" | "warn" | "bad" | "info" | "normal" {
   if (status === "open" || reason === "open") return "info";
-  if (reason === "take_profit") return "good";
+  if (valid === false) return "bad";
+  if (reason === "take_profit" || reason === "target_hit") return "good";
   if (reason === "stop_loss") return "bad";
   if (reason === "trailing_stop") return "warn";
-  if (reason === "shadow_forward_time_exit") return "warn";
+  if (reason === "shadow_forward_time_exit" || reason === "time_exit") return "warn";
   return "normal";
+}
+function tradeExitReasonLabel(trade: LedgerTrade): string {
+  const outcome = tradeOutcome(trade);
+  if (trade.status === "open") return "持仓中";
+  if (outcome.valid === false) return `结果缺失${outcome.missing_fields?.length ? `：${outcome.missing_fields.join(", ")}` : ""}`;
+  return outcome.exit_reason_label || exitReasonText(outcome.exit_reason || trade.exit_reason || trade.status);
 }
 function tradeExitHint(trade: LedgerTrade): string {
   if (trade.status === "open") return "未平仓，当前不显示最终 PnL";
-  if (trade.exit_reason === "take_profit") return "达到目标价或系统确认止盈";
-  if (trade.exit_reason === "stop_loss") return "触发止损价";
-  if (trade.exit_reason === "trailing_stop") return "移动止损保护利润";
-  if (trade.exit_reason === "shadow_forward_time_exit") return "影子前向观察时间结束";
+  const outcome = tradeOutcome(trade);
+  if (outcome.valid === false) return "该笔已平仓但缺少出场价、PnL 或出场原因，暂不计入胜率/盈利因子";
+  const reason = outcome.exit_reason || trade.exit_reason;
+  if (reason === "take_profit" || reason === "target_hit") return "达到目标价或系统确认止盈";
+  if (reason === "stop_loss") return "触发止损价";
+  if (reason === "trailing_stop") return "移动止损保护利润";
+  if (reason === "shadow_forward_time_exit" || reason === "time_exit") return "前向观察时间结束";
+  if (reason === "manual_close") return "人工手动平仓";
+  if (reason === "invalidated") return "入场或持仓条件被破坏";
   return "旧记录缺少出场原因，需要后续复盘补标";
 }
 function tradePostExitHint(trade: LedgerTrade): string {
   if (trade.status === "open") return "先看 MFE/MAE 判断当前浮盈浮亏范围";
-  if (trade.exit_reason === "stop_loss" && Number(trade.mfe ?? 0) > Math.abs(Number(trade.mae ?? 0))) return "止损前曾有浮盈，需复盘是否入场/止损过紧";
-  if (trade.exit_reason === "take_profit" && Number(trade.mfe ?? 0) > Math.abs(Number(trade.pnl ?? 0)) * 1.5) return "止盈后可能仍有延展空间";
+  const outcome = tradeOutcome(trade);
+  if (outcome.valid === false) return "无效结果不会进入表现统计";
+  const reason = outcome.exit_reason || trade.exit_reason;
+  const mfe = Number(outcome.mfe ?? trade.mfe ?? 0);
+  const mae = Number(outcome.mae ?? trade.mae ?? 0);
+  const net = Number(outcome.net_pnl ?? trade.pnl ?? 0);
+  if (reason === "stop_loss" && mfe > Math.abs(mae)) return "止损前曾有浮盈，需复盘是否入场/止损过紧";
+  if ((reason === "take_profit" || reason === "target_hit") && mfe > Math.abs(net) * 1.5) return "止盈后可能仍有延展空间";
   return "后续会接入出场后价格路径复盘";
 }
 function qualityText(value?: string) { return value === "ok" ? "正常" : value === "warning" ? "警告" : value === "error" ? "异常" : "未知"; }
 function directionText(value: string) { return value === "long" ? "做多" : value === "short" ? "做空" : value; }
 function timeframeText(value: string) { return value === "30m" ? "30分钟" : value === "1h" ? "1小时" : value === "4h" ? "4小时" : value; }
 function strategyText(value: string) { return ({ pullback_to_cost: "成本带回踩", liquidity_sweep_reversal: "扫损反转", breakout_confirmation: "突破确认", trend_ride_extension: "趋势延展", darkflow_entry_plan: "冻结入场计划" } as Record<string, string>)[value] ?? value.replace(/_/g, " "); }
+function setupTypeText(value: string) { return ({ first_touch_reversal: "首次触及反应", cost_pullback: "成本带回踩", liquidity_sweep: "清算扫损", breakout_confirmation: "突破确认", trend_extension: "趋势延展", exhaustion_exit_filter: "衰竭过滤", vacuum_acceleration: "真空加速", unknown_setup: "未标注形态" } as Record<string, string>)[value] ?? readableCode(value); }
+function evidenceSourceText(value: string) { return ({ shadow_forward: "影子前向", paper: "纸上交易", backtest: "回测", legacy_control: "旧研究对照" } as Record<string, string>)[value] ?? readableCode(value); }
 function marketStateText(value: string) { return ({ trend_pullback: "趋势回踩", cost_pullback: "成本回踩", sweep_reversal: "扫损反转", liquidity_hunt_reversal: "扫损反转", structure_breakout: "结构突破", trend_extension: "趋势延展", darkflow_zone_reaction: "暗流区域反应", invalidation_or_breakdown: "结构破坏" } as Record<string, string>)[value] ?? readableCode(value || "未知市场"); }
 function alphaTone(value: string) { return ({ 可进入人工复核: "good", 样本收集中: "info", 观察名单: "warn", 暂停观察: "bad" } as Record<string, string>)[value] ?? "info"; }
 function alphaSamplingAction(row: DarkflowAlphaRow) { if (row.conclusion === "可进入人工复核" || row.conclusion === "样本收集中") return "prioritize"; if (row.conclusion === "暂停观察") return "pause"; return "watch"; }
@@ -2779,6 +2946,9 @@ function blockerDetail(value: string): ReasonItem {
     fixed_r_target_fallback: { group: "目标", title: "目标价退回固定 R", text: "附近没有找到合格教程目标区，只能用固定 R 估算，因此目标可信度较低。", tone: "warn" },
     body_break_invalidation: { group: "失效", title: "实体破坏结构", text: "K 线实体已经穿过关键结构，原来的支撑/压制假设失效。", tone: "warn" },
     blocker_indicators_nearby: { group: "阻断", title: "附近有阻断类指标", text: "入场区域附近出现耗尽、反向大单或结构破坏信号，需要暂停追踪。", tone: "warn" },
+    setup_expectancy_collecting: { group: "正期望", title: "正期望样本仍在积累", text: "同类教程玩法、市场状态和方向的隔离影子样本还不够，暂时不能进入真实纸上复核。", tone: "warn" },
+    setup_expectancy_paused: { group: "正期望", title: "正期望证据偏弱", text: "同类暗流子组合的胜率、盈利因子、R 倍数或回撤没有达标，当前暂停晋级。", tone: "warn" },
+    setup_expectancy_blacklist: { group: "正期望", title: "黑名单隔离", text: "同类暗流子组合已经表现为负期望，先隔离补样并复核教程规则映射。", tone: "warn" },
   } as Record<string, ReasonItem>)[value] ?? { title: readableCode(value), text: "系统返回了新的阻断码，当前先按原始含义展示，后续可补充风控解释。", tone: "warn" };
 }
 function gateStatusText(value: string) { return ({ blocked: "晋级阻断", collecting: "继续积累影子样本", watching_entry: "观察入场区间", review_ready: "待人工复核", retired: "候选已退休" } as Record<string, string>)[value] ?? readableCode(value); }
@@ -2787,15 +2957,50 @@ function gateStatusHint(value: string) { return ({ blocked: "先处理主要阻�
 function gateNextActionText(value?: string) { return value || "等待 Promotion Gate 刷新下一步动作。"; }
 function gateBlockerDetail(item: PromotionGateBlocker): ReasonItem { return { group: gateBlockerGroupText(item), title: blockerText(item.code), text: item.message || blockerDetail(item.code).text, tone: item.severity === "blocker" ? "warn" : "normal" }; }
 function gateBlockerItems(sample: PromotionGateSample): PromotionGateBlocker[] { return Object.values(sample.blocker_groups ?? {}).flat(); }
-function gateBlockerGroupText(item: PromotionGateBlocker) { return ({ anti_repaint: "防重绘", shadow_forward: "影子前向", entry_plan: "入场计划", lineage: "主路径", market_quality: "市场质量", dedupe: "重复计划", risk_shape: "风险形态", data_freshness: "数据新鲜度" } as Record<string, string>)[item.code.split("_")[0]] ?? "晋级闸门"; }
+function gateBlockerGroupText(item: PromotionGateBlocker) {
+  const groups = [
+    ["setup_expectancy", "正期望"],
+    ["anti_repaint", "防重绘"],
+    ["shadow_forward", "影子前向"],
+    ["entry_plan", "入场计划"],
+    ["market_quality", "市场质量"],
+    ["risk_shape", "风险形态"],
+    ["data_freshness", "数据新鲜度"],
+    ["lineage", "主路径"],
+    ["dedupe", "重复计划"],
+  ] as const;
+  return groups.find(([prefix]) => item.code.startsWith(prefix))?.[1] ?? "晋级闸门";
+}
 function uniqueGateBlockers(items: PromotionGateBlocker[]) { const seen = new Set<string>(); return items.filter((item) => { const key = item.code; if (seen.has(key)) return false; seen.add(key); return true; }); }
+function setupExpectancyEvidence(sample?: PromotionGateSample): SetupExpectancyEvidence | null {
+  const summary = sample?.evidence_summary?.setup_expectancy as SetupExpectancyEvidence | null | undefined;
+  const direct = sample?.setup_expectancy as SetupExpectancyEvidence | null | undefined;
+  return summary || direct || null;
+}
+function setupExpectancyReasonItems(sample?: PromotionGateSample): ReasonItem[] {
+  const evidence = setupExpectancyEvidence(sample);
+  if (!evidence) return [];
+  const reasons = Array.isArray(evidence.reasons) && evidence.reasons.length ? evidence.reasons : ["等待更多同类暗流前向样本。"];
+  return [{
+    group: "正期望",
+    title: setupExpectationText(String(evidence.classification || "")),
+    text: `${reasons.join(" ")} 样本 ${fmt(evidence.sample_count ?? evidence.closed_trades, 0)}，胜率 ${pct(evidence.win_rate)}，PF ${fmt(evidence.profit_factor, 2)}，平均R ${fmt(evidence.avg_r_multiple, 2)}，回撤 ${pct(evidence.max_drawdown)}。`,
+    tone: setupExpectationReasonTone(String(evidence.classification || "")),
+  }];
+}
+function setupExpectationText(value: string) {
+  return ({ whitelist: "白名单补样", collecting: "继续补样", review_ready: "可人工复核", observe: "继续观察", pause: "暂停补样", blacklist: "黑名单隔离" } as Record<string, string>)[value] ?? "等待正期望证据";
+}
+function setupExpectationReasonTone(value: string): "good" | "warn" | "normal" {
+  return ({ whitelist: "good", review_ready: "good", observe: "warn", pause: "warn", blacklist: "warn" } as Record<string, "good" | "warn" | "normal">)[value] ?? "normal";
+}
 function normalizeGateState(gateStatus: string, fallbackStatus: string) { if (gateStatus === "watching_entry") return "waiting"; if (gateStatus === "review_ready") return "triggered"; if (gateStatus === "retired") return "expired"; if (gateStatus === "blocked") return "blocked"; return normalizeCardState(fallbackStatus); }
 function promotionText(value: string) { return ({ blocked: "研究阻断", shadow_ready_pending_audit: "待防重绘审计", shadow_forward_pending: "待影子入场", shadow_forward_collecting: "影子样本采集中", shadow_forward_failed: "影子样本未达标", entry_plan_retired: "入场计划已退休", duplicate_shadow_plan: "重复影子计划", shadow_market_paused: "弱势方向暂停", shadow_running: "影子运行中", paper_review_ready: "待人工复核" } as Record<string, string>)[value] ?? value.replace(/_/g, " "); }
 function auditText(value: string) { return ({ missing: "缺失", passed: "通过", failed: "失败" } as Record<string, string>)[value] ?? value; }
 function shadowText(value: string) { return ({ not_started: "未开始", collecting: "采集中", retired: "已退休", failed: "未达标", passed: "已达标", closed: "已结束" } as Record<string, string>)[value] ?? value; }
 function entryStateText(value: string) { return ({ triggered: "已触发", waiting: "等待入场", missed: "已错过", expired: "时间过期", invalidated: "条件作废", missing_price: "缺少价格", invalid_shape: "形态异常", entry_plan_retired: "入场计划已退休", blocked: "研究阻断", shadow_candidate: "影子候选" } as Record<string, string>)[value] ?? value.replace(/_/g, " "); }
 function stateReasonText(value: string) { return ({ mark_price_inside_frozen_entry_range: "价格进入冻结入场区间", awaiting_frozen_entry_range: "尚未进入冻结入场区间", entry_range_missed: "价格已越过入场区间", valid_until_passed: "超过有效期", price_crosses_invalidation: "触发失效价", missing_latest_price: "缺少最新价格", invalid_long_frozen_entry_range: "多头入场区间异常", invalid_short_frozen_entry_range: "空头入场区间异常" } as Record<string, string>)[value] ?? blockerText(value); }
-function sectionLabel(key: SectionKey) { return ({ summary: "系统摘要", quality: "数据质量", cards: "交易卡片", candidates: "候选池", promotionGate: "晋级闸门", entryStates: "入场计划", waitingCandidates: "等待入场候选", darkflow: "暗流交互回测", backtestsLatest: "批量回测", playbookBacktest: "剧本回测", paperStats: "纸上统计", paperTrades: "纸上交易明细", shadow: "影子纸上", shadowTrades: "影子交易明细", alphaScoreboard: "暗流 Alpha 记分牌", playbookAttribution: "剧本级前向归因", darkflowRecommendations: "子组合推荐", timeExitReview: "时间退出复盘", trendExtensionExit: "趋势延展退出评估", rulebook: "教程规则", playbooks: "策略剧本", indicatorCoverage: "指标覆盖", experimentEffectiveness: "实验有效性", featurePaperAb: "特征纸上 A/B", featureSegmentPaperAb: "分段纸上 A/B", safety: "安全开关" } as Record<SectionKey, string>)[key]; }
+function sectionLabel(key: SectionKey) { return ({ summary: "系统摘要", quality: "数据质量", cards: "交易卡片", candidates: "候选池", promotionGate: "晋级闸门", entryStates: "入场计划", waitingCandidates: "等待入场候选", darkflow: "暗流交互回测", backtestsLatest: "批量回测", playbookBacktest: "剧本回测", paperStats: "纸上统计", paperTrades: "纸上交易明细", shadow: "影子纸上", shadowTrades: "影子交易明细", alphaScoreboard: "暗流 Alpha 记分牌", playbookAttribution: "剧本级前向归因", darkflowRecommendations: "子组合推荐", setupExpectancy: "正期望证据", timeExitReview: "时间退出复盘", trendExtensionExit: "趋势延展退出评估", rulebook: "教程规则", playbooks: "策略剧本", indicatorCoverage: "指标覆盖", experimentEffectiveness: "实验有效性", featurePaperAb: "特征纸上 A/B", featureSegmentPaperAb: "分段纸上 A/B", safety: "安全开关" } as Record<SectionKey, string>)[key]; }
 function pageLabel(page: PageId) { return NAV_GROUPS.flatMap((group) => group.items).find((item) => item.id === page)?.label ?? page; }
 function pageTitleFromHash() { return pageLabel(pageFromHash()); }
 function pageFromHash(): PageId { const raw = window.location.hash.replace("#", ""); return NAV_GROUPS.flatMap((group) => group.items).some((item) => item.id === raw) ? raw as PageId : "overview"; }
@@ -2959,7 +3164,17 @@ function exitReasonPrimary(counts?: Record<string, number>) {
 }
 
 function exitReasonText(value: string) {
-  return ({ take_profit: "止盈", stop_loss: "止损", shadow_forward_time_exit: "时间退出", trailing_stop: "跟踪止损", open: "仍持仓" } as Record<string, string>)[value] ?? readableCode(value);
+  return ({
+    take_profit: "止盈",
+    target_hit: "止盈",
+    stop_loss: "止损",
+    shadow_forward_time_exit: "时间退场",
+    time_exit: "时间退场",
+    trailing_stop: "移动止损",
+    manual_close: "手动平仓",
+    invalidated: "条件作废",
+    open: "仍持仓",
+  } as Record<string, string>)[value] ?? readableCode(value);
 }
 
 function playbookText(value: string) {

@@ -14,6 +14,7 @@ from app.domain.trade_candidates.lifecycle import (
     PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED,
     normalized_promotion_blockers,
 )
+from app.domain.whitelist_blacklist_policy import classify_setup_expectancy
 
 
 GATE_STATUS_BLOCKED = "blocked"
@@ -35,6 +36,7 @@ class PromotionGateEvidence:
     promotion_blockers: tuple[str, ...] = ()
     entry_plan_state: dict[str, Any] | None = None
     shadow_stats: dict[str, Any] = field(default_factory=dict)
+    setup_expectancy: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,26 @@ def grouped_blockers(evidence: PromotionGateEvidence, raw_blockers: Iterable[str
         add_blocker(groups, "anti_repaint", PROMOTION_BLOCKER_ANTI_REPAINT_MISSING, "blocker", "防重绘证据缺失，不能证明信号在决策当时可见。")
     if evidence.shadow_status == "not_started" and PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING not in blockers:
         add_blocker(groups, "shadow_forward", PROMOTION_BLOCKER_SHADOW_FORWARD_MISSING, "waiting", "影子前向样本尚未开始积累。")
+    setup_decision = setup_expectancy_decision(evidence)
+    if setup_decision:
+        classification = str(setup_decision.get("classification") or "")
+        if classification in {"pause", "blacklist"}:
+            blocker_code = "setup_expectancy_paused" if classification == "pause" else "setup_expectancy_blacklist"
+            add_blocker(
+                groups,
+                "setup_expectancy",
+                blocker_code,
+                "blocker",
+                _setup_expectancy_message(setup_decision),
+            )
+        elif classification == "collecting":
+            add_blocker(
+                groups,
+                "setup_expectancy",
+                "setup_expectancy_collecting",
+                "waiting",
+                _setup_expectancy_message(setup_decision),
+            )
     return groups
 
 
@@ -95,6 +117,8 @@ def gate_status_for(evidence: PromotionGateEvidence, groups: dict[str, list[dict
     entry_state = str((evidence.entry_plan_state or {}).get("state") or "")
     if entry_state in {"waiting", "missing_price"}:
         return GATE_STATUS_WATCHING_ENTRY
+    if any(item["severity"] == "waiting" for item in groups.get("setup_expectancy", [])):
+        return GATE_STATUS_COLLECTING
     if evidence.promotion_status == "paper_review_ready":
         return GATE_STATUS_REVIEW_READY
     if evidence.shadow_status in {"collecting", "not_started"} or evidence.promotion_status in {"shadow_forward_collecting", "shadow_forward_pending"}:
@@ -134,7 +158,7 @@ def add_blocker(groups: dict[str, list[dict[str, str]]], category: str, code: st
 
 
 def primary_blocker(groups: dict[str, list[dict[str, str]]]) -> str | None:
-    priority = ["lineage", "anti_repaint", "entry_plan", "shadow_forward", "market_quality", "dedupe", "risk_shape", "data_freshness"]
+    priority = ["lineage", "anti_repaint", "entry_plan", "shadow_forward", "setup_expectancy", "market_quality", "dedupe", "risk_shape", "data_freshness"]
     for category in priority:
         for item in groups.get(category, []):
             if item["severity"] == "blocker":
@@ -158,11 +182,16 @@ def next_action_for(gate_status: str, primary: str | None) -> str:
         return "先生成或刷新 Anti-Repaint Evidence。"
     if primary == PROMOTION_BLOCKER_SHADOW_MARKET_PAUSED:
         return "暂停该市场方向的新样本，等待更多证据或策略复核。"
+    if primary == "setup_expectancy_collecting":
+        return "继续积累该教程玩法/市场状态的正期望样本，暂不进入真实纸上复核。"
+    if primary in {"setup_expectancy_pause", "setup_expectancy_paused", "setup_expectancy_blacklist"}:
+        return "该子组合正期望证据偏弱，暂停晋级；先复核规则或等待更多隔离样本。"
     return "处理主要阻塞项后重新刷新 Promotion Gate。"
 
 
 def evidence_summary(evidence: PromotionGateEvidence) -> dict[str, Any]:
     entry_state = evidence.entry_plan_state or {}
+    setup_decision = setup_expectancy_decision(evidence)
     return {
         "lineage": evidence.lineage,
         "candidate_status": evidence.status,
@@ -174,7 +203,41 @@ def evidence_summary(evidence: PromotionGateEvidence) -> dict[str, Any]:
         "shadow_closed_trades": evidence.shadow_stats.get("closed_trades"),
         "shadow_profit_factor": evidence.shadow_stats.get("profit_factor"),
         "shadow_win_rate": evidence.shadow_stats.get("win_rate"),
+        "setup_expectancy": setup_expectancy_summary(evidence, setup_decision),
     }
+
+
+def setup_expectancy_decision(evidence: PromotionGateEvidence) -> dict[str, Any] | None:
+    if not evidence.setup_expectancy:
+        return None
+    return classify_setup_expectancy(evidence.setup_expectancy)
+
+
+def setup_expectancy_summary(evidence: PromotionGateEvidence, decision: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not evidence.setup_expectancy:
+        return None
+    return {
+        "classification": decision.get("classification") if decision else None,
+        "display_text": decision.get("display_text") if decision else None,
+        "reason_codes": decision.get("reason_codes") if decision else [],
+        "reasons": decision.get("reasons") if decision else [],
+        "evidence_source": evidence.setup_expectancy.get("evidence_source"),
+        "sample_count": evidence.setup_expectancy.get("sample_count"),
+        "closed_trades": evidence.setup_expectancy.get("closed_trades"),
+        "invalid_outcome_trades": evidence.setup_expectancy.get("invalid_outcome_trades"),
+        "win_rate": evidence.setup_expectancy.get("win_rate"),
+        "profit_factor": evidence.setup_expectancy.get("profit_factor"),
+        "avg_r_multiple": evidence.setup_expectancy.get("avg_r_multiple"),
+        "median_r_multiple": evidence.setup_expectancy.get("median_r_multiple"),
+        "max_drawdown": evidence.setup_expectancy.get("max_drawdown"),
+        "time_exit_share": evidence.setup_expectancy.get("time_exit_share"),
+    }
+
+
+def _setup_expectancy_message(decision: dict[str, Any]) -> str:
+    reasons = " ".join(str(item) for item in (decision.get("reasons") or []))
+    display = str(decision.get("display_text") or "正期望证据")
+    return f"正期望证据：{display}。{reasons}".strip()
 
 
 def entry_message(state: str, reason: str) -> str:

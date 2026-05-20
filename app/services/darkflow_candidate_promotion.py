@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timedelta, timezone
-from statistics import mean
 from typing import Any
 
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.shadow_forward_samples import (
+    candidate_plan_fingerprint as _candidate_plan_fingerprint,
+    candidate_plan_fingerprint_from_trade as _candidate_plan_fingerprint_from_trade,
+    candidate_snapshot_matches_plan as _candidate_snapshot_matches_plan,
+    shadow_plan_fingerprint,
+    unique_shadow_plans,
+)
+from app.domain.setup_expectancy import setup_expectancy_rows
 from app.domain.trade_candidates.lifecycle import (
     CandidateLifecycleEvidence,
     AntiRepaintEvidence,
@@ -30,6 +37,7 @@ from app.domain.trade_candidates.promotion_gate import (
     decide_promotion_gate,
     promotion_gate_policy,
 )
+from app.domain.trade_outcomes import max_drawdown, summarize_trade_outcomes
 from app.models import DarkflowInteraction, ExperimentRun, PriceSnapshot, ShadowPaperTrade, SignalSnapshot, TradeCandidate, utc_now
 from app.services.darkflow_decision_cards import (
     decision_card_from_interaction,
@@ -161,6 +169,10 @@ async def open_darkflow_shadow_forward_samples(
         latest_prices=latest_prices,
         now=now,
         entry_tolerance_pct=entry_tolerance_pct,
+        priority_subportfolio_keys=priority_subportfolios,
+        paused_subportfolio_keys=paused_subportfolios,
+        whitelist_subportfolio_keys=whitelist_subportfolios,
+        deweighted_strategy_ids=deweighted_strategies,
     )
     open_plan_index = await _open_shadow_plan_index(session, rows)
     open_market_counts = _open_shadow_market_counts(open_plan_index)
@@ -470,6 +482,10 @@ async def refresh_darkflow_candidate_promotion(
             session,
             limit=limit,
             retire_expired_entry_plans=retire_expired_entry_plans,
+            priority_subportfolio_keys=priority_subportfolio_keys,
+            paused_subportfolio_keys=paused_subportfolio_keys,
+            whitelist_subportfolio_keys=whitelist_subportfolio_keys,
+            deweighted_strategy_ids=deweighted_strategy_ids,
         )
     audit = await audit_darkflow_trade_candidates(session, limit=limit, include_blocked=True)
     shadow = await open_darkflow_shadow_forward_samples(
@@ -505,6 +521,7 @@ async def darkflow_candidate_promotion_report(
     now = utc_now()
     latest_prices = await _latest_prices(session, sorted({candidate.symbol for candidate in rows}))
     stats_by_candidate = await _shadow_stats_by_candidate(session, [candidate.candidate_key for candidate in rows])
+    setup_expectancy_by_key = await _setup_expectancy_by_candidate_key(session, rows)
     counts: dict[str, int] = {}
     anti_counts: dict[str, int] = {}
     shadow_counts: dict[str, int] = {}
@@ -516,6 +533,7 @@ async def darkflow_candidate_promotion_report(
         anti_counts[candidate.anti_repaint_status] = anti_counts.get(candidate.anti_repaint_status, 0) + 1
         shadow_counts[candidate.shadow_status] = shadow_counts.get(candidate.shadow_status, 0) + 1
         stats = _candidate_stats(stats_by_candidate, candidate)
+        setup_expectancy = setup_expectancy_by_key.get(candidate.candidate_key, {})
         price_snapshot = latest_prices.get(candidate.symbol)
         price = price_snapshot["price"] if isinstance(price_snapshot, dict) else None
         if price is None or price <= 0:
@@ -527,7 +545,7 @@ async def darkflow_candidate_promotion_report(
                 now=now,
                 entry_tolerance_pct=DEFAULT_ENTRY_TOLERANCE_PCT,
             )
-        gate = _promotion_gate_report_row(candidate, entry_plan_state=entry_plan_state, shadow_stats=stats)
+        gate = _promotion_gate_report_row(candidate, entry_plan_state=entry_plan_state, shadow_stats=stats, setup_expectancy=setup_expectancy)
         gate_counts[gate["gate_status"]] = gate_counts.get(gate["gate_status"], 0) + 1
         if len(samples) < 25:
             samples.append(
@@ -542,6 +560,7 @@ async def darkflow_candidate_promotion_report(
                     "promotion_blockers": candidate.promotion_blockers,
                     "entry_plan_state": entry_plan_state,
                     "shadow_stats": stats,
+                    "setup_expectancy": setup_expectancy,
                     "gate_status": gate["gate_status"],
                     "primary_gate_blocker": gate["primary_blocker"],
                     "promotion_gate": gate,
@@ -568,6 +587,7 @@ def _promotion_gate_report_row(
     *,
     entry_plan_state: dict[str, Any],
     shadow_stats: dict[str, Any],
+    setup_expectancy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     decision = decide_promotion_gate(
         PromotionGateEvidence(
@@ -580,6 +600,7 @@ def _promotion_gate_report_row(
             promotion_blockers=tuple(_candidate_gate_blockers(candidate)),
             entry_plan_state=entry_plan_state,
             shadow_stats=shadow_stats,
+            setup_expectancy=setup_expectancy or {},
         )
     )
     return {
@@ -596,6 +617,7 @@ def _promotion_gate_report_row(
         "blocker_groups": decision.blocker_groups,
         "raw_blockers": decision.raw_blockers,
         "evidence_summary": decision.evidence_summary,
+        "setup_expectancy": setup_expectancy or {},
     }
 
 
@@ -933,7 +955,15 @@ def _sort_shadow_candidates_by_entry_readiness(
     latest_prices: dict[str, dict[str, Any]],
     now: datetime,
     entry_tolerance_pct: float,
+    priority_subportfolio_keys: set[str] | None = None,
+    paused_subportfolio_keys: set[str] | None = None,
+    whitelist_subportfolio_keys: set[str] | None = None,
+    deweighted_strategy_ids: set[str] | None = None,
 ) -> list[TradeCandidate]:
+    priority_subportfolios = priority_subportfolio_keys or set()
+    paused_subportfolios = paused_subportfolio_keys or set()
+    whitelist_subportfolios = whitelist_subportfolio_keys or set()
+    deweighted_strategies = deweighted_strategy_ids or set()
     readiness: list[tuple[tuple[int, float, datetime, datetime, str], TradeCandidate]] = []
     for candidate in candidates:
         state_rank, distance = _shadow_entry_readiness_rank(
@@ -942,10 +972,18 @@ def _sort_shadow_candidates_by_entry_readiness(
             now=now,
             entry_tolerance_pct=entry_tolerance_pct,
         )
+        policy_rank = _sampling_policy_rank(
+            candidate,
+            priority_subportfolio_keys=priority_subportfolios,
+            paused_subportfolio_keys=paused_subportfolios,
+            whitelist_subportfolio_keys=whitelist_subportfolios,
+            deweighted_strategy_ids=deweighted_strategies,
+        )
         readiness.append(
             (
                 (
                     state_rank,
+                    policy_rank,
                     -distance,
                     _aware(candidate.setup_time or datetime.min.replace(tzinfo=timezone.utc)),
                     _aware(candidate.updated_at or datetime.min.replace(tzinfo=timezone.utc)),
@@ -955,6 +993,24 @@ def _sort_shadow_candidates_by_entry_readiness(
             )
         )
     return [candidate for _key, candidate in sorted(readiness, key=lambda item: item[0], reverse=True)]
+
+
+def _sampling_policy_rank(
+    candidate: TradeCandidate,
+    *,
+    priority_subportfolio_keys: set[str],
+    paused_subportfolio_keys: set[str],
+    whitelist_subportfolio_keys: set[str],
+    deweighted_strategy_ids: set[str],
+) -> int:
+    subportfolio_key = _candidate_subportfolio_key(candidate)
+    if subportfolio_key in paused_subportfolio_keys:
+        return 0
+    if candidate.strategy_id in deweighted_strategy_ids and subportfolio_key not in whitelist_subportfolio_keys:
+        return 0
+    if subportfolio_key in priority_subportfolio_keys:
+        return 3
+    return 1
 
 
 def _shadow_entry_readiness_rank(
@@ -1086,21 +1142,7 @@ async def _shadow_stats(session: AsyncSession, candidate_key: str) -> dict[str, 
         .order_by(ShadowPaperTrade.opened_at)
     )
     trades = list(rows.all())
-    closed = [item for item in trades if item.status == "closed" and isinstance(item.pnl, (int, float))]
-    wins = [float(item.pnl) for item in closed if float(item.pnl or 0.0) > 0]
-    losses = [float(item.pnl) for item in closed if float(item.pnl or 0.0) < 0]
-    gross_win = sum(wins)
-    gross_loss = abs(sum(losses))
-    returns = [float(item.pnl or 0.0) for item in closed]
-    return {
-        "open_trades": sum(1 for item in trades if item.status == "open"),
-        "closed_trades": len(closed),
-        "total_trades": len(trades),
-        "win_rate": len(wins) / len(closed) if closed else None,
-        "avg_pnl": mean(returns) if returns else None,
-        "profit_factor": gross_win / gross_loss if gross_loss else (999.0 if gross_win else None),
-        "max_drawdown": _max_drawdown(returns),
-    }
+    return _candidate_trade_stats(trades)
 
 
 async def _shadow_stats_by_candidate(session: AsyncSession, candidate_keys: list[str]) -> dict[str, dict[str, Any]]:
@@ -1125,28 +1167,56 @@ def _candidate_stats(stats_by_candidate: dict[str, dict[str, Any]], candidate: T
     return stats_by_candidate.get(candidate.candidate_key) or _empty_candidate_stats()
 
 
-def _candidate_trade_stats(trades: list[ShadowPaperTrade]) -> dict[str, Any]:
-    closed = [item for item in trades if item.status == "closed" and isinstance(item.pnl, (int, float))]
-    wins = [float(item.pnl) for item in closed if float(item.pnl or 0.0) > 0]
-    losses = [float(item.pnl) for item in closed if float(item.pnl or 0.0) < 0]
-    gross_win = sum(wins)
-    gross_loss = abs(sum(losses))
-    returns = [float(item.pnl or 0.0) for item in closed]
-    return {
-        "open_trades": sum(1 for item in trades if item.status == "open"),
-        "closed_trades": len(closed),
-        "total_trades": len(trades),
-        "win_rate": len(wins) / len(closed) if closed else None,
-        "avg_pnl": mean(returns) if returns else None,
-        "profit_factor": gross_win / gross_loss if gross_loss else (999.0 if gross_win else None),
-        "max_drawdown": _max_drawdown(returns),
+async def _setup_expectancy_by_candidate_key(
+    session: AsyncSession,
+    candidates: list[TradeCandidate],
+) -> dict[str, dict[str, Any]]:
+    if not candidates:
+        return {}
+    symbols = sorted({candidate.symbol for candidate in candidates})
+    directions = sorted({candidate.direction for candidate in candidates})
+    rows = await session.scalars(
+        select(ShadowPaperTrade)
+        .where(
+            ShadowPaperTrade.strategy_name == DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+            ShadowPaperTrade.symbol.in_(symbols),
+            ShadowPaperTrade.direction.in_(directions),
+        )
+        .order_by(ShadowPaperTrade.opened_at)
+    )
+    expectancy_rows = setup_expectancy_rows(_unique_market_plan_trades(list(rows.all())), evidence_source="shadow_forward")
+    by_full_key = {str(row.get("group_key") or ""): row for row in expectancy_rows}
+    by_subportfolio = {
+        "|".join(
+            [
+                str(row.get("strategy_id") or ""),
+                str(row.get("symbol") or ""),
+                str(row.get("direction") or ""),
+                str(row.get("market_state") or ""),
+            ]
+        ): row
+        for row in expectancy_rows
     }
+    mapped: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        mapped[candidate.candidate_key] = (
+            by_full_key.get(_candidate_setup_expectancy_key(candidate))
+            or by_subportfolio.get(_candidate_subportfolio_key(candidate))
+            or {}
+        )
+    return mapped
+
+
+def _candidate_trade_stats(trades: list[ShadowPaperTrade]) -> dict[str, Any]:
+    return summarize_trade_outcomes(trades, no_loss_profit_factor=999.0, drawdown_mode="compound")
 
 
 def _empty_candidate_stats() -> dict[str, Any]:
     return {
         "open_trades": 0,
         "closed_trades": 0,
+        "valid_outcome_trades": 0,
+        "invalid_outcome_trades": 0,
         "total_trades": 0,
         "win_rate": None,
         "avg_pnl": None,
@@ -1434,64 +1504,48 @@ def _candidate_subportfolio_key(candidate: TradeCandidate) -> str:
     )
 
 
-def _unique_market_plan_trades(trades: list[ShadowPaperTrade]) -> list[ShadowPaperTrade]:
-    best_by_plan: dict[str, ShadowPaperTrade] = {}
-    for trade in trades:
-        key = _trade_market_plan_fingerprint(trade)
-        current = best_by_plan.get(key)
-        if current is None or _trade_market_plan_rank(trade) > _trade_market_plan_rank(current):
-            best_by_plan[key] = trade
-    return list(best_by_plan.values())
-
-
-def _trade_market_plan_rank(trade: ShadowPaperTrade) -> tuple[int, datetime, str]:
-    closed_rank = 1 if trade.status == "closed" and isinstance(trade.pnl, (int, float)) else 0
-    observed_at = trade.closed_at or trade.opened_at or datetime.min.replace(tzinfo=timezone.utc)
-    return (closed_rank, _aware(observed_at), trade.id)
-
-
-def _trade_market_plan_fingerprint(trade: ShadowPaperTrade) -> str:
-    context = trade.context if isinstance(trade.context, dict) else {}
-    explicit = context.get("shadow_plan_fingerprint")
-    if explicit:
-        return f"explicit:{explicit}"
-    snapshot = context.get("candidate_snapshot") if isinstance(context.get("candidate_snapshot"), dict) else {}
-    return ":".join(
+def _candidate_setup_expectancy_key(candidate: TradeCandidate) -> str:
+    return "|".join(
         [
-            trade.strategy_name,
-            str(snapshot.get("strategy_id") or trade.strategy_name),
-            trade.symbol,
-            trade.timeframe,
-            trade.direction,
-            _rounded_price_bucket(_float(snapshot.get("entry_price")) or trade.entry_price),
-            _rounded_price_bucket(_float(snapshot.get("stop_price")) or trade.stop_loss),
-            _rounded_price_bucket(_float(snapshot.get("target_price")) or trade.take_profit),
+            candidate.strategy_family,
+            candidate.setup_type,
+            candidate.strategy_id,
+            candidate.symbol,
+            candidate.direction,
+            candidate.timeframe,
+            candidate.market_state,
+            "shadow_forward",
         ]
     )
 
 
-def _market_trade_stats(trades: list[ShadowPaperTrade]) -> dict[str, Any]:
-    closed = sorted(
-        [item for item in trades if item.status == "closed" and isinstance(item.pnl, (int, float))],
-        key=lambda item: _aware(item.closed_at or item.opened_at or datetime.min.replace(tzinfo=timezone.utc)),
+def _unique_market_plan_trades(trades: list[ShadowPaperTrade]) -> list[ShadowPaperTrade]:
+    return unique_shadow_plans(trades, include_opened_slot=False, include_bucket_prefix=False)
+
+
+def _trade_market_plan_fingerprint(trade: ShadowPaperTrade) -> str:
+    return shadow_plan_fingerprint(
+        trade,
+        include_opened_slot=False,
+        include_bucket_prefix=False,
     )
-    wins = [float(item.pnl) for item in closed if float(item.pnl or 0.0) > 0]
-    losses = [float(item.pnl) for item in closed if float(item.pnl or 0.0) < 0]
-    gross_win = sum(wins)
-    gross_loss = abs(sum(losses))
-    returns = [float(item.pnl or 0.0) for item in closed]
-    return {
-        "open_trades": sum(1 for item in trades if item.status == "open"),
-        "closed_trades": len(closed),
-        "total_trades": len(trades),
-        "win_rate": len(wins) / len(closed) if closed else None,
-        "profit_factor": gross_win / gross_loss if gross_loss else (999.0 if gross_win else None),
-        "max_drawdown": _max_drawdown(returns),
-    }
+
+
+def _market_trade_stats(trades: list[ShadowPaperTrade]) -> dict[str, Any]:
+    return summarize_trade_outcomes(trades, no_loss_profit_factor=999.0, drawdown_mode="compound")
 
 
 def _empty_market_stats() -> dict[str, Any]:
-    return {"open_trades": 0, "closed_trades": 0, "total_trades": 0, "win_rate": None, "profit_factor": None, "max_drawdown": 0.0}
+    return {
+        "open_trades": 0,
+        "closed_trades": 0,
+        "valid_outcome_trades": 0,
+        "invalid_outcome_trades": 0,
+        "total_trades": 0,
+        "win_rate": None,
+        "profit_factor": None,
+        "max_drawdown": 0.0,
+    }
 
 
 async def _open_duplicate_shadow_plan(session: AsyncSession, candidate: TradeCandidate) -> ShadowPaperTrade | None:
@@ -1617,84 +1671,6 @@ def _trade_open_plan_index_keys(trade: ShadowPaperTrade) -> list[str]:
     if candidate_key:
         keys.add(f"candidate:{candidate_key}")
     return list(keys)
-
-
-def _candidate_plan_fingerprint_from_trade(trade: ShadowPaperTrade) -> str | None:
-    context = trade.context if isinstance(trade.context, dict) else {}
-    snapshot = context.get("candidate_snapshot") if isinstance(context.get("candidate_snapshot"), dict) else {}
-    strategy_id = str(snapshot.get("strategy_id") or "")
-    timeframe = str(snapshot.get("timeframe") or trade.timeframe or "")
-    entry = _float(snapshot.get("entry_price")) or float(trade.entry_price or 0.0)
-    stop = _float(snapshot.get("stop_price")) or float(trade.stop_loss or 0.0)
-    target = _float(snapshot.get("target_price")) or float(trade.take_profit or 0.0)
-    if not strategy_id or entry <= 0 or stop <= 0 or target <= 0:
-        return None
-    return ":".join(
-        [
-            strategy_id,
-            trade.symbol,
-            timeframe,
-            trade.direction,
-            _rounded_price_bucket(entry),
-            _rounded_price_bucket(stop),
-            _rounded_price_bucket(target),
-        ]
-    )
-
-
-def _candidate_plan_fingerprint(candidate: TradeCandidate) -> str | None:
-    if candidate.entry_price <= 0 or candidate.stop_price <= 0 or candidate.target_price <= 0:
-        return None
-    entry = _rounded_price_bucket(candidate.entry_price)
-    stop = _rounded_price_bucket(candidate.stop_price)
-    target = _rounded_price_bucket(candidate.target_price)
-    return ":".join(
-        [
-            candidate.strategy_id,
-            candidate.symbol,
-            candidate.timeframe,
-            candidate.direction,
-            entry,
-            stop,
-            target,
-        ]
-    )
-
-
-def _candidate_snapshot_matches_plan(candidate: TradeCandidate, snapshot: dict[str, Any]) -> bool:
-    if not snapshot:
-        return False
-    if str(snapshot.get("strategy_id") or "") != candidate.strategy_id:
-        return False
-    if str(snapshot.get("timeframe") or "") != candidate.timeframe:
-        return False
-    if _float(snapshot.get("entry_price")) is None or _float(snapshot.get("stop_price")) is None or _float(snapshot.get("target_price")) is None:
-        return False
-    return (
-        _same_price_bucket(candidate.entry_price, float(snapshot["entry_price"]))
-        and _same_price_bucket(candidate.stop_price, float(snapshot["stop_price"]))
-        and _same_price_bucket(candidate.target_price, float(snapshot["target_price"]))
-    )
-
-
-def _rounded_price_bucket(price: float) -> str:
-    if price >= 1000:
-        digits = 0
-    elif price >= 100:
-        digits = 1
-    elif price >= 10:
-        digits = 2
-    elif price >= 1:
-        digits = 4
-    else:
-        digits = 6
-    return f"{round(float(price), digits):.{digits}f}"
-
-
-def _same_price_bucket(left: float, right: float) -> bool:
-    if left <= 0 or right <= 0:
-        return False
-    return _rounded_price_bucket(left) == _rounded_price_bucket(right)
 
 
 def _update_shadow_lifecycle(candidate: TradeCandidate, stats: dict[str, Any], *, now: datetime) -> bool:
@@ -2085,15 +2061,7 @@ def _iso(value: datetime | None) -> str | None:
 
 
 def _max_drawdown(returns: list[float]) -> float:
-    equity = 1.0
-    peak = 1.0
-    drawdown = 0.0
-    for value in returns:
-        equity *= 1 + value
-        peak = max(peak, equity)
-        if peak:
-            drawdown = max(drawdown, (peak - equity) / peak)
-    return drawdown
+    return max_drawdown(returns)
 
 
 def _age_minutes(now: datetime, value: datetime | None) -> float | None:

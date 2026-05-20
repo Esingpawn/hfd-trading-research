@@ -5,6 +5,7 @@ from fastapi import APIRouter, Query
 from app.api.deps import SessionDep
 from app.services.shadow_paper import (
     darkflow_playbook_attribution_report,
+    darkflow_setup_expectancy_report,
     darkflow_subportfolio_recommendations_report,
     darkflow_time_exit_review_report,
     darkflow_trend_extension_exit_report,
@@ -98,6 +99,11 @@ async def get_darkflow_playbook_attribution(session: SessionDep) -> dict[str, ob
 @router.get("/shadow-paper/darkflow-subportfolio-recommendations")
 async def get_darkflow_subportfolio_recommendations(session: SessionDep) -> dict[str, object]:
     return await darkflow_subportfolio_recommendations_report(session)
+
+
+@router.get("/shadow-paper/darkflow-setup-expectancy")
+async def get_darkflow_setup_expectancy(session: SessionDep) -> dict[str, object]:
+    return await darkflow_setup_expectancy_report(session)
 
 
 @router.get("/shadow-paper/darkflow-trend-extension-exit")

@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from app.api.deps import SessionDep
 from app.api.shared import _market_cache_clear
+from app.domain.trade_outcomes import build_trade_outcome
 from app.models import PaperTrade, StrategyDecision
 from app.services.paper import mark_open_trades, paper_scan
 from app.services.paper_review import paper_trade_review
@@ -57,6 +58,7 @@ async def paper_trades(
             "r_multiple": trade.r_multiple,
             "mfe": trade.mfe,
             "mae": trade.mae,
+            "outcome": build_trade_outcome(trade, source="paper"),
             "opened_at": trade.opened_at,
             "closed_at": trade.closed_at,
         }

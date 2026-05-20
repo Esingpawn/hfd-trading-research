@@ -92,6 +92,7 @@ async def test_paper_trade_review_returns_decision_signals_and_current_state(ses
 
     assert review is not None
     assert review["trade"]["id"] == trade.id
+    assert review["trade"]["outcome"]["valid"] is True
     assert review["decision"]["score"] == 82.0
     assert review["current"]["return_pct"] == pytest.approx(0.03)
     assert review["review"]["signal_counts"]["helpful_4h"] == 1

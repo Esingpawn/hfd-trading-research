@@ -9,10 +9,12 @@ from app.models import ExperimentRun, FeatureEvent, FeatureLabel, PaperTrade, Pr
 from app.services.shadow_paper import (
     SHADOW_FEE_RATE,
     darkflow_playbook_attribution_report,
+    darkflow_setup_expectancy_report,
     darkflow_subportfolio_recommendations_report,
     darkflow_time_exit_review_report,
     darkflow_trend_extension_exit_report,
     mark_shadow_paper_trades,
+    shadow_paper_trades,
     shadow_paper_replay,
     shadow_paper_replay_all,
     shadow_paper_scan,
@@ -200,6 +202,44 @@ async def test_mark_shadow_paper_trades_time_closes_expired_darkflow_shadow_forw
     assert stored.context["max_hold_until"] == (now - timedelta(minutes=30)).isoformat()
     assert mark["policy"]["opens_paper_trades"] is False
     assert mark["policy"]["opens_live_orders"] is False
+
+
+@pytest.mark.asyncio
+async def test_shadow_paper_trades_exposes_darkflow_time_exit_outcome(session) -> None:
+    opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add(
+        ShadowPaperTrade(
+            strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+            candidate_type="trade_candidate",
+            candidate_key="darkflow-time-exit-candidate",
+            signal_key="darkflow-time-exit-signal",
+            symbol="BTCUSDT",
+            timeframe="30m",
+            direction="long",
+            entry_price=100.0,
+            stop_loss=98.0,
+            take_profit=105.0,
+            position_size=1.0,
+            status="closed",
+            exit_price=101.0,
+            exit_reason="shadow_forward_time_exit",
+            pnl=0.008,
+            r_multiple=0.4,
+            mfe=0.02,
+            mae=-0.005,
+            opened_at=opened_at,
+            closed_at=opened_at,
+            context={"shadow_forward": True},
+        )
+    )
+    await session.commit()
+
+    rows = await shadow_paper_trades(session, limit=5)
+
+    assert rows[0]["outcome"]["valid"] is True
+    assert rows[0]["outcome"]["exit_reason_label"] == "时间退场"
+    assert rows[0]["outcome"]["net_pnl"] == pytest.approx(0.008)
+    assert rows[0]["outcome"]["gross_pnl"] == pytest.approx(0.01)
 
 
 @pytest.mark.asyncio
@@ -483,6 +523,64 @@ async def test_shadow_paper_stats_groups_by_candidate(session) -> None:
     assert candidate_a["profit_factor"] == 2.0
     assert candidate_a["max_drawdown"] > 0
     assert stats["by_symbol"][0]["symbol"] in {"BTCUSDT", "ETHUSDT"}
+
+
+@pytest.mark.asyncio
+async def test_shadow_paper_stats_reports_invalid_closed_outcomes_without_counting_them_as_zero(session) -> None:
+    opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            ShadowPaperTrade(
+                strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+                candidate_type="trade_candidate",
+                candidate_key="candidate-valid",
+                signal_key="signal-valid",
+                symbol="BTCUSDT",
+                timeframe="30m",
+                direction="long",
+                entry_price=100.0,
+                stop_loss=98.0,
+                take_profit=104.0,
+                position_size=1.0,
+                status="closed",
+                exit_price=104.0,
+                exit_reason="take_profit",
+                pnl=0.02,
+                opened_at=opened_at,
+                closed_at=opened_at,
+                context={},
+            ),
+            ShadowPaperTrade(
+                strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1",
+                candidate_type="trade_candidate",
+                candidate_key="candidate-invalid",
+                signal_key="signal-invalid",
+                symbol="ETHUSDT",
+                timeframe="30m",
+                direction="long",
+                entry_price=100.0,
+                stop_loss=98.0,
+                take_profit=104.0,
+                position_size=1.0,
+                status="closed",
+                exit_price=None,
+                exit_reason=None,
+                pnl=None,
+                opened_at=opened_at,
+                closed_at=opened_at,
+                context={},
+            ),
+        ]
+    )
+    await session.commit()
+
+    stats = await shadow_paper_stats(session, strategy_name="darkflow_v2_trade_candidate_shadow_forward_v1")
+
+    assert stats["closed_trades"] == 2
+    assert stats["valid_outcome_trades"] == 1
+    assert stats["invalid_outcome_trades"] == 1
+    assert stats["avg_pnl"] == 0.02
+    assert stats["win_rate"] == 1.0
 
 
 @pytest.mark.asyncio
@@ -1035,6 +1133,66 @@ async def test_darkflow_subportfolio_recommendations_whitelists_strong_and_black
 
 
 @pytest.mark.asyncio
+async def test_darkflow_setup_expectancy_report_exposes_source_separated_expectancy(session) -> None:
+    opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            _darkflow_shadow_trade(
+                key="expectancy-win",
+                symbol="HYPEUSDT",
+                direction="long",
+                strategy_id="liquidity_sweep_reversal",
+                strategy_name="扫损反转",
+                market_state="liquidity_hunt_reversal",
+                pnl=0.03,
+                r_multiple=2.0,
+                exit_reason="take_profit",
+                opened_at=opened_at,
+            ),
+            _darkflow_shadow_trade(
+                key="expectancy-loss",
+                symbol="HYPEUSDT",
+                direction="long",
+                strategy_id="liquidity_sweep_reversal",
+                strategy_name="扫损反转",
+                market_state="liquidity_hunt_reversal",
+                pnl=-0.01,
+                r_multiple=-1.0,
+                exit_reason="shadow_forward_time_exit",
+                opened_at=opened_at + timedelta(minutes=1),
+            ),
+            _darkflow_shadow_trade(
+                key="expectancy-invalid",
+                symbol="HYPEUSDT",
+                direction="long",
+                strategy_id="liquidity_sweep_reversal",
+                strategy_name="扫损反转",
+                market_state="liquidity_hunt_reversal",
+                pnl=None,
+                r_multiple=None,
+                exit_reason="take_profit",
+                opened_at=opened_at + timedelta(minutes=2),
+            ),
+        ]
+    )
+    await session.commit()
+
+    report = await darkflow_setup_expectancy_report(session)
+    row = report["rows"][0]
+
+    assert report["dimension"] == "strategy_family+setup_type+strategy_id+symbol+direction+timeframe+market_state+evidence_source"
+    assert report["policy"]["report_only"] is True
+    assert report["policy"]["opens_paper_trades"] is False
+    assert report["policy"]["legacy_control_can_promote"] is False
+    assert row["evidence_source"] == "shadow_forward"
+    assert row["sample_count"] == 2
+    assert row["invalid_outcome_trades"] == 1
+    assert row["profit_factor"] == pytest.approx(3.0)
+    assert row["avg_r_multiple"] == pytest.approx(0.5)
+    assert row["time_exit_share"] == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
 async def test_darkflow_subportfolio_recommendations_marks_paper_review_ready_after_first_review_target(session) -> None:
     opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     session.add_all(
@@ -1141,7 +1299,8 @@ def _darkflow_shadow_trade(
     strategy_id: str,
     strategy_name: str,
     market_state: str,
-    pnl: float,
+    pnl: float | None,
+    r_multiple: float | None = None,
     exit_reason: str,
     opened_at: datetime,
 ) -> ShadowPaperTrade:
@@ -1160,6 +1319,7 @@ def _darkflow_shadow_trade(
         status="closed",
         exit_price=100.0,
         pnl=pnl,
+        r_multiple=r_multiple,
         exit_reason=exit_reason,
         opened_at=opened_at,
         closed_at=opened_at + timedelta(minutes=120),
@@ -1167,6 +1327,9 @@ def _darkflow_shadow_trade(
             "candidate_snapshot": {
                 "strategy_id": strategy_id,
                 "strategy_name": strategy_name,
+                "strategy_family": "darkflow_trade_candidates_v1",
+                "setup_type": "first_touch_reversal",
+                "timeframe": "short",
                 "market_state": market_state,
             },
             "shadow_plan_fingerprint": key,

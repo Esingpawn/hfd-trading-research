@@ -2288,8 +2288,9 @@
         { label:"方向", render: row => tag(row.direction, directionText(row.direction)) },
         { label:"来源", render: row => esc(row.candidate_type) },
         { label:"入场", render: row => fmt(row.entry_price, 4) },
-        { label:"状态", render: row => tag(row.status === "open" ? "neutral" : "ok", row.status) },
-        { label:"盈亏", render: row => coloredPct(row.pnl) }
+        { label:"出场", render: row => tradeExitReason(row) },
+        { label:"净/毛盈亏", render: row => tradePnlCell(row) },
+        { label:"结果", render: row => tradeOutcomeStatus(row) }
       ], "暂无影子纸上记录"));
       setHtml("shadowPaperHorizonStats", table((shadowPaperStats.by_horizon || []).slice(0, 6), [
         { label:"窗口", render: row => esc(row.horizon || "live") },
@@ -2338,8 +2339,9 @@
         { label:"方向", render: row => tag(row.direction, directionText(row.direction)) },
         { label:"入场价", render: row => fmt(row.entry_price, 6) },
         { label:"止盈/止损", render: row => `<span class="green">${fmt(row.take_profit, 6)}</span> / <span class="red">${fmt(row.stop_loss, 6)}</span>` },
-        { label:"MFE/MAE", render: row => `<span class="green">${pct(row.mfe || 0, 2)}</span> / <span class="red">${pct(row.mae || 0, 2)}</span>` },
-        { label:"盈亏", render: row => row.pnl === null || row.pnl === undefined ? "--" : `<span class="${row.pnl >= 0 ? "green" : "red"}">${pct(row.pnl, 2)}</span>` },
+        { label:"出场", render: row => tradeExitReason(row) },
+        { label:"MFE/MAE", render: row => tradeExcursionCell(row) },
+        { label:"净/毛盈亏", render: row => tradePnlCell(row) },
         { label:"状态", render: row => tag(row.status === "open" ? "open" : "neutral", row.status === "open" ? "持仓中" : "已平仓") }
       ];
       $("tradesTable").innerHTML = `<table><thead><tr>${columns.map(col => `<th>${col.label}</th>`).join("")}</tr></thead><tbody>` +
@@ -2395,13 +2397,16 @@
         return;
       }
       $("paperReviewSubtitle").textContent = `${trade.symbol} ${directionText(trade.direction)}，${outcomeStatusText(current.outcome_status)}`;
+      const tradeOutcome = trade.outcome || {};
       setHtml("paperReviewTrade", kvRows([
         ["币种", coinBadge(trade.symbol)],
         ["方向", tag(trade.direction, directionText(trade.direction))],
         ["状态", tag(trade.status === "open" ? "open" : "neutral", trade.status === "open" ? "持仓中" : "已平仓")],
         ["入场", fmt(trade.entry_price, 6)],
         ["现价/出场", fmt(current.mark_price, 6)],
-        ["收益", current.return_pct === null || current.return_pct === undefined ? "--" : `<span class="${current.return_pct >= 0 ? "green" : "red"}">${pct(current.return_pct, 2)}</span>`],
+        ["出场原因", tradeExitReason(trade)],
+        ["结果有效性", tradeOutcome.valid === false ? tag("bad", "结果缺失") : trade.status === "closed" ? tag("ok", "结果有效") : tag("open", "持仓中")],
+        ["收益", trade.status === "closed" ? tradePnlCell(trade) : coloredPct(current.return_pct)],
         ["止损距离", pct(current.distance_to_stop_pct, 2)],
         ["止盈距离", pct(current.distance_to_target_pct, 2)]
       ]));
@@ -2437,6 +2442,56 @@
     function coloredPct(value) {
       if (value === null || value === undefined || !Number.isFinite(Number(value))) return "--";
       return `<span class="${Number(value) >= 0 ? "green" : "red"}">${pct(Number(value), 2)}</span>`;
+    }
+
+    function tradeOutcome(row) {
+      return row && row.outcome ? row.outcome : {};
+    }
+
+    function tradeExitReason(row) {
+      const outcome = tradeOutcome(row);
+      if (row && row.status === "open") return tag("open", "持仓中");
+      const label = outcome.exit_reason_label || exitReasonText(row && row.exit_reason);
+      return label && label !== "--" ? esc(label) : `<span class="muted">未记录</span>`;
+    }
+
+    function tradeOutcomeStatus(row) {
+      const outcome = tradeOutcome(row);
+      if (row && row.status === "open") return tag("open", "持仓中");
+      if (outcome.valid === false) return tag("bad", `缺失 ${esc((outcome.missing_fields || []).join(", ") || "结果")}`);
+      return tag("ok", "结果有效");
+    }
+
+    function tradePnlCell(row) {
+      const outcome = tradeOutcome(row);
+      if (outcome.valid === false) return `<span class="amber">结果缺失</span>`;
+      const net = outcome.net_pnl !== undefined ? outcome.net_pnl : row && row.pnl;
+      const gross = outcome.gross_pnl;
+      if (net === null || net === undefined || !Number.isFinite(Number(net))) return "--";
+      const grossText = gross === null || gross === undefined || !Number.isFinite(Number(gross)) ? "--" : pct(gross, 2);
+      return `${coloredPct(net)} <span class="muted">/ 毛 ${grossText}</span>`;
+    }
+
+    function tradeExcursionCell(row) {
+      const outcome = tradeOutcome(row);
+      const mfe = outcome.mfe !== undefined ? outcome.mfe : row && row.mfe;
+      const mae = outcome.mae !== undefined ? outcome.mae : row && row.mae;
+      return `<span class="green">${pct(mfe, 2)}</span> / <span class="red">${pct(mae, 2)}</span>`;
+    }
+
+    function exitReasonText(value) {
+      const key = String(value || "");
+      const labels = {
+        take_profit: "止盈",
+        target_hit: "止盈",
+        stop_loss: "止损",
+        trailing_stop: "移动止损",
+        shadow_forward_time_exit: "时间退场",
+        time_exit: "时间退场",
+        manual_close: "手动平仓",
+        invalidated: "条件作废"
+      };
+      return labels[key] || (key ? key : "--");
     }
 
     function renderBacktests() {

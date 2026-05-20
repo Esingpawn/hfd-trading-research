@@ -90,6 +90,10 @@ def test_react_dashboard_exposes_promotion_gate_chinese_read_model() -> None:
     assert "继续积累影子样本" in source
     assert "主要阻塞" in source
     assert "下一步" in source
+    assert "正期望证据" in source
+    assert "setupExpectancyReasonItems" in source
+    assert "setupExpectationText" in source
+    assert "setup_expectancy" in source
 
 
 def test_react_candidate_pool_summarizes_promotion_gate_counts() -> None:
@@ -136,6 +140,11 @@ def test_react_dashboard_exposes_trade_ledger_precision_and_exit_reason() -> Non
     assert "precisePct" in source
     assert "最近影子交易" in source
     assert "红绿显示真实收益" in source
+    assert "TradeOutcome" in source
+    assert "tradeOutcome(trade)" in source
+    assert "结果缺失" in source
+    assert "毛盈亏" in source
+    assert "有效结果" in source
     assert "最大浮盈" in source
     assert "最大浮亏" in source
     assert "旧记录缺少出场原因" in source

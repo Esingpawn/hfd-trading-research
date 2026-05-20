@@ -20,6 +20,7 @@ def _decision(
     blockers: tuple[str, ...] = (),
     entry_plan_state: dict | None = None,
     shadow_stats: dict | None = None,
+    setup_expectancy: dict | None = None,
 ):
     return decide_promotion_gate(
         PromotionGateEvidence(
@@ -32,6 +33,7 @@ def _decision(
             promotion_blockers=blockers,
             entry_plan_state=entry_plan_state or {"state": "triggered", "reason": "mark_price_inside_frozen_entry_range"},
             shadow_stats=shadow_stats or {},
+            setup_expectancy=setup_expectancy or {},
         )
     )
 
@@ -125,6 +127,54 @@ def test_gate_marks_review_ready_only_after_evidence_and_entry_are_ready() -> No
     assert decision.primary_blocker is None
     assert decision.blocker_groups == {}
     assert "人工复核" in decision.next_action
+
+
+def test_gate_blocks_review_ready_when_setup_expectancy_is_paused() -> None:
+    decision = _decision(
+        promotion_status="paper_review_ready",
+        shadow_status="passed",
+        shadow_stats={"closed_trades": 12, "win_rate": 0.58, "profit_factor": 1.3, "max_drawdown": 0.05},
+        setup_expectancy={
+            "evidence_source": "shadow_forward",
+            "sample_count": 6,
+            "closed_trades": 6,
+            "win_rate": 0.3,
+            "profit_factor": 0.8,
+            "max_drawdown": 0.04,
+            "time_exit_share": 0.2,
+            "invalid_outcome_trades": 0,
+        },
+    )
+
+    assert decision.gate_status == "blocked"
+    assert decision.primary_blocker == "setup_expectancy_paused"
+    assert decision.blocker_groups["setup_expectancy"][0]["severity"] == "blocker"
+    assert "正期望" in decision.blocker_groups["setup_expectancy"][0]["message"]
+    assert decision.evidence_summary["setup_expectancy"]["classification"] == "pause"
+    assert decision.evidence_summary["setup_expectancy"]["profit_factor"] == 0.8
+
+
+def test_gate_collects_when_setup_expectancy_is_not_mature() -> None:
+    decision = _decision(
+        promotion_status="paper_review_ready",
+        shadow_status="passed",
+        shadow_stats={"closed_trades": 12, "win_rate": 0.58, "profit_factor": 1.3, "max_drawdown": 0.05},
+        setup_expectancy={
+            "evidence_source": "shadow_forward",
+            "sample_count": 2,
+            "closed_trades": 2,
+            "win_rate": 1.0,
+            "profit_factor": 999.0,
+            "max_drawdown": 0.0,
+            "time_exit_share": 0.0,
+            "invalid_outcome_trades": 0,
+        },
+    )
+
+    assert decision.gate_status == "collecting"
+    assert decision.primary_blocker == "setup_expectancy_collecting"
+    assert decision.blocker_groups["setup_expectancy"][0]["severity"] == "waiting"
+    assert "继续积累" in decision.next_action
 
 
 def test_gate_retires_entry_or_duplicate_plans() -> None:

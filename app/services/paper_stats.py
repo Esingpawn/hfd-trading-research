@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.trade_outcomes import max_drawdown, profit_factor, summarize_trade_outcomes
 from app.models import PaperTrade
 
 
@@ -49,33 +50,10 @@ def _group_by(trades: list[PaperTrade], key_fn) -> list[dict[str, Any]]:
 
 
 def _group_stats(trades: list[PaperTrade]) -> dict[str, Any]:
-    closed = [trade for trade in trades if trade.status == "closed"]
     open_trades = [trade for trade in trades if trade.status == "open"]
-    pnl_values = [float(trade.pnl or 0.0) for trade in closed]
-    wins = [value for value in pnl_values if value > 0]
-    losses = [value for value in pnl_values if value < 0]
-    gross_profit = sum(wins)
-    gross_loss = abs(sum(losses))
-    total_pnl = sum(pnl_values)
-    r_values = [float(trade.r_multiple) for trade in closed if trade.r_multiple is not None]
     open_mfe = [float(trade.mfe or 0.0) for trade in open_trades]
     open_mae = [float(trade.mae or 0.0) for trade in open_trades]
-    return {
-        "total_trades": len(trades),
-        "open_trades": len(open_trades),
-        "closed_trades": len(closed),
-        "win_count": len(wins),
-        "loss_count": len(losses),
-        "win_rate": len(wins) / len(closed) if closed else None,
-        "avg_pnl": total_pnl / len(closed) if closed else None,
-        "total_pnl": total_pnl,
-        "gross_profit": gross_profit,
-        "gross_loss": gross_loss,
-        "profit_factor": _profit_factor(gross_profit, gross_loss),
-        "max_drawdown": _max_drawdown(pnl_values),
-        "avg_r_multiple": sum(r_values) / len(r_values) if r_values else None,
-        "best_trade": max(pnl_values) if pnl_values else None,
-        "worst_trade": min(pnl_values) if pnl_values else None,
+    return summarize_trade_outcomes(trades) | {
         "open_mfe": max(open_mfe) if open_mfe else None,
         "open_mae": min(open_mae) if open_mae else None,
     }
@@ -101,20 +79,8 @@ def _open_exposure(open_trades: list[PaperTrade]) -> list[dict[str, Any]]:
 
 
 def _profit_factor(gross_profit: float, gross_loss: float) -> float | None:
-    if gross_loss:
-        return gross_profit / gross_loss
-    if gross_profit:
-        return float("inf")
-    return None
+    return profit_factor(gross_profit, gross_loss)
 
 
 def _max_drawdown(returns: list[float]) -> float:
-    equity = 1.0
-    peak = 1.0
-    max_drawdown = 0.0
-    for value in returns:
-        equity *= 1 + value
-        peak = max(peak, equity)
-        if peak:
-            max_drawdown = max(max_drawdown, (peak - equity) / peak)
-    return max_drawdown
+    return max_drawdown(returns)

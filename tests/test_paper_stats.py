@@ -59,6 +59,22 @@ def test_summarize_closed_paper_trades() -> None:
     assert stats["avg_r_multiple"] == 0.5
 
 
+def test_summarize_closed_paper_trades_keeps_missing_pnl_out_of_performance() -> None:
+    stats = summarize_paper_trades(
+        [
+            trade("closed", pnl=0.02, r_multiple=2.0),
+            trade("closed", pnl=None, r_multiple=None),
+        ]
+    )
+
+    assert stats["closed_trades"] == 2
+    assert stats["valid_outcome_trades"] == 1
+    assert stats["invalid_outcome_trades"] == 1
+    assert stats["avg_pnl"] == 0.02
+    assert stats["total_pnl"] == 0.02
+    assert stats["win_rate"] == 1.0
+
+
 def test_summarize_groups_by_symbol_direction_and_tier() -> None:
     stats = summarize_paper_trades(
         [

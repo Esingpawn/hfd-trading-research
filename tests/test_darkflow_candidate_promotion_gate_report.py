@@ -99,6 +99,131 @@ async def test_promotion_report_adds_read_only_gate_counts_and_samples(session) 
     assert report["samples"][0]["promotion_gate"]["gate_status"] == "review_ready"
 
 
+@pytest.mark.asyncio
+async def test_promotion_report_shadow_stats_exclude_invalid_closed_outcomes_from_performance(session) -> None:
+    now = datetime.now(timezone.utc)
+    candidate = _candidate(
+        "gate-invalid-shadow-stats",
+        symbol="BTCUSDT",
+        setup_time=now,
+        promotion_status="shadow_forward_collecting",
+        anti_repaint_status="passed",
+        shadow_status="collecting",
+    )
+    session.add(candidate)
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=now, created_at=now))
+    session.add_all(
+        [
+            ShadowPaperTrade(
+                strategy_name=DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+                candidate_type="trade_candidate",
+                candidate_key=candidate.candidate_key,
+                signal_key="gate-invalid-shadow-valid",
+                symbol="BTCUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=100.0,
+                stop_loss=99.0,
+                take_profit=102.0,
+                position_size=1.0,
+                status="closed",
+                pnl=0.02,
+                opened_at=now - timedelta(minutes=40),
+                closed_at=now - timedelta(minutes=20),
+                context={},
+            ),
+            ShadowPaperTrade(
+                strategy_name=DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+                candidate_type="trade_candidate",
+                candidate_key=candidate.candidate_key,
+                signal_key="gate-invalid-shadow-invalid",
+                symbol="BTCUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=100.0,
+                stop_loss=99.0,
+                take_profit=102.0,
+                position_size=1.0,
+                status="closed",
+                pnl=None,
+                opened_at=now - timedelta(minutes=35),
+                closed_at=now - timedelta(minutes=15),
+                context={},
+            ),
+        ]
+    )
+    await session.commit()
+
+    report = await darkflow_candidate_promotion_report(session, limit=10)
+    sample = report["samples"][0]
+
+    assert sample["shadow_stats"]["closed_trades"] == 2
+    assert sample["shadow_stats"]["valid_outcome_trades"] == 1
+    assert sample["shadow_stats"]["invalid_outcome_trades"] == 1
+    assert sample["shadow_stats"]["avg_pnl"] == pytest.approx(0.02)
+    assert sample["shadow_stats"]["win_rate"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_promotion_report_includes_setup_expectancy_gate_evidence(session) -> None:
+    now = datetime.now(timezone.utc)
+    candidate = _candidate(
+        "gate-weak-setup-expectancy",
+        symbol="BTCUSDT",
+        setup_time=now,
+        promotion_status="paper_review_ready",
+        anti_repaint_status="passed",
+        shadow_status="passed",
+    )
+    session.add(candidate)
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=now, created_at=now))
+    session.add_all(
+        [
+            ShadowPaperTrade(
+                strategy_name=DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+                candidate_type="trade_candidate",
+                candidate_key=f"weak-peer-{index}",
+                signal_key=f"weak-peer-{index}",
+                symbol="BTCUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=100.0,
+                stop_loss=99.0,
+                take_profit=102.0,
+                position_size=1.0,
+                status="closed",
+                pnl=-0.02,
+                exit_reason="stop_loss",
+                opened_at=now - timedelta(minutes=60 + index),
+                closed_at=now - timedelta(minutes=30 + index),
+                context={
+                    "candidate_snapshot": {
+                        "strategy_family": "darkflow_v2",
+                        "setup_type": "wick_pierce_reclaim",
+                        "strategy_id": "pullback_to_cost",
+                        "strategy_name": "Pullback To Cost",
+                        "timeframe": "short",
+                        "market_state": "trend_pullback",
+                    },
+                    "shadow_plan_fingerprint": f"weak-peer-{index}",
+                },
+            )
+            for index in range(6)
+        ]
+    )
+    await session.commit()
+
+    report = await darkflow_candidate_promotion_report(session, limit=10)
+    gate = report["gate_samples"][0]
+
+    assert gate["gate_status"] == "blocked"
+    assert gate["primary_blocker"] == "setup_expectancy_blacklist"
+    assert gate["blocker_groups"]["setup_expectancy"][0]["severity"] == "blocker"
+    assert gate["evidence_summary"]["setup_expectancy"]["classification"] == "blacklist"
+    assert gate["evidence_summary"]["setup_expectancy"]["sample_count"] == 6
+    assert report["samples"][0]["setup_expectancy"]["profit_factor"] == pytest.approx(0.0)
+
+
 def _candidate(
     candidate_key: str,
     *,

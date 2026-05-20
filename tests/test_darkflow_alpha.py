@@ -119,6 +119,71 @@ async def test_darkflow_alpha_scoreboard_groups_shadow_forward_by_playbook_symbo
 
 
 @pytest.mark.asyncio
+async def test_darkflow_alpha_scoreboard_reports_invalid_closed_outcomes_without_counting_them_as_zero(session) -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            _shadow_trade(
+                "valid-win",
+                candidate_key="candidate-valid",
+                symbol="BTCUSDT",
+                direction="long",
+                strategy_id="pullback_to_cost",
+                market_state="trend_pullback",
+                pnl=0.02,
+                opened_at=base,
+            ),
+            ShadowPaperTrade(
+                strategy_name=DARKFLOW_V2_SHADOW_STRATEGY_NAME,
+                candidate_type="trade_candidate",
+                candidate_key="candidate-invalid",
+                signal_key="invalid-signal",
+                symbol="BTCUSDT",
+                timeframe="short",
+                direction="long",
+                entry_price=100.0,
+                stop_loss=99.0,
+                take_profit=103.0,
+                position_size=1.0,
+                status="closed",
+                pnl=None,
+                r_multiple=None,
+                opened_at=base + timedelta(minutes=1),
+                closed_at=base + timedelta(minutes=31),
+                context={
+                    "horizon": "live",
+                    "shadow_forward": True,
+                    "shadow_plan_fingerprint": "invalid-plan",
+                    "candidate_snapshot": {
+                        "candidate_key": "candidate-invalid",
+                        "strategy_id": "pullback_to_cost",
+                        "strategy_name": "Pullback To Cost",
+                        "symbol": "BTCUSDT",
+                        "timeframe": "short",
+                        "interval": "30m",
+                        "direction": "long",
+                        "market_state": "trend_pullback",
+                        "entry_price": 100.0,
+                        "stop_price": 99.0,
+                        "target_price": 103.0,
+                    },
+                },
+            ),
+        ]
+    )
+    await session.commit()
+
+    report = await darkflow_alpha_scoreboard(session, limit=10, min_closed_trades=1)
+    row = report["rows"][0]
+
+    assert row["closed_trades"] == 2
+    assert row["valid_outcome_trades"] == 1
+    assert row["invalid_outcome_trades"] == 1
+    assert row["avg_pnl"] == pytest.approx(0.02)
+    assert row["win_rate"] == 1.0
+
+
+@pytest.mark.asyncio
 async def test_darkflow_alpha_sampling_plan_prioritizes_strong_groups_and_pauses_weak_groups(session) -> None:
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
     session.add_all(
@@ -597,6 +662,117 @@ async def test_deweighted_strategy_allows_whitelisted_subportfolio_only(session)
     assert whitelist_trade.context["darkflow_recommendation_gate"]["reason"] == "darkflow_subportfolio_whitelist"
     assert deweighted_candidate is not None
     assert deweighted_candidate.decision_payload["darkflow_recommendation_gate"]["reason"] == "darkflow_strategy_deweighted_non_whitelist"
+
+
+@pytest.mark.asyncio
+async def test_accelerate_darkflow_alpha_blocks_blacklist_during_materialization(session) -> None:
+    now = datetime.now(timezone.utc)
+    history_base = now - timedelta(hours=3)
+    session.add_all(
+        [
+            _shadow_trade(
+                f"blacklist-materialize-history-{index}",
+                candidate_key=f"blacklist-materialize-history-candidate-{index}",
+                symbol="BTCUSDT",
+                direction="long",
+                strategy_id="trend_ride_extension",
+                market_state="trend_extension",
+                pnl=-0.02,
+                opened_at=history_base + timedelta(minutes=index),
+            )
+            for index in range(6)
+        ]
+    )
+    source = _source_interaction(
+        interaction_key="blacklist-materialize-source",
+        playbook="trend_ride_extension",
+        setup_time=now - timedelta(minutes=12),
+    )
+    session.add(source)
+    session.add(PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=now, created_at=now))
+    await session.commit()
+
+    result = await accelerate_darkflow_alpha(
+        session,
+        candidate_limit=10,
+        shadow_limit=5,
+        materialize=True,
+        mark_first=False,
+        entry_tolerance_pct=0.01,
+        paused_group_exploration_limit=3,
+    )
+
+    candidate = await session.scalar(select(TradeCandidate).where(TradeCandidate.candidate_key == "darkflow-card:v2:blacklist-materialize-source"))
+    shadow_rows = (await session.scalars(select(ShadowPaperTrade).where(ShadowPaperTrade.candidate_key == "darkflow-card:v2:blacklist-materialize-source"))).all()
+    materialize = result["steps"]["promotion_refresh"]["materialize"]
+    shadow = result["steps"]["promotion_refresh"]["shadow_forward"]
+
+    assert candidate is None
+    assert shadow_rows == []
+    assert materialize["sampling_policy_skipped_count"] == 1
+    assert materialize["sampling_policy_retired_count"] == 0
+    assert materialize["rows"][0]["action"] == "skipped_sampling_policy"
+    assert materialize["rows"][0]["sampling_gate"]["reason"] == "darkflow_subportfolio_recommendation_paused"
+    assert shadow["opened_count"] == 0
+    assert result["sampling_plan"]["paused_subportfolio_count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_accelerate_darkflow_alpha_prioritizes_whitelist_during_materialization(session) -> None:
+    now = datetime.now(timezone.utc)
+    history_base = now - timedelta(hours=3)
+    session.add_all(
+        [
+            _shadow_trade(
+                f"whitelist-materialize-history-{index}",
+                candidate_key=f"whitelist-materialize-history-candidate-{index}",
+                symbol="HYPEUSDT",
+                direction="long",
+                strategy_id="liquidity_sweep_reversal",
+                market_state="liquidity_hunt_reversal",
+                pnl=0.02,
+                opened_at=history_base + timedelta(minutes=index),
+            )
+            for index in range(6)
+        ]
+    )
+    whitelist_source = _source_interaction(
+        interaction_key="whitelist-materialize-source",
+        playbook="liquidity_sweep_reversal",
+        symbol="HYPEUSDT",
+        setup_time=now - timedelta(minutes=20),
+    )
+    neutral_source = _source_interaction(
+        interaction_key="neutral-materialize-source",
+        playbook="pullback_to_cost",
+        symbol="BTCUSDT",
+        setup_time=now - timedelta(minutes=10),
+    )
+    session.add_all([whitelist_source, neutral_source])
+    session.add_all(
+        [
+            PriceSnapshot(symbol="HYPEUSDT", price=100.0, raw_payload={}, collected_at=now, created_at=now),
+            PriceSnapshot(symbol="BTCUSDT", price=100.0, raw_payload={}, collected_at=now, created_at=now),
+        ]
+    )
+    await session.commit()
+
+    result = await accelerate_darkflow_alpha(
+        session,
+        candidate_limit=10,
+        shadow_limit=1,
+        materialize=True,
+        mark_first=False,
+        entry_tolerance_pct=0.01,
+    )
+
+    opened = result["steps"]["promotion_refresh"]["shadow_forward"]["opened"]
+    whitelist_trade = await session.scalar(select(ShadowPaperTrade).where(ShadowPaperTrade.candidate_key == "darkflow-card:v2:whitelist-materialize-source"))
+
+    assert result["steps"]["promotion_refresh"]["materialize"]["sampling_policy_prioritized_count"] == 1
+    assert opened[0]["candidate_key"] == "darkflow-card:v2:whitelist-materialize-source"
+    assert whitelist_trade is not None
+    assert whitelist_trade.context["darkflow_recommendation_gate"]["reason"] == "darkflow_subportfolio_whitelist"
 
 
 @pytest.mark.asyncio

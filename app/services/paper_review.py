@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.trade_outcomes import build_trade_outcome
 from app.models import PaperTrade, PriceSnapshot, SignalObservation, StrategyDecision
 from app.services.paper_stats import summarize_paper_trades
 
@@ -122,6 +123,7 @@ def _trade_payload(trade: PaperTrade) -> dict[str, Any]:
         "r_multiple": trade.r_multiple,
         "mfe": trade.mfe,
         "mae": trade.mae,
+        "outcome": build_trade_outcome(trade, source="paper"),
         "opened_at": trade.opened_at,
         "closed_at": trade.closed_at,
         "duration_minutes": _duration_minutes(trade.opened_at, trade.closed_at),

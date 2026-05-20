@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from statistics import mean
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.shadow_forward_samples import candidate_snapshot as _candidate_snapshot
+from app.domain.shadow_forward_samples import unique_shadow_plans
 from app.domain.research_lineage.registry import CORE_DARKFLOW_V2
+from app.domain.trade_outcomes import max_drawdown, summarize_trade_outcomes
 from app.models import ShadowPaperTrade, utc_now
 from app.services.darkflow_candidate_promotion import (
     DARKFLOW_V2_SHADOW_STRATEGY_NAME,
@@ -385,76 +387,22 @@ def _strategy_name(trades: list[ShadowPaperTrade]) -> str:
     return first.strategy_name if first is not None else "unknown"
 
 
-def _candidate_snapshot(trade: ShadowPaperTrade) -> dict[str, Any]:
-    context = trade.context if isinstance(trade.context, dict) else {}
-    snapshot = context.get("candidate_snapshot")
-    return snapshot if isinstance(snapshot, dict) else {}
-
-
 def _unique_plan_trades(trades: list[ShadowPaperTrade]) -> list[ShadowPaperTrade]:
-    best_by_plan: dict[str, ShadowPaperTrade] = {}
-    for trade in trades:
-        key = _trade_plan_fingerprint(trade)
-        current = best_by_plan.get(key)
-        if current is None or _trade_plan_rank(trade) > _trade_plan_rank(current):
-            best_by_plan[key] = trade
-    return list(best_by_plan.values())
-
-
-def _trade_plan_rank(trade: ShadowPaperTrade) -> tuple[int, datetime, str]:
-    closed_rank = 1 if trade.status == "closed" and isinstance(trade.pnl, (int, float)) else 0
-    observed_at = trade.closed_at or trade.opened_at or datetime.min.replace(tzinfo=timezone.utc)
-    return (closed_rank, _aware(observed_at), trade.id)
-
-
-def _trade_plan_fingerprint(trade: ShadowPaperTrade) -> str:
-    context = trade.context if isinstance(trade.context, dict) else {}
-    explicit = context.get("shadow_plan_fingerprint")
-    if explicit:
-        return f"explicit:{explicit}"
-    snapshot = _candidate_snapshot(trade)
-    entry = _number(snapshot.get("entry_price")) or float(trade.entry_price)
-    stop = _number(snapshot.get("stop_price")) or float(trade.stop_loss)
-    target = _number(snapshot.get("target_price")) or float(trade.take_profit)
-    opened_slot = _aware(trade.opened_at).replace(minute=0, second=0, microsecond=0).isoformat() if trade.opened_at else "unknown"
-    return ":".join(
-        [
-            "bucket",
-            trade.strategy_name,
-            str(snapshot.get("strategy_id") or trade.strategy_name),
-            trade.symbol,
-            trade.timeframe,
-            trade.direction,
-            opened_slot,
-            _rounded_price_bucket(entry),
-            _rounded_price_bucket(stop),
-            _rounded_price_bucket(target),
-        ]
-    )
+    return unique_shadow_plans(trades)
 
 
 def _trade_stats(trades: list[ShadowPaperTrade]) -> dict[str, Any]:
-    closed = sorted(
-        [item for item in trades if item.status == "closed" and isinstance(item.pnl, (int, float))],
-        key=lambda item: _aware(item.closed_at or item.opened_at or datetime.min.replace(tzinfo=timezone.utc)),
+    stats = summarize_trade_outcomes(
+        trades,
+        no_loss_profit_factor=999.0,
+        drawdown_mode="additive",
     )
-    wins = [float(item.pnl) for item in closed if float(item.pnl or 0.0) > 0]
-    losses = [float(item.pnl) for item in closed if float(item.pnl or 0.0) < 0]
-    gross_win = sum(wins)
-    gross_loss = abs(sum(losses))
-    returns = [float(item.pnl or 0.0) for item in closed]
     opened_times = [item.opened_at for item in trades if item.opened_at]
-    closed_times = [item.closed_at for item in closed if item.closed_at]
+    closed_times = [item.closed_at for item in trades if item.status == "closed" and isinstance(item.pnl, (int, float)) and item.closed_at]
     return {
-        "open_trades": sum(1 for item in trades if item.status == "open"),
-        "closed_trades": len(closed),
-        "total_trades": len(trades),
-        "win_rate": len(wins) / len(closed) if closed else None,
-        "avg_pnl": mean(returns) if returns else None,
-        "profit_factor": gross_win / gross_loss if gross_loss else (999.0 if gross_win else None),
-        "gross_win": gross_win,
-        "gross_loss": gross_loss,
-        "max_drawdown": _max_drawdown(returns),
+        **stats,
+        "gross_win": stats["gross_profit"],
+        "gross_loss": stats["gross_loss"],
         "latest_opened_at": _iso(max(opened_times)) if opened_times else None,
         "latest_closed_at": _iso(max(closed_times)) if closed_times else None,
     }
@@ -528,28 +476,7 @@ def _conclusion_rank(conclusion: str) -> int:
 
 
 def _max_drawdown(returns: list[float]) -> float:
-    equity = 0.0
-    peak = 0.0
-    max_dd = 0.0
-    for value in returns:
-        equity += value
-        peak = max(peak, equity)
-        max_dd = max(max_dd, peak - equity)
-    return max_dd
-
-
-def _rounded_price_bucket(price: float) -> str:
-    if price >= 1000:
-        digits = 0
-    elif price >= 100:
-        digits = 1
-    elif price >= 10:
-        digits = 2
-    elif price >= 1:
-        digits = 4
-    else:
-        digits = 6
-    return f"{round(float(price), digits):.{digits}f}"
+    return max_drawdown(returns, mode="additive")
 
 
 def _number(value: Any) -> float | None:
