@@ -954,14 +954,19 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
-    title: "信号闭环",
+    title: "正期望闭环",
     items: [
-      { id: "experimentLab", label: "实验室", icon: FlaskConical, enabled: true },
       { id: "backtest", label: "回测中心", icon: BarChart3, enabled: true },
       { id: "paperTrading", label: "纸上交易", icon: Database, enabled: true },
       { id: "shadow", label: "影子交易", icon: LineChart, enabled: true },
       { id: "indicatorMap", label: "指标教程映射", icon: BookOpen, enabled: true },
-      { id: "legacyLab", label: "Legacy 对照", icon: FileWarning, enabled: true },
+      { id: "experimentLab", label: "有效性审计", icon: FlaskConical, enabled: true },
+    ],
+  },
+  {
+    title: "研究归档",
+    items: [
+      { id: "legacyLab", label: "旧研究对照", icon: FileWarning, enabled: true, hint: "只做历史对照，不参与开仓" },
     ],
   },
   {
@@ -1296,7 +1301,7 @@ function OverviewPage({ data, rows, onNavigate }: { data: LoadState; rows: CardR
           <div className="actionList">
             <ActionItem icon={Layers3} title="先看交易卡片" text="查看每个信号的入场区间、风控审计、阻断理由和雷达图。" action="打开交易卡片" onClick={() => onNavigate("tradeCards")} />
             <ActionItem icon={TimerReset} title="再看入场计划" text="区分等待、错过、过期和作废，确认可开仓点位是否仍有效。" action="查看入场计划" onClick={() => onNavigate("entryPlans")} />
-            <ActionItem icon={FlaskConical} title="追踪信号闭环" text="实验室、回测、纸上和影子交易决定一个指标能不能真正进入评分。" action="打开实验室" onClick={() => onNavigate("experimentLab")} />
+            <ActionItem icon={FlaskConical} title="做有效性审计" text="只看哪些暗流 setup 真的改善正期望，旧研究不再当作开仓证据。" action="打开审计" onClick={() => onNavigate("experimentLab")} />
             <ActionItem icon={CircleDot} title="最后看数据新鲜度" text="判断当前没有机会是市场安静，还是采集和候选管道滞后。" action="查看新鲜度" onClick={() => onNavigate("dataFreshness")} />
           </div>
         </Panel>

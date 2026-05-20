@@ -1,4 +1,7 @@
-from app.main import app
+from fastapi.testclient import TestClient
+
+from app.api.deps import get_session
+from app.main import app, create_app
 
 
 def test_task_enqueue_exposes_research_quality_params() -> None:
@@ -19,6 +22,65 @@ def test_task_enqueue_exposes_research_quality_params() -> None:
     assert "mark_first" in query_params
     assert "force" in query_params
     assert "confirmation_window_minutes" in query_params
+
+
+def _task_enqueue_client(monkeypatch) -> TestClient:
+    async def fake_session():
+        yield object()
+
+    async def fake_enqueue_task(session, *, task_name: str, payload: dict | None = None):
+        return {
+            "task_run_id": "test-task-run",
+            "status": "recorded",
+            "task_name": task_name,
+            "payload": payload or {},
+        }
+
+    monkeypatch.setattr("app.api.routers.tasks.enqueue_task", fake_enqueue_task)
+    test_app = create_app()
+    test_app.dependency_overrides[get_session] = fake_session
+    return TestClient(test_app)
+
+
+def test_task_enqueue_rejects_unknown_task_without_force(monkeypatch) -> None:
+    client = _task_enqueue_client(monkeypatch)
+
+    response = client.post("/tasks/enqueue", params={"task_name": "one_off.cleanup"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "unknown_task_requires_force"
+
+
+def test_task_enqueue_rejects_legacy_research_task_without_force(monkeypatch) -> None:
+    client = _task_enqueue_client(monkeypatch)
+
+    response = client.post("/tasks/enqueue", params={"task_name": "features.research_reports"})
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "non_production_task_requires_force"
+    assert detail["lineage"] == "legacy_feature_research"
+    assert detail["heavy"] is True
+
+
+def test_task_enqueue_allows_legacy_research_task_with_force(monkeypatch) -> None:
+    client = _task_enqueue_client(monkeypatch)
+
+    response = client.post("/tasks/enqueue", params={"task_name": "features.research_reports", "force": "true"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["task_name"] == "features.research_reports"
+    assert body["payload"]["force"] is True
+
+
+def test_task_enqueue_allows_core_darkflow_task_without_force(monkeypatch) -> None:
+    client = _task_enqueue_client(monkeypatch)
+
+    response = client.post("/tasks/enqueue", params={"task_name": "darkflow.alpha_accelerate"})
+
+    assert response.status_code == 200
+    assert response.json()["task_name"] == "darkflow.alpha_accelerate"
 
 
 def test_expected_api_routes_are_registered() -> None:

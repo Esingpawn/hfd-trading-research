@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from app.api.deps import SessionDep
+from app.application.task_catalog import task_spec
 from app.application.tasks import enqueue_task, recent_tasks
 
 router = APIRouter()
@@ -67,6 +68,27 @@ async def enqueue_task_api(
     refresh_labeled: bool = Query(default=False),
     force: bool | None = Query(default=None),
 ) -> dict[str, object]:
+    spec = task_spec(task_name)
+    if spec is None and force is not True:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "unknown_task_requires_force",
+                "message": "未知任务默认不允许排队；如确认是一次性维护任务，请显式传 force=true。",
+                "task_name": task_name,
+            },
+        )
+    if spec is not None and not spec.production_allowed and force is not True:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "non_production_task_requires_force",
+                "message": "Legacy/Control 或重研究任务默认不允许排队，避免干扰暗流 v2 主路径；如确认为归档对照任务，请显式传 force=true。",
+                "task_name": task_name,
+                "lineage": spec.lineage,
+                "heavy": spec.heavy,
+            },
+        )
     payload = _task_enqueue_payload(
         coins=coins,
         timeframes=timeframes,
