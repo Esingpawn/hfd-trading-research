@@ -2,6 +2,9 @@ FROM node:24-alpine AS dashboard-build
 
 WORKDIR /web
 
+ARG NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
+ENV NPM_CONFIG_REGISTRY=$NPM_CONFIG_REGISTRY
+
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 
@@ -17,7 +20,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN apt-get update \
+ARG APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn
+RUN sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}/debian|g; s|http://deb.debian.org/debian-security|${APT_MIRROR}/debian-security|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends curl libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
