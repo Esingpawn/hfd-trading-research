@@ -11,7 +11,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-hfd_dev_redis_password}@redis:6379/0
       RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
       EXTERNALIZE_RAW_PAYLOADS: "true"
       LIVE_TRADING_ENABLED: "false"
@@ -46,7 +46,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-hfd_dev_redis_password}@redis:6379/0
       RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
       EXTERNALIZE_RAW_PAYLOADS: "true"
       LIVE_TRADING_ENABLED: "false"
@@ -99,7 +99,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-hfd_dev_redis_password}@redis:6379/0
       RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
       EXTERNALIZE_RAW_PAYLOADS: "true"
       LIVE_TRADING_ENABLED: "false"
@@ -143,7 +143,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-hfd_dev_redis_password}@redis:6379/0
       RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
       EXTERNALIZE_RAW_PAYLOADS: "true"
       LIVE_TRADING_ENABLED: "false"
@@ -196,7 +196,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-hfd_dev_redis_password}@redis:6379/0
       RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
       EXTERNALIZE_RAW_PAYLOADS: "true"
       LIVE_TRADING_ENABLED: "false"
@@ -241,7 +241,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-hfd_dev_redis_password}@redis:6379/0
       RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
       EXTERNALIZE_RAW_PAYLOADS: "true"
       LIVE_TRADING_ENABLED: "false"
@@ -278,7 +278,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://hfd:${POSTGRES_PASSWORD:-hfd_dev_password}@postgres:5432/hfd
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-hfd_dev_redis_password}@redis:6379/0
       RAW_PAYLOAD_DIR: /var/lib/hfd/raw_payloads
       EXTERNALIZE_RAW_PAYLOADS: "true"
       LIVE_TRADING_ENABLED: "false"
@@ -343,7 +343,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-hfd_dev_redis_password}"]
     volumes:
       - hfd_redis:/data
     restart: unless-stopped
