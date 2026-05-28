@@ -87,6 +87,15 @@ bash scripts/linux/maintain-db.sh
 bash scripts/linux/backup-postgres.sh
 ```
 
+进入极限收紧模式：
+
+```bash
+bash scripts/linux/tight-mode.sh
+bash scripts/linux/tight-mode.sh --apply --keep-days 3
+```
+
+极限收紧模式只保留 `api`、`postgres`、`redis` 核心服务，停止采集、纸上交易、影子/研究 worker，并清理 Docker 容器日志与旧 raw payload。默认是 dry-run；只有加 `--apply` 才会删除旧 raw 文件。
+
 ## 5. 更新部署
 
 当前生产环境使用 Git 工作区 `/opt/hfd-git.tmp` 部署。`docker-compose.yml` 已固定 `name: hfd`，因此从该目录运行 Compose 仍会使用现有 `hfd_*` 容器和数据卷。
@@ -123,7 +132,40 @@ docker compose run --rm api alembic upgrade head
 docker compose up -d
 ```
 
-## 6. 当前边界
+## 6. 极限收紧模式
+
+当前线上默认采用低耗运行形态：`docker compose up -d` 只启动核心服务。
+
+默认启动：
+
+- `api`
+- `postgres`
+- `redis`
+
+默认不启动：
+
+- `collector-worker`
+- `paper-worker`
+- `waiting-worker`
+- `task-worker`
+- `darkflow-worker`
+- `experiment-worker`
+
+确实需要短时间恢复普通 worker 时，显式使用 profile：
+
+```bash
+docker compose --profile workers up -d collector-worker paper-worker waiting-worker task-worker
+```
+
+确实需要短时间恢复研究 worker 时，显式使用：
+
+```bash
+docker compose --profile research up -d darkflow-worker
+```
+
+不要在磁盘可用空间低于 20GB 时启动研究 worker。不要再跑全量 raw payload 采集，除非先迁移存储或调整采集逻辑为只保存入选候选证据。
+
+## 7. 当前边界
 
 当前 Docker Compose 已完成服务器基础运行形态，但还不是最终生产架构。
 
@@ -137,7 +179,7 @@ docker compose up -d
 - 更完整的备份恢复流程。
 - 实盘交易安全门禁。
 
-## 7. 安全要求
+## 8. 安全要求
 
 - 不提交 `.env`。
 - 不提交数据库文件。
