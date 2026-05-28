@@ -37,6 +37,7 @@ services:
       retries: 3
 
   collector-worker:
+    profiles: ["workers"]
     build:
       context: .
       args:
@@ -87,9 +88,10 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
-    restart: unless-stopped
+    restart: "no"
 
   paper-worker:
+    profiles: ["workers"]
     build:
       context: .
       args:
@@ -131,9 +133,10 @@ services:
       - hfd_raw_payloads:/var/lib/hfd/raw_payloads
       - hfd_runtime:/app/data/runtime
       - hfd_logs:/app/data/logs
-    restart: unless-stopped
+    restart: "no"
 
   experiment-worker:
+    profiles: ["research"]
     build:
       context: .
       args:
@@ -184,9 +187,10 @@ services:
       - hfd_raw_payloads:/var/lib/hfd/raw_payloads
       - hfd_runtime:/app/data/runtime
       - hfd_logs:/app/data/logs
-    restart: unless-stopped
+    restart: "no"
 
   darkflow-worker:
+    profiles: ["research"]
     build:
       context: .
       args:
@@ -229,9 +233,10 @@ services:
       - hfd_raw_payloads:/var/lib/hfd/raw_payloads
       - hfd_runtime:/app/data/runtime
       - hfd_logs:/app/data/logs
-    restart: unless-stopped
+    restart: "no"
 
   waiting-worker:
+    profiles: ["workers"]
     build:
       context: .
       args:
@@ -266,9 +271,10 @@ services:
       - hfd_raw_payloads:/var/lib/hfd/raw_payloads
       - hfd_runtime:/app/data/runtime
       - hfd_logs:/app/data/logs
-    restart: unless-stopped
+    restart: "no"
 
   task-worker:
+    profiles: ["workers"]
     build:
       context: .
       args:
@@ -301,7 +307,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
-    restart: unless-stopped
+    restart: "no"
 
   db-init:
     build: .
